@@ -1,0 +1,83 @@
+# Listingo 任务清单
+
+最后更新：2026-07-17
+
+- [x] 1. 创建前后端骨架、锁定依赖，并生成 `README.md`、`TECH_STACK.md`、`SPEC.md`、`开发计划.md`、`TASKS.md`。
+- [x] 2. 实现 SQLite 模型、Alembic 迁移、加密密钥和四类预置模型。
+- [x] 3. 导入核心 Meta Prompt，完成版本管理、JSON 契约和 Workflow 注册表。
+- [x] 4. 实现 Dryrun 状态机、真实 LLM/Image Provider、回退、并发和安全日志。
+- [x] 5. 完成一期 DesignKit 风格工作台、上传配置、进度、结果和失败重试。
+- [x] 6. 完成单图真实二次编辑、版本历史、任务历史和批量 ZIP。
+- [x] 7. 完成二至四期交互 Demo 和统一四期导航。
+- [x] 8. 完成模型、Workflow、提示词和日志后台。
+- [x] 9. 完成自动化测试、Live 冒烟测试入口、视觉对比、响应式修复与交接文档复核。
+- [x] 10. 修复结果卡片勾选图标对齐、Nano 2 正式型号、Provider 连通测试、分辨率/尺寸下拉与 Image 2 generate/edit 能力路由。
+- [x] 11. 完成 Prompt/Workflow 运行耦合审计，并为 Live Prompt 增加平台、市场、语言、商品信息和品牌风格的显式变量块。
+- [ ] 12. 使用 GPT‑5.4‑Mini 或 Qwen‑3.6 有效密钥执行一次完整 Live Meta Prompt → JSON → 带字套图端到端验收。
+- [ ] 13. 在非受限运行环境完成 Image 2 generations 与 edits 各一次计费生图并验证结果文件；当前已完成模型目录连通和请求体回归测试。
+- [x] 14. 明确 Nano 2 没有 OpenAI Images 的 `size` 字段，并将请求体修正为 `generationConfig.responseFormat.image.imageSize` 与 `aspectRatio`。
+- [x] 15. 完成智能匹配/自定义套图结构交互，自定义四类各限制 0–4 张，并把精确数量写入任务 JSON 与核心 Prompt 运行时变量。
+- [x] 16. 将 AI 帮写从前端固定文案改为独立后端链路，支持 Dryrun 确定性文案与 Live LLM 默认/备用回退。
+- [x] 17. 修复“新建任务”无事件与创建任务无进度反馈，增加表单重置和每秒任务轮询。
+- [x] 18. 补齐全中文平台、市场、语言、比例下拉选项。
+- [x] 19. 新增 Nano Banana Pro，调整为商品保持优先时 Pro → Nano 2；视觉排版优先时使用 Image 2，并在前台隐藏模型名。
+- [x] 20. 后台提示词资产支持上传 MD/TXT 为新版本，并可从版本历史明确选择启用版本。
+- [x] 21. 后台模型按三条业务链路分组，显示 Provider 真实生效条件、单模型状态、调用顺序和整条链路状态，并修复窄屏后台导航竖排。
+- [x] 22. 将上传商品图接入规划 LLM，生成结构化商品事实并把画面比例、结构化商品信息和品牌风格显式传入核心 Meta Prompt。
+- [x] 23. 将核心 Prompt 的平台、比例、无文字、商品锁定、自定义数量和去重规则实现为语义校验器，失败时只允许重规划一次。
+- [x] 24. 增加生成后视觉 QA 节点，记录比例、文字策略、商品保持和平台合规结论，并把未通过项纳入失败重试。
+- [x] 25. 将商品识别、AI 帮写、二次编辑转写和视觉 QA 提示词纳入后台版本化提示词资产。
+- [x] 26. 前台补齐后端结构化商品事实、生成计划预览/确认和真实失败项重试交互。
+- [x] 27. 更新 Workflow、规格书和交接说明，完成后端、前端、构建与 Dryrun 浏览器回归。
+- [x] 28. 将前台商品信息收拢为单一“商品卖点与要求”文本框，以浅色占位提示填写结构；AI 帮写支持候选预览、重新生成和确认回填，并修复候选框在桌面滚动面板及移动抽屉中的裁剪和层级问题。
+- [x] 29. 将上传缩略图删除按钮的文本叉号替换为标准关闭图标，清除默认按钮内边距与行高，并完成桌面、390×844 移动端和删除交互回归。
+- [x] 30. 将“商品保持优先/视觉排版优先”从套图结构区移到卖点文本框下方，改为轻量下拉选择，并删除 Live 结构化事实说明文案。
+- [x] 31. 将生成设置四组下拉选项收敛为 DesignKit `product-kit` 当前页面选项，去掉过长平台、市场、语言和比例列表。
+- [x] 32. 将用户提供的完整 AI 转写/帮写 Prompt 接入 `copywriting-assist` 资产与实际调用链路，Live 取消 JSON 强制响应，Dryrun 返回同结构三段内容。
+- [x] 33. 删除套图左侧参数面板顶部重复的“商品套图/上传商品图...”标题区，保留移动端抽屉关闭控制。
+- [x] 34. 优化卖点输入区文字层级，生成偏好标题加大且不换行，占位提示缩小；智能匹配模式移除张数下拉并固定按 Meta Prompt 默认 7 张。
+- [x] 35. 修复商品图最多三张上传限制，达到上限后上传入口禁用、显示删除后继续上传提示，并在逻辑层阻断超限选择。
+- [x] 36. 修复 Live AI 帮写误把“图片语言=英文”当作输出语言的问题，强制 AI 帮写回填内容使用简体中文。
+- [x] 37. 修复 Live 生图失败时前端吞掉精确异常的问题，任务失败 toast 和结果区均展示后端 `job.error` 或单图失败原因。
+- [x] 38. 拆清前台画面比例与后台模型尺寸配置：Nano 仅配置清晰度档位，Image 2 默认跟随前台比例，固定尺寸与任务比例不匹配时在模型调用前失败。
+- [x] 39. 修复 Live Meta Prompt/重规划输出漏写画面比例导致整单失败的问题，执行器会把任务 `aspect_ratio` 自动补齐到每条 `picture_requirement`。
+
+## 执行记录
+
+- 2026-07-17：开始实施。仓库为空，已创建 `codex/listingo-demo` 功能分支。
+- 2026-07-17：任务 1 完成。建立 Vue/FastAPI 骨架、前后端锁定依赖、本机 Docker Compose 和五份交接文档；已安装本地依赖并生成 `package-lock.json`。
+- 2026-07-17：使用内置 ImageGen 生成 4 张 Listingo 自有水杯演示资产；核心 Meta Prompt 已原样导入，源文件与项目副本 SHA256 均为 `EF5A14BED89A92B21F0B5EC01E666F788FDE92FF7829D050D011885F7B6C6120`。
+- 2026-07-17：任务 2 完成。9 张业务表、首个 Alembic 迁移、Fernet 本机密钥、API Key 掩码及四类默认禁用 Provider 已实现并通过迁移验证。
+- 2026-07-17：任务 3 完成。核心 Prompt 首版本、运行时 JSON 契约、一次修复约束、Workflow 注册表和非法连线校验已实现。
+- 2026-07-17：后端当前测试结果为 `14 passed`；Dryrun、版本、ZIP、Provider 掩码、Prompt 比较与执行回退测试均已通过。
+- 2026-07-17：需求边界确认：提示词内容唯一来源为用户上传 MD，禁止使用 Artflo 提示词；Artflo 仅作为 Workflow 画布交互样式参考。已写入 `SPEC.md` 并增加固定 SHA256 回归断言。
+- 2026-07-17：任务 4–6 完成。实现 OpenAI-compatible LLM、Nano `generateContent`、Image 2 `/images/generations`、一次 JSON 修复、Nano → Image 2 单次回退、并发上限 3、Live generate 二次编辑、失败项重试、版本历史和 ZIP。
+- 2026-07-17：任务 7–8 完成。四期导航与二至四期纯本地交互 Demo 已落地；运营后台具备模型、Workflow、提示词和日志四模块。
+- 2026-07-17：任务 9 完成。Pytest 14 项、Vitest 2 项和 Vite 生产构建通过；浏览器完成 1440×900、390×844、一期生成、二次编辑、A+ 演示与后台提示词来源验收。Live 冒烟入口已实现，因无密钥按规格未发起外部调用。
+- 2026-07-17：任务 10 完成。修复浏览器默认按钮 padding 导致的勾选图标偏移；Nano 2 更新为 `gemini-3.1-flash-image` 并真实返回 200 图像数据；Nano 的 512/1K/2K/4K 与 Image 2 的像素 size 改为独立下拉；Image 2 按是否携带参考图路由 generations/edits；后台明确 Prompt、Workflow 与 Dryrun 的实际控制边界。
+- 2026-07-17：任务 11 完成。确认 Prompt 内容 SHA256 与用户原文件一致；Live 在不改写核心资产的前提下增加高优先级运行时变量块，平台分流由同一 Meta Prompt 内部规则完成。Workflow 画布目前仅控制版本、校验和任务引用，不动态解释执行图。
+- 2026-07-17：任务 12 未完成。当前图片 Provider 均已配置且模型目录连通成功，但 GPT‑5.4‑Mini 与 Qwen‑3.6 均未录入密钥，完整 Live Prompt 端到端链路会在创建任务前按规格拒绝，不能据此宣称带字套图已验收。
+- 2026-07-17：任务 13 未完成。Image 2 密钥与 `gpt-image-2` 模型目录校验成功，generate/edit 请求体自动化测试通过；但本轮计费请求在接收大体积 base64 响应时本地子进程被中断，未取得可验证的结果文件，因此不宣称 Image 2 实际出图已通过。
+- 2026-07-17：本轮最终验证：Pytest `19 passed`、Vitest `3 passed`、Vite 生产构建成功；Nano 2 与 Image 2 模型目录连通均成功；核心 Prompt 源文件与入库副本 SHA256 继续完全一致。
+- 2026-07-17：任务 14 完成。确认 Nano 2 使用 Gemini `imageSize`，不是 Image 2/OpenAI Images 的 `size`；已增加 Nano payload 回归测试，并将 Provider 从 `generationConfig.imageConfig` 修正为 `generationConfig.responseFormat.image`。
+- 2026-07-17：任务 15–20 完成。自定义结构默认 1/2/2/2、单类上限 4，已贯通前端、API、任务参数、核心 Prompt 数量指令和 Dryrun 图片类型；AI 帮写改为可追踪后端调用；“新建任务”和任务轮询生效；全平台选项中文化；模型路由调整为 Nano Banana Pro → Nano Banana 2 或 Image 2 单独路线；提示词支持上传和选择启用。
+- 2026-07-17：运行态复测发现 8000 端口仍由旧 Anaconda Uvicorn 进程占用，导致新 `custom_counts` 被旧校验拒绝并表现为“创建任务无效果”；已停止旧进程并使用项目 `.venv` 启动最新后端。浏览器复测自定义 7 张任务成功，结果卡 7/7，随后“新建任务”可清空并恢复智能匹配默认状态。
+- 2026-07-17：本轮最终自动化结果更新为 Pytest `23 passed`、Vitest `6 passed`、Vite 生产构建成功；Nano Banana Pro 与 Nano Banana 2 模型目录连通成功。任务 12、13 仍因未执行完整计费 Live 链路保持未完成。
+- 2026-07-17：任务 21 完成。明确“启用 + 密钥”才算 Provider 当前生效；模型后台按提示词理解、商品保持、视觉排版三组展示主用/备用角色和链路完整性。浏览器验证 Image 2 开关可让卡片与分组从“未启用/链路未完整启用”即时切换为“当前生效/链路已生效”，并在验证后恢复原状态。
+- 2026-07-17：开始执行任务 22–27。依据当前生效 Meta Prompt 的内部规则，补齐商品视觉事实、比例变量、语义校验、生成后 QA、辅助提示词资产与前台确认/重试闭环；本批次仍保持默认 Dryrun，未经有效密钥不发起计费 Live 调用。
+- 2026-07-17：任务 22–28 完成。工作流升级为输入校验、商品视觉事实、核心 Meta Prompt、LLM JSON、结构校验、语义校验、并发生图、视觉 QA、结果聚合九节点；辅助提示词均进入可版本化资产。前台将结构化字段收拢到单一文本框，由后端解析结构化事实；AI 帮写改为候选预览、可重新生成、确认后回填，并通过桌面端与 390×844 移动端浏览器回归。任务 12、13 仍因没有执行完整计费 Live 链路保持未完成。
+- 2026-07-17：本批次最终验证为 Pytest `37 passed`、Vitest `15 passed`、TypeScript `tsc --noEmit` 通过、Vite 生产构建通过；仅保留现有的前端大分块体积提示，不影响构建产物。浏览器确认单文本框无横向溢出、AI 候选内容在确认前不覆盖原输入、重新帮写可用、确认后回填生效。
+- 2026-07-17：任务 29 完成。上传缩略图删除按钮使用 Ant Design `CloseOutlined`，按钮 24×24、图标 12×12，浏览器测得横纵中心偏差均为 0；移动端无横向溢出，点击后缩略图与按钮均正常移除。
+- 2026-07-17：任务 29 自动化复核为 Vitest `16 passed`、TypeScript `tsc --noEmit` 通过、Vite 生产构建通过；仅保留既有的大分块体积提示。
+- 2026-07-17：任务 30 完成。生成偏好控件移至“商品卖点与要求”文本框下方，旧 `preference-switch` 已移除；下拉触发按钮收紧为 110×30、菜单宽 206，选择“视觉排版优先”后按钮文案更新且菜单关闭。已删除“Live 会读取商品图...”说明文案。
+- 2026-07-17：任务 30 自动化复核为 Vitest `13 passed`、TypeScript `tsc --noEmit` 通过、Vite 生产构建通过；浏览器使用最新 `http://127.0.0.1:5174/app/suite` 验证。当前 in-app Browser viewport override 未实际切到 390 宽，移动端截图不作为本次通过依据。
+- 2026-07-17：任务 31 完成。参考 DesignKit `https://www.designkit.cn/product-kit/?from=home` 实际下拉，将平台收敛为 17 项、市场 11 项、语言 11 项、比例 4 项；默认值为“亚马逊 / 美国 / 英文 / 1:1”。本地浏览器 DOM 已确认四个 select 的选项与参考页一致。
+- 2026-07-17：任务 31 自动化复核为 Vitest `14 passed`、TypeScript `tsc --noEmit` 通过、Vite 生产构建通过；仅保留既有的大分块体积提示。
+- 2026-07-17：任务 32 完成。`copywriting-assist` 现以用户提供的完整 Role/Workflow/Constraints/Output Format/Reference Prompt 作为实际 system prompt；已有旧版资产会由 seed 自动生成新版本并启用。Live AI 帮写节点关闭 `response_format=json_object`，允许模型按 Markdown 三段模板输出；Dryrun 同步返回“商品定位 / 适用场景 / 5大核心卖点”结构。后端全量复核为 Pytest `39 passed`；仅保留既有 FastAPI TestClient 弃用警告。
+- 2026-07-17：任务 33 完成。左侧参数面板桌面端不再渲染 `.panel-heading` 和“上传商品图，一键生成完整电商套图”副标题；移动端关闭按钮仍保留。前端回归为 Vitest `15 passed`、TypeScript `tsc --noEmit` 通过、Vite 生产构建通过；浏览器验证 `/app/suite` 首个面板区块直接为“上传商品图”，控制台无 warning/error，A+ → 套图导航回归正常。
+- 2026-07-17：任务 34 完成。`generationCount()` 在智能匹配下固定返回 7，自定义模式继续按四类数量求和；前台已移除“智能套图张数”下拉。生成偏好标题调整为 13px nowrap，说明为 10px nowrap，卖点输入占位提示为 13px。前端回归为 Vitest `17 passed`、TypeScript `tsc --noEmit` 通过、Vite 生产构建通过；浏览器验证智能/自定义切换后智能模式仍无张数控件且开始按钮为“开始生成 7 张套图”。
+- 2026-07-17：任务 35 完成。上传入口新增 `uploadLimitReached` 状态，满 3 张时 input disabled、上传区 `aria-disabled=true` 并显示“最多上传 3 张 / 删除已有图片后可继续上传”；`filesSelected` 会在满额或一次选择超过剩余名额时提示。前端回归为 Vitest `18 passed`、TypeScript `tsc --noEmit` 通过、Vite 生产构建通过；浏览器验证默认上传入口仍可用且控制台无 warning/error。
+- 2026-07-17：任务 36 完成。确认截图中英文输出原因是 AI 帮写 Live 请求把前台“图片语言=英文”以 `language` 字段传给 LLM，模型误判为输出语言。已将 Live 用户 JSON 改为 `image_text_language` 与固定 `output_language=简体中文`，并在 `copywriting-assist` Prompt 中加入“输出语言必须为简体中文、图片语言只用于后续图片文案”的硬约束；当前 SQLite 已启用 v3。后端全量复核为 Pytest `40 passed`；仅保留既有 FastAPI TestClient 弃用警告。
+- 2026-07-17：任务 37 完成。确认本次 Live 生图失败发生在 `live_execution` 阶段，根因是 Meta Prompt 规划在一次语义重规划后仍未让 7 张图片显式声明画面比例 `1:1`，属于图片模型调用前的语义校验失败。前端新增 `generationFailureMessage()`，优先展示后端 `job.error`，无任务级错误时汇总失败单图错误；结果区失败态改为“任务失败”并显示精确异常，toast 同步带出详细原因。前端回归为 Vitest `19 passed`、TypeScript `tsc --noEmit` 通过、Vite 生产构建通过；浏览器验证 `/app/suite` 可正常打开、无框架错误、控制台无 warning/error。
+- 2026-07-17：任务 38 完成。后端新增 Image 2 固定 `size` 与前台 `aspect_ratio` 的调用前一致性校验，固定尺寸不匹配时直接报错且不发起外部 HTTP；Nano / Nano Pro 种子配置移除误导性的后台 `aspect_ratio` 字段，只保留 `resolution/imageSize` 清晰度档位。后台模型配置页将 Nano 文案改为“清晰度档位”，Image 2 固定像素尺寸移入“高级固定尺寸（可能覆盖前台比例）”分组，并在非 `follow_ratio` 时显示风险提示。已执行 seed 清理当前 SQLite，确认三个 Yunwu 图片 Provider 均无 `aspect_ratio` 配置且 Image 2 为 `follow_ratio`。验证结果：Pytest `41 passed`，前端 Vitest `25 passed`，TypeScript `tsc --noEmit` 通过，Vite 生产构建通过；仅保留既有 FastAPI TestClient 弃用警告和前端 chunk 体积提示。
+- 2026-07-17：任务 39 完成。`validate_plan_with_one_replan()` 现在会在语义校验前调用 `inject_runtime_aspect_ratio()`，对初次 LLM 规划和一次重规划后的计划都执行比例补齐；若某条 `picture_requirement` 未包含本次任务比例，例如 `1:1`，系统会自动改为 `1:1 画面比例，...` 后再进入严格语义校验和后续生图。JSON 输出契约也补充要求每条 `picture_requirement` 显式包含运行时 `${aspect_ratio}` 实际值。新增测试覆盖“只缺比例时不触发重规划”和“重规划后仍缺比例时自动补齐”两种场景。验证结果：`backend/tests/test_prompt_workflow_gaps.py` 12 项通过，后端全量 Pytest `43 passed`；仅保留既有 FastAPI TestClient 弃用警告。已重启本机 8000 后端，`/api/v1/health` 返回正常。

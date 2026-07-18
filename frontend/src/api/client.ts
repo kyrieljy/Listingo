@@ -1,0 +1,91 @@
+import axios from 'axios'
+
+export const api = axios.create({ baseURL: '/api/v1', timeout: 20_000 })
+
+export type Asset = { id: string; original_name: string; url: string; width: number; height: number }
+export type Version = { id: string; parent_version_id: string | null; version_no: number; instruction: string; url: string; created_at: string }
+export type JobItem = { id: string; index: number; image_type: string; status: string; error: string | null; current_version_id: string | null; versions: Version[] }
+export type Job = { id: string; status: string; dry_run: boolean; progress: number; count: number; params: Record<string, unknown>; error: string | null; created_at: string; items: JobItem[] }
+export type DownloadFormat = 'zip' | 'long_image'
+export type VideoVersion = Version & { remote_url: string }
+export type VideoItem = {
+  id: string
+  index: number
+  video_type: string
+  status: string
+  provider_id: string | null
+  provider_task_id: string | null
+  error: string | null
+  prompt_text: string
+  script_markdown: string
+  current_version_id: string | null
+  versions: VideoVersion[]
+}
+export type VideoJob = { id: string; status: string; dry_run: boolean; progress: number; count: number; params: Record<string, unknown>; error: string | null; created_at: string; items: VideoItem[] }
+
+export async function uploadAsset(file: File): Promise<Asset> {
+  const form = new FormData()
+  form.append('file', file)
+  return (await api.post('/assets', form)).data
+}
+
+export async function createJob(payload: Record<string, unknown>): Promise<Job> {
+  return (await api.post('/generation-jobs', payload)).data
+}
+
+export async function getJob(id: string): Promise<Job> {
+  return (await api.get(`/generation-jobs/${id}`)).data
+}
+
+export async function listJobs(): Promise<Job[]> {
+  return (await api.get('/generation-jobs')).data
+}
+
+export async function assistCopywriting(payload: {
+  asset_ids: string[]
+  platform: string
+  market: string
+  language: string
+  selling_points: string
+  dry_run: boolean
+}): Promise<{ selling_points: string; dry_run: boolean; provider_code: string | null }> {
+  return (await api.post('/copywriting-assist', payload)).data
+}
+
+export async function assistVideoCopywriting(payload: Record<string, unknown>): Promise<{ selling_points: string; dry_run: boolean; provider_code: string | null }> {
+  return (await api.post('/video-copywriting-assist', payload)).data
+}
+
+export async function createVideoJob(payload: Record<string, unknown>): Promise<VideoJob> {
+  return (await api.post('/video-jobs', payload)).data
+}
+
+export async function getVideoJob(id: string): Promise<VideoJob> {
+  return (await api.get(`/video-jobs/${id}`)).data
+}
+
+export async function listVideoJobs(): Promise<VideoJob[]> {
+  return (await api.get('/video-jobs')).data
+}
+
+export async function retryFailedVideoItems(jobId: string): Promise<VideoJob> {
+  return (await api.post(`/video-jobs/${jobId}/retry-failed`)).data
+}
+
+export async function editItem(id: string, instruction: string): Promise<Version> {
+  return (await api.post(`/generation-items/${id}/versions`, { instruction })).data
+}
+
+export async function retryFailedItems(jobId: string): Promise<Job> {
+  return (await api.post(`/generation-jobs/${jobId}/retry-failed`)).data
+}
+
+export function generationDownloadUrl(jobId: string, itemIds: string[], format: DownloadFormat = 'zip'): string {
+  const params = new URLSearchParams({ item_ids: itemIds.join(','), format })
+  return `/api/v1/generation-jobs/${jobId}/download?${params.toString()}`
+}
+
+export function videoDownloadUrl(jobId: string, itemIds: string[]): string {
+  const params = new URLSearchParams({ item_ids: itemIds.join(',') })
+  return `/api/v1/video-jobs/${jobId}/download?${params.toString()}`
+}

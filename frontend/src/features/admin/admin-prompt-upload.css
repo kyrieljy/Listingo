@@ -1,0 +1,22 @@
+.prompt-upload {
+  min-height: 38px;
+  margin-top: 12px;
+  border: 1px dashed #c9c4ee;
+  border-radius: 8px;
+  color: #6556da;
+  background: #faf9ff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.prompt-upload input { display: none; }
+.version-panel article { padding: 9px 0; border-bottom: 1px solid #eee; }
+.version-panel article.active { margin: 0 -8px; padding: 9px 8px; border-radius: 8px; background: #f1f8f2; }
+.version-panel article > button:first-child { width: 100%; padding: 0; display: flex; flex-direction: column; text-align: left; }
+.version-panel article b { display: flex; align-items: center; gap: 6px; }
+.version-panel article i { padding: 2px 5px; border-radius: 4px; background: #ddf3e2; color: #3d9652; font-size: 9px; font-style: normal; }
+.version-panel .activate-version { margin-top: 7px; padding: 5px 8px; border: 1px solid #d8d2f2; border-radius: 6px; color: #6556da; background: #fff; font-size: 10px; }

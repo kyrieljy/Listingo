@@ -1,0 +1,2 @@
+"""Listingo FastAPI application."""
+

@@ -85,3 +85,20 @@ final result: passed
 - Findings: no actionable P0, P1 or P2 differences remain for the requested option-list alignment.
 
 final result: passed
+
+## 2026-07-21 doc-sync from source
+
+- Source truth: repository source under `backend/app/**` and `frontend/src/**`, specifically `services/content_safety.py`, `services/jobs.py`, `services/video_jobs.py`, `services/providers.py`, `services/workflow_registry.py`, `services/prompt_contract.py`, `seed.py`, `config.py`, `api/public.py`, `api/admin.py`, `schemas.py`, plus `frontend/src/features/workspace/workspace-model.ts` and `frontend/src/api/client.ts`.
+- Docs updated: `README.md`, `TECH_STACK.md`, `SPEC.md`, `开发计划.md`, `TASKS.md`.
+- Concrete corrections applied to the docs:
+  - Concurrency ceiling changed from “3” to “default 4, configurable 1–8 via `LISTINGO_MAX_JOB_CONCURRENCY`”.
+  - Preset provider matrix rewritten to reflect the 7 seeded providers: `doubao-seed-2-0-mini` (default LLM via router.shengsuanyun.com), `qwen-3-6` (fallback LLM), `gpt-5-4-mini` (preset only), `yunwu-nano-pro`, `yunwu-nano`, `yunwu-image-2`, `shengsuanyun-seedance-1-5-pro` (video default).
+  - Video phase reclassified from “local simulation only” to a real Seedance 1.5 Pro Live path: `shengsuanyun_tasks_generation` adapter, `ecommerce-video-meta-15s` prompt, `submit_video_task` + `get_video_task` polled 180 × 5s, mp4 persisted to `data/results/`.
+  - Prompt asset roster changed from 5 (with `image-quality-review`) to 6: `ecommerce-meta`, `product-vision`, `copywriting-assist`, `edit-rewrite`, `content-safety-review`, `ecommerce-video-meta-15s`.
+  - Workflow reference updated from 9-node to 8-node / 7-edge form. `image_qa` node removed by seed migration; `REQUIRED_NODE_TYPES = ["input", "product_vision", "meta_prompt", "llm", "contract", "semantic_validator", "image_generate", "aggregate"]`.
+  - Content-safety pipeline documented: local keyword filter + LLM `content-safety-review`, applied at generation input, generation plan, per-image output, video input, video script; failures surface as `ContentSafetyBlocked` (HTTP 4xx).
+  - Video Live requires `LISTINGO_PUBLIC_ASSET_BASE_URL` (non-`localhost/127.0.0.1`); admin `/runtime-settings` reads/writes this value.
+- Not covered in this pass: no browser regression, no Pytest/Vitest run, no Live smoke. Any interactive verification of the video path still requires a valid Seedance key and a public asset base URL.
+- Findings: no actionable P0/P1/P2 remain for the requested doc-sync; source is now the single source of truth and the five docs mirror it.
+
+final result: passed

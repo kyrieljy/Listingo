@@ -1,9 +1,9 @@
 # Listingo 任务清单
 
-最后更新：2026-07-17
+最后更新：2026-07-21
 
 - [x] 1. 创建前后端骨架、锁定依赖，并生成 `README.md`、`TECH_STACK.md`、`SPEC.md`、`开发计划.md`、`TASKS.md`。
-- [x] 2. 实现 SQLite 模型、Alembic 迁移、加密密钥和四类预置模型。
+- [x] 2. 实现 SQLite 模型、Alembic 迁移、加密密钥和预置 Provider（当前共 7 个：3 个 LLM、3 个图片、1 个视频）。
 - [x] 3. 导入核心 Meta Prompt，完成版本管理、JSON 契约和 Workflow 注册表。
 - [x] 4. 实现 Dryrun 状态机、真实 LLM/Image Provider、回退、并发和安全日志。
 - [x] 5. 完成一期 DesignKit 风格工作台、上传配置、进度、结果和失败重试。
@@ -41,6 +41,12 @@
 - [x] 37. 修复 Live 生图失败时前端吞掉精确异常的问题，任务失败 toast 和结果区均展示后端 `job.error` 或单图失败原因。
 - [x] 38. 拆清前台画面比例与后台模型尺寸配置：Nano 仅配置清晰度档位，Image 2 默认跟随前台比例，固定尺寸与任务比例不匹配时在模型调用前失败。
 - [x] 39. 修复 Live Meta Prompt/重规划输出漏写画面比例导致整单失败的问题，执行器会把任务 `aspect_ratio` 自动补齐到每条 `picture_requirement`。
+- [x] 40. 将“生成后图片质量审查”升级为“内容安全审查”：新增 `services/content_safety.py` 与 `content-safety-review` 提示词，一期在计划、单图两处审查，三期在视频输入与分镜脚本两处审查；未通过统一抛出 `ContentSafetyBlocked`。原 `image-quality-review` 提示词与 `image_qa` 节点在 seed/迁移中被移除，Workflow 收敛为 8 节点 / 7 边。
+- [x] 41. 单任务并发上限调整为 `LISTINGO_MAX_JOB_CONCURRENCY`（默认 4，`ge=1 le=8`），执行器以 `asyncio.Semaphore(settings.max_job_concurrency)` 扇出图片项。
+- [x] 42. LLM 默认切换为 Doubao Seed 2.0 Mini（`bytedance/doubao-seed-2-0-mini`，经 `router.shengsuanyun.com`），备用继续使用 Qwen‑3.6；`gpt-5-4-mini` 预置为待启用；`copywriting-assist` / `content-safety-review` / `edit-rewrite` 按默认→备用回退。
+- [x] 43. 三期视频真实链路接入：新增 `shengsuanyun-seedance-1-5-pro` Provider、`shengsuanyun_tasks_generation` 适配器、`ecommerce-video-meta-15s` 提示词、`video_jobs.py` 顺序执行 + `submit_video_task` + 180×5s `get_video_task` + mp4 落盘；新增 `POST /video-jobs`、`GET /video-jobs`、`POST /video-jobs/{id}/retry-failed`、`GET /video-jobs/{id}/download`、`POST /video-copywriting-assist`；Dryrun 使用固定 15 秒分镜。
+- [x] 44. 后台新增 `/runtime-settings`：可读写 `LISTINGO_PUBLIC_ASSET_BASE_URL`，Live 视频提交前校验非 `localhost / 127.0.0.1`，否则拒绝。
+- [x] 45. 以最新源码事实回写 `README.md` / `TECH_STACK.md` / `SPEC.md` / `开发计划.md` / `TASKS.md` / `design-qa.md`：并发=4、7 个 Provider、6 类 Prompt 资产、Workflow 8 节点、Seedance 视频 Live、内容安全双层审查、`public_asset_base_url` 要求。
 
 ## 执行记录
 
@@ -81,3 +87,5 @@
 - 2026-07-17：任务 37 完成。确认本次 Live 生图失败发生在 `live_execution` 阶段，根因是 Meta Prompt 规划在一次语义重规划后仍未让 7 张图片显式声明画面比例 `1:1`，属于图片模型调用前的语义校验失败。前端新增 `generationFailureMessage()`，优先展示后端 `job.error`，无任务级错误时汇总失败单图错误；结果区失败态改为“任务失败”并显示精确异常，toast 同步带出详细原因。前端回归为 Vitest `19 passed`、TypeScript `tsc --noEmit` 通过、Vite 生产构建通过；浏览器验证 `/app/suite` 可正常打开、无框架错误、控制台无 warning/error。
 - 2026-07-17：任务 38 完成。后端新增 Image 2 固定 `size` 与前台 `aspect_ratio` 的调用前一致性校验，固定尺寸不匹配时直接报错且不发起外部 HTTP；Nano / Nano Pro 种子配置移除误导性的后台 `aspect_ratio` 字段，只保留 `resolution/imageSize` 清晰度档位。后台模型配置页将 Nano 文案改为“清晰度档位”，Image 2 固定像素尺寸移入“高级固定尺寸（可能覆盖前台比例）”分组，并在非 `follow_ratio` 时显示风险提示。已执行 seed 清理当前 SQLite，确认三个 Yunwu 图片 Provider 均无 `aspect_ratio` 配置且 Image 2 为 `follow_ratio`。验证结果：Pytest `41 passed`，前端 Vitest `25 passed`，TypeScript `tsc --noEmit` 通过，Vite 生产构建通过；仅保留既有 FastAPI TestClient 弃用警告和前端 chunk 体积提示。
 - 2026-07-17：任务 39 完成。`validate_plan_with_one_replan()` 现在会在语义校验前调用 `inject_runtime_aspect_ratio()`，对初次 LLM 规划和一次重规划后的计划都执行比例补齐；若某条 `picture_requirement` 未包含本次任务比例，例如 `1:1`，系统会自动改为 `1:1 画面比例，...` 后再进入严格语义校验和后续生图。JSON 输出契约也补充要求每条 `picture_requirement` 显式包含运行时 `${aspect_ratio}` 实际值。新增测试覆盖“只缺比例时不触发重规划”和“重规划后仍缺比例时自动补齐”两种场景。验证结果：`backend/tests/test_prompt_workflow_gaps.py` 12 项通过，后端全量 Pytest `43 passed`；仅保留既有 FastAPI TestClient 弃用警告。已重启本机 8000 后端，`/api/v1/health` 返回正常。
+- 2026-07-21：任务 40–44 归档。以下事实以源码为准（`backend/app/services/content_safety.py`、`services/jobs.py`、`services/video_jobs.py`、`services/providers.py`、`seed.py`、`config.py`、`api/public.py`、`api/admin.py`）：内容安全审查已上线（本地关键词 + LLM `content-safety-review`），一期在“计划完成 / 单图产出”两点、三期在“视频输入 / 分镜脚本”两点审查，未通过统一 `ContentSafetyBlocked`；旧 `image-quality-review` 与 `image_qa` 节点被 seed 迁移移除，Workflow 收敛为 `input → product_vision → meta_prompt → llm → contract → semantic_validator → image_generate → aggregate` 共 8 节点、7 条边。并发上限默认 4（`LISTINGO_MAX_JOB_CONCURRENCY` 支持 1–8）。LLM 默认切至 Doubao Seed 2.0 Mini（经 router.shengsuanyun.com），备用 Qwen‑3.6，GPT‑5.4‑Mini 预置未启用；辅助 Prompt 均按默认→备用回退。三期视频接入 Seedance 1.5 Pro（`shengsuanyun_tasks_generation` 适配器、`ecommerce-video-meta-15s` 提示词、submit + 180×5s 轮询 + mp4 落盘），并新增 `/runtime-settings` 用于 `LISTINGO_PUBLIC_ASSET_BASE_URL` 读写与 `localhost/127.0.0.1` 拒绝。上述事实未在本轮再次执行 Live 冒烟，仍需要有效密钥人工验证。
+- 2026-07-21：任务 45 完成。同步更新 `README.md`（预置 Provider、6 类 Prompt、三期视频 Live、`public_asset_base_url` 要求）、`TECH_STACK.md`（并发上限=4、视频 Provider、内容安全提示词、`shengsuanyun_tasks_generation` 适配器）、`SPEC.md`（新增内容安全审查章节、三期视频章节、Workflow 8 节点、状态与异常表补齐 `ContentSafetyBlocked` 与 Seedance 超时、API 列表补齐视频与 `runtime-settings`）、`开发计划.md`（新增 11–14 阶段）、`TASKS.md`（新增任务 40–45 与执行记录）、`design-qa.md`（追加 2026-07-21 doc-sync 条目）。事实来源以源码为准，非以往文档；本次未进行浏览器/自动化回归。

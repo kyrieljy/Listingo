@@ -389,8 +389,10 @@ def dryrun_workflow(workflow_id: str, version_id: str, session: Session = Depend
     version = session.get(WorkflowVersion, version_id)
     if not version or version.workflow_id != workflow_id:
         raise HTTPException(status_code=404, detail="Workflow 版本不存在")
-    errors = validate_workflow_graph(json.loads(version.graph_json))
-    return {"ok": not errors, "errors": errors, "external_calls": 0, "trace": ["input", "meta_prompt", "llm(dryrun)", "contract", "image_generate(dryrun)", "aggregate"]}
+    graph = json.loads(version.graph_json)
+    errors = validate_workflow_graph(graph)
+    trace = [node.get("type") for node in graph.get("nodes", []) if node.get("type")]
+    return {"ok": not errors, "errors": errors, "external_calls": 0, "trace": trace}
 
 
 @router.get("/logs")

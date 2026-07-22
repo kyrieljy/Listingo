@@ -12,6 +12,7 @@ import {
   assistCopywriting, createJob, editItem, generationDownloadUrl, getJob, listJobs, retryFailedItems, uploadAsset,
   type Asset, type DownloadFormat, type Job, type JobItem,
 } from '../../api/client'
+import APlusPhasePanel from './APlusPhasePanel.vue'
 import DemoPhasePanel from './DemoPhasePanel.vue'
 import ResultGrid from './ResultGrid.vue'
 import VideoPhasePanel from './VideoPhasePanel.vue'
@@ -217,9 +218,10 @@ async function openHistoryJob(entry: Job) { job.value = await getJob(entry.id); 
         <span>{{ item.short }}</span>
       </button>
     </nav>
-    <button v-if="phase!=='video'" class="mobile-config-trigger" @click="mobileOpen = true"><MenuFoldOutlined />参数</button>
-    <div v-if="phase!=='video' && mobileOpen" class="mobile-scrim" @click="mobileOpen=false" />
-    <aside v-if="phase!=='video'" class="config-panel" :class="{ 'mobile-open': mobileOpen }">
+    <APlusPhasePanel v-if="phase==='aplus'" />
+    <button v-if="phase==='suite'" class="mobile-config-trigger" @click="mobileOpen = true"><MenuFoldOutlined />参数</button>
+    <div v-if="phase==='suite' && mobileOpen" class="mobile-scrim" @click="mobileOpen=false" />
+    <aside v-if="phase==='suite'" class="config-panel" :class="{ 'mobile-open': mobileOpen }">
       <button class="mobile-close" @click="mobileOpen=false">×</button>
       <template v-if="phase==='suite'">
         <section class="form-section"><div class="section-title"><span>1</span><strong>上传商品图</strong><em>最多 3 张</em></div>
@@ -287,14 +289,14 @@ async function openHistoryJob(entry: Job) { job.value = await getJob(entry.id); 
       </template>
       <template v-else><section class="form-section demo-config"><div class="section-title"><span>1</span><strong>输入素材</strong></div><label class="upload-zone compact"><CloudUploadOutlined/><b>上传商品或参考素材</b><small>演示入口，不会上传到模型</small></label></section><section class="form-section"><div class="section-title"><span>2</span><strong>演示配置</strong></div><div class="field-grid"><label>目标平台<select><option>亚马逊</option><option>抖音海外商城</option></select></label><label>输出语言<select><option>简体中文</option><option>英语</option></select></label></div><textarea rows="5" value="突出通勤场景、简洁质感与易用性，生成可继续编辑的结果。"/></section><div class="demo-notice"><ThunderboltOutlined/><div><b>功能演示</b><p>表单、节点与状态可交互，二至四期不会调用模型。</p></div></div></template>
     </aside>
-    <main v-if="phase!=='video'" class="preview-canvas">
+    <main v-if="phase==='suite'" class="preview-canvas">
       <template v-if="phase==='suite'">
         <div v-if="job?.items.length" class="result-workspace"><div class="result-toolbar"><div><span class="success-dot" :class="{ failed: job.status==='failed', warning: job.status==='partial_failed' }"/><span class="result-status-text"><strong>{{ job.status==='succeeded' ? '套图已生成' : job.status==='partial_failed' ? '部分图片生成失败，可重试' : job.status==='failed' ? '任务失败' : '任务处理中' }}</strong><small>{{ job.items.length }} 张 · {{ job.dry_run ? 'Dryrun' : 'Live' }}</small><small v-if="currentFailureMessage" class="result-error">{{ currentFailureMessage }}</small></span></div><div><button v-if="job.items.some((item)=>item.status==='failed')" class="secondary-action retry-all" :disabled="generating" @click="retryFailed"><ThunderboltOutlined/>重试失败项</button><button class="secondary-action" @click="selected=job.items.map((i)=>i.id)">全选</button><div class="download-menu"><button class="download-button" @click="download('zip')"><DownloadOutlined/>下载选中 ({{ selected.length }})</button><button class="download-toggle" type="button" aria-label="选择下载格式" :aria-expanded="downloadMenuOpen" @click="downloadMenuOpen=!downloadMenuOpen"><DownOutlined/></button><div v-if="downloadMenuOpen" class="download-menu-panel"><button type="button" @click="download('zip')">下载套图 ZIP</button><button type="button" @click="download('long_image')">下载长拼图 PNG</button></div></div></div></div><ResultGrid :items="job.items" :selected="selected" @toggle="toggleSelected" @edit="openEdit" @preview="preview" @retry="retryFailed"/></div>
         <div v-else class="empty-preview"><div class="preview-copy"><span>LISTINGO PRODUCT SUITE</span><h2>一件商品，生成一整套<br/>可直接上架的视觉内容</h2><p>基于商品图与销售目标自动规划画面职责，从主图、场景图到卖点证明，保持产品一致。</p></div><div class="demo-mosaic"><figure v-for="(image,index) in demoImages" :key="image"><img :src="image" alt="Listingo 演示套图"/><figcaption>{{ ['首屏主视觉','真实使用场景','通勤生活方式','标准商品主图'][index] }}</figcaption></figure></div><div class="empty-hint"><CloudUploadOutlined/><span>从左侧上传商品图开始</span></div></div>
       </template>
-      <DemoPhasePanel v-else :phase="phase"/>
     </main>
-    <VideoPhasePanel v-else />
+    <main v-else-if="phase==='agent'" class="preview-canvas"><DemoPhasePanel :phase="phase"/></main>
+    <VideoPhasePanel v-else-if="phase==='video'" />
     <a-drawer v-model:open="historyOpen" title="生成历史" width="420"><div class="history-list"><button v-for="entry in history" :key="entry.id" @click="openHistoryJob(entry)"><img :src="entry.items[0]?.versions[0]?.url || '/demo/tumbler-source.png'" alt="历史缩略图"/><span><b>{{ String(entry.params.platform || '商品套图') }} · {{ entry.count }} 张</b><small><ClockCircleOutlined/>{{ new Date(entry.created_at).toLocaleString() }}</small><em>{{ entry.status }}</em></span></button><p v-if="!history.length">暂无历史任务</p></div></a-drawer>
     <a-modal v-model:open="previewOpen" title="结果预览" :footer="null" width="720"><img class="modal-preview" :src="currentPreview" alt="结果预览"/><div class="version-strip"><button v-for="version in activeItem?.versions" :key="version.id" @click="activeItem && (activeItem.current_version_id=version.id)">V{{ version.version_no }} · {{ version.instruction }}</button></div></a-modal>
     <a-modal v-model:open="editOpen" title="二次编辑 · 创建子版本" ok-text="生成新版本" cancel-text="取消" @ok="submitEdit"><div class="edit-dialog"><img :src="currentPreview" alt="当前版本"/><label>修改要求<textarea v-model="editInstruction" rows="5"/></label><p>Live 时将使用“当前版本图 + 原始商品图 + 修改要求”调用 generate；Dryrun 使用本地资产演示版本链。</p></div></a-modal>

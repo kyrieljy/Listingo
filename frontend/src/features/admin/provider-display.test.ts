@@ -44,6 +44,7 @@ describe('provider business display', () => {
   it('groups providers by the actual business routes instead of capability only', () => {
     const groups = groupProvidersByBusinessRoute([
       provider('yunwu-image-2'),
+      provider('aplus-mobile-edit-low-cost'),
       provider('qwen-3-6'),
       provider('yunwu-nano'),
       provider('doubao-seed-2-0-mini'),
@@ -51,17 +52,19 @@ describe('provider business display', () => {
       provider('shengsuanyun-seedance-1-5-pro'),
     ])
 
-    expect(groups.map((group) => group.key)).toEqual(['prompt', 'fidelity', 'layout', 'video'])
+    expect(groups.map((group) => group.key)).toEqual(['prompt', 'fidelity', 'layout', 'aplus-mobile-edit', 'video'])
     expect(groups.map((group) => group.title)).toEqual([
       '提示词理解与任务规划',
       '商品保持优先',
       '视觉排版优先',
+      '高级 A+ 移动端 Edit 模型',
       '15 秒爆款视频生成',
     ])
     expect(groups[0].providers.map((item) => item.role)).toEqual(['主模型', '失败备用'])
     expect(groups[1].providers.map((item) => item.role)).toEqual(['主模型', '失败备用'])
     expect(groups[2].providers.map((item) => item.role)).toEqual(['排版模式模型'])
-    expect(groups[3].providers.map((item) => item.role)).toEqual(['视频生成模型'])
+    expect(groups[3].providers.map((item) => item.role)).toEqual(['移动端派生模型'])
+    expect(groups[4].providers.map((item) => item.role)).toEqual(['视频生成模型'])
     expect(groups.every((group) => group.ready)).toBe(true)
   })
 
@@ -72,6 +75,7 @@ describe('provider business display', () => {
       provider('yunwu-nano-pro'),
       provider('yunwu-nano'),
       provider('yunwu-image-2', true, false),
+      provider('aplus-mobile-edit-low-cost'),
       provider('shengsuanyun-seedance-1-5-pro'),
     ])
 
@@ -80,6 +84,7 @@ describe('provider business display', () => {
     expect(groups[1].ready).toBe(true)
     expect(groups[2].ready).toBe(false)
     expect(groups[3].ready).toBe(true)
+    expect(groups[4].ready).toBe(true)
   })
 
   it('renders business groups and explains that enablement alone is insufficient', () => {

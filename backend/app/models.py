@@ -211,6 +211,65 @@ class VideoVersion(Base, TimestampMixin):
     item: Mapped[VideoItem] = relationship(back_populates="versions")
 
 
+class AplusJob(Base, TimestampMixin):
+    __tablename__ = "aplus_job"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    job_type: Mapped[str] = mapped_column(String(30), default="plan", index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=True)
+    params_json: Mapped[str] = mapped_column(Text)
+    asset_ids_json: Mapped[str] = mapped_column(Text)
+    count: Mapped[int] = mapped_column(Integer)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_version_id: Mapped[str] = mapped_column(ForeignKey("prompt_version.id"))
+    source_plan_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    items: Mapped[list[AplusItem]] = relationship(
+        back_populates="job", cascade="all, delete-orphan", order_by="AplusItem.index"
+    )
+
+
+class AplusItem(Base, TimestampMixin):
+    __tablename__ = "aplus_item"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    job_id: Mapped[str] = mapped_column(ForeignKey("aplus_job.id", ondelete="CASCADE"), index=True)
+    index: Mapped[int] = mapped_column(Integer)
+    module_index: Mapped[int] = mapped_column(Integer)
+    module_name: Mapped[str] = mapped_column(String(160))
+    output_mode: Mapped[str] = mapped_column(String(60), default="plan")
+    aspect_ratio: Mapped[str] = mapped_column(String(40), default="")
+    image_prompt: Mapped[str] = mapped_column(Text, default="")
+    copy_requirements: Mapped[str] = mapped_column(Text, default="")
+    prompt_text: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    provider_id: Mapped[str | None] = mapped_column(ForeignKey("provider.id"), nullable=True)
+    source_web_item_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    job: Mapped[AplusJob] = relationship(back_populates="items")
+    versions: Mapped[list[AplusVersion]] = relationship(
+        back_populates="item", cascade="all, delete-orphan", order_by="AplusVersion.version_no"
+    )
+
+
+class AplusVersion(Base, TimestampMixin):
+    __tablename__ = "aplus_version"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    item_id: Mapped[str] = mapped_column(ForeignKey("aplus_item.id", ondelete="CASCADE"), index=True)
+    parent_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    version_no: Mapped[int] = mapped_column(Integer)
+    instruction: Mapped[str] = mapped_column(Text, default="")
+    file_path: Mapped[str] = mapped_column(String(1000), default="")
+    url: Mapped[str] = mapped_column(String(1000))
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    item: Mapped[AplusItem] = relationship(back_populates="versions")
+
+
 class ExecutionLog(Base):
     __tablename__ = "execution_log"
 

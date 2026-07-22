@@ -8,6 +8,7 @@ from sqlalchemy import select
 from backend.app.api.public import build_copywriting_user_prompt
 from backend.app.models import Provider
 from backend.app.schemas import CopywritingAssistCreate
+from backend.app.services.aplus_jobs import DEMO_ASSETS
 
 
 def make_png() -> bytes:
@@ -71,6 +72,137 @@ def test_dryrun_job_completes_without_external_calls_and_exports_zip(client) -> 
         assert image.height > image.width
 
 
+def test_aplus_dryrun_plan_and_generation_respect_amazon_a_plus_ratios(client) -> None:
+    assert [asset.name for asset in DEMO_ASSETS] == [f"aplus-outdoor-module-{index:02d}.png" for index in range(1, 11)]
+    assert len({asset.name for asset in DEMO_ASSETS}) == 10
+
+    asset_id = upload_asset(client)
+    plan_response = client.post(
+        "/api/v1/aplus-plan-jobs",
+        json={
+            "asset_ids": [asset_id],
+            "platform": "亚马逊",
+            "market": "美国",
+            "language": "英文",
+            "product_info": "便携保温杯，适合通勤。",
+            "selected_modules": ["首屏主视觉", "核心卖点图"],
+            "output_targets": [
+                {"mode": "amazon_aplus_advanced_web", "aspect_ratio": "1464:600"},
+                {"mode": "amazon_aplus_advanced_mobile", "aspect_ratio": "600:450"},
+            ],
+            "dry_run": True,
+        },
+    )
+    assert plan_response.status_code == 201, plan_response.text
+    plan = client.get(f"/api/v1/aplus-plan-jobs/{plan_response.json()['id']}").json()
+    assert plan["status"] == "succeeded"
+    assert [item["module_name"] for item in plan["items"]] == ["首屏主视觉", "核心卖点图"]
+
+    generation_response = client.post(
+        "/api/v1/aplus-generation-jobs",
+        json={
+            "plan_job_id": plan["id"],
+            "module_item_ids": [item["id"] for item in plan["items"]],
+            "output_targets": plan["params"]["output_targets"],
+            "dry_run": True,
+        },
+    )
+    assert generation_response.status_code == 201, generation_response.text
+    generation = client.get(f"/api/v1/aplus-generation-jobs/{generation_response.json()['id']}").json()
+    assert generation["status"] == "succeeded"
+    assert len(generation["items"]) == 4
+    assert {item["aspect_ratio"] for item in generation["items"]} == {"1464:600", "600:450"}
+    mobile_items = [item for item in generation["items"] if item["output_mode"] == "amazon_aplus_advanced_mobile"]
+    assert len(mobile_items) == 2
+    assert all(item["source_web_item_id"] for item in mobile_items)
+
+    archive = client.get(
+        f"/api/v1/aplus-generation-jobs/{generation['id']}/download",
+        params={"item_ids": ",".join(item["id"] for item in generation["items"][:2])},
+    )
+    assert archive.status_code == 200
+    assert archive.headers["content-type"] == "application/zip"
+
+
+def test_aplus_advanced_mobile_only_uses_direct_generation_path(client) -> None:
+    asset_id = upload_asset(client)
+    plan_response = client.post(
+        "/api/v1/aplus-plan-jobs",
+        json={
+            "asset_ids": [asset_id],
+            "platform": "亚马逊",
+            "market": "美国",
+            "language": "英文",
+            "product_info": "便携保温杯，适合通勤。",
+            "selected_modules": ["首屏主视觉", "核心卖点图"],
+            "output_targets": [{"mode": "amazon_aplus_advanced_mobile", "aspect_ratio": "600:450"}],
+            "dry_run": True,
+        },
+    )
+    assert plan_response.status_code == 201, plan_response.text
+    plan = client.get(f"/api/v1/aplus-plan-jobs/{plan_response.json()['id']}").json()
+
+    generation_response = client.post(
+        "/api/v1/aplus-generation-jobs",
+        json={
+            "plan_job_id": plan["id"],
+            "module_item_ids": [item["id"] for item in plan["items"]],
+            "output_targets": plan["params"]["output_targets"],
+            "dry_run": True,
+        },
+    )
+    assert generation_response.status_code == 201, generation_response.text
+    generation = client.get(f"/api/v1/aplus-generation-jobs/{generation_response.json()['id']}").json()
+
+    assert generation["status"] == "succeeded"
+    assert len(generation["items"]) == 2
+    assert {item["output_mode"] for item in generation["items"]} == {"amazon_aplus_advanced_mobile"}
+    assert all(item["aspect_ratio"] == "600:450" for item in generation["items"])
+    assert all(item["source_web_item_id"] is None for item in generation["items"])
+
+
+def test_aplus_rejects_mixed_output_specs(client) -> None:
+    asset_id = upload_asset(client)
+    response = client.post(
+        "/api/v1/aplus-plan-jobs",
+        json={
+            "asset_ids": [asset_id],
+            "platform": "亚马逊",
+            "market": "美国",
+            "language": "英文",
+            "product_info": "",
+            "selected_modules": ["首屏主视觉"],
+            "output_targets": [
+                {"mode": "detail", "aspect_ratio": "1:1"},
+                {"mode": "amazon_aplus_standard", "aspect_ratio": "970:600"},
+            ],
+            "dry_run": True,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "每次只能选择一个" in response.text
+
+
+def test_aplus_rejects_amazon_a_plus_targets_for_non_amazon_platform(client) -> None:
+    asset_id = upload_asset(client)
+    response = client.post(
+        "/api/v1/aplus-plan-jobs",
+        json={
+            "asset_ids": [asset_id],
+            "platform": "Temu",
+            "market": "美国",
+            "language": "英文",
+            "product_info": "",
+            "selected_modules": ["首屏主视觉"],
+            "output_targets": [{"mode": "amazon_aplus_standard", "aspect_ratio": "970:600"}],
+            "dry_run": True,
+        },
+    )
+    assert response.status_code == 422
+    assert "只支持亚马逊平台" in response.text
+
+
 def test_video_dryrun_creates_one_item_per_selected_type(client) -> None:
     asset_id = upload_asset(client)
     response = client.post(
@@ -92,6 +224,8 @@ def test_video_dryrun_creates_one_item_per_selected_type(client) -> None:
 
     assert detail["status"] == "succeeded"
     assert detail["progress"] == 100
+    assert all(item["versions"][0]["url"] == "/demo/video-skincare-result.png" for item in detail["items"])
+    assert all("tumbler" not in item["versions"][0]["url"] for item in detail["items"])
     assert [item["video_type"] for item in detail["items"]] == ["UGC 种草", "痛点解决"]
     assert all(item["status"] == "succeeded" for item in detail["items"])
     assert all(item["script_markdown"].startswith("# 15 秒电商短视频脚本") for item in detail["items"])

@@ -319,7 +319,7 @@ async def _run_video_item(
                 version_no=1,
                 instruction="dryrun placeholder",
                 file_path="",
-                url="/demo/tumbler-commute.png",
+                url="/demo/video-skincare-result.png",
                 remote_url="",
                 metadata_json=safe_json({"dry_run": True, "video_type": item.video_type}),
             )

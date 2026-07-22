@@ -44,6 +44,24 @@ export type VideoForm = {
   dryRun: boolean
 }
 
+export type AplusForm = {
+  platform: string
+  market: string
+  language: string
+  productInfo: string
+  selectedModules: string[]
+  outputSpec: AplusOutputSpec
+  advancedTargets: AplusAdvancedTarget[]
+  dryRun: boolean
+}
+export type AplusDetailRatio = '1:1' | '3:4' | '9:16' | '16:9'
+export type AplusOutputSpec = AplusDetailRatio | 'amazon_aplus_standard' | 'amazon_aplus_advanced'
+export type AplusAdvancedTarget = 'web' | 'mobile'
+export type AplusOutputTargetForm = {
+  mode: 'detail' | 'amazon_aplus_standard' | 'amazon_aplus_advanced_web' | 'amazon_aplus_advanced_mobile'
+  aspect_ratio: string
+}
+
 export const phaseDefinitions = [
   { key: 'suite' as const, label: '商品套图', short: '套图' },
   { key: 'aplus' as const, label: 'A+详情', short: 'A+' },
@@ -96,6 +114,100 @@ export const videoTypeOptions = [
   { key: '反转剧情', title: '反转剧情', subtitle: '前后反差记忆点' },
   { key: '清单榜单推荐', title: '清单榜单推荐', subtitle: '榜单式快速推荐' },
 ]
+
+export const aplusPlatformOptions = [
+  '亚马逊', '淘宝天猫1688', 'Temu', 'TikTok Shop', '拼多多', '抖音电商', 'OZON', '独立站',
+  'Shopee', '阿里国际站', '速卖通', 'SHEIN', '京东', '美客多', 'Coupang', 'Wayfair',
+]
+export const aplusMarketOptions = ['美国', '欧洲', '中国', '俄罗斯', '东南亚', '西班牙', '德国', '日本', '韩国', '巴西', '墨西哥']
+export const aplusLanguageOptions = ['英文', '中文', '俄语', '西语', '德语', '日语', '韩语', '葡萄牙语', '印尼语', '泰语', '无文字']
+export const aplusDetailRatios: AplusDetailRatio[] = ['1:1', '3:4', '9:16', '16:9']
+export const aplusOutputSpecs: Array<{ value: AplusOutputSpec; label: string; description: string; amazonOnly?: boolean }> = [
+  { value: '1:1', label: '1:1', description: '方形详情图' },
+  { value: '3:4', label: '3:4', description: '竖版详情图' },
+  { value: '9:16', label: '9:16', description: '移动长竖图' },
+  { value: '16:9', label: '16:9', description: '横版详情图' },
+  { value: 'amazon_aplus_standard', label: '普通 A+', description: '970:600', amazonOnly: true },
+  { value: 'amazon_aplus_advanced', label: '高级 A+', description: 'Web / Mobile', amazonOnly: true },
+]
+export const aplusModules = [
+  '首屏主视觉',
+  '核心卖点图',
+  '使用场景图',
+  '多角度图',
+  '场景氛围图',
+  '商品细节图',
+  '品牌故事图',
+  '尺寸/容量/尺码图',
+  '效果对比图',
+  '详细规格/参数表',
+  '工艺制作图',
+  '配件/赠品图',
+  '系列展示图',
+  '商品成分图',
+  '售后保障图',
+  '使用建议图',
+]
+export const defaultAplusModules = aplusModules.slice(0, 6)
+
+export function createDefaultAplusForm(): AplusForm {
+  return {
+    platform: '亚马逊',
+    market: '美国',
+    language: '英文',
+    productInfo: '',
+    selectedModules: [...defaultAplusModules],
+    outputSpec: 'amazon_aplus_standard',
+    advancedTargets: ['web'],
+    dryRun: true,
+  }
+}
+
+export function isAplusAmazon(platform: string): boolean {
+  return platform === '亚马逊'
+}
+
+export function buildAplusOutputTargets(form: AplusForm): AplusOutputTargetForm[] {
+  if (aplusDetailRatios.includes(form.outputSpec as AplusDetailRatio)) {
+    return [{ mode: 'detail', aspect_ratio: form.outputSpec }]
+  }
+  if (!isAplusAmazon(form.platform)) return [{ mode: 'detail', aspect_ratio: '1:1' }]
+  if (form.outputSpec === 'amazon_aplus_standard') {
+    return [{ mode: 'amazon_aplus_standard', aspect_ratio: '970:600' }]
+  }
+  if (form.outputSpec !== 'amazon_aplus_advanced') return []
+  const targets: AplusOutputTargetForm[] = []
+  if (form.advancedTargets.includes('web')) {
+    targets.push({ mode: 'amazon_aplus_advanced_web', aspect_ratio: '1464:600' })
+  }
+  if (form.advancedTargets.includes('mobile')) {
+    targets.push({ mode: 'amazon_aplus_advanced_mobile', aspect_ratio: '600:450' })
+  }
+  return targets
+}
+
+export function aplusTargetLabel(mode: string, ratio: string): string {
+  const labels: Record<string, string> = {
+    detail: '详情页',
+    amazon_aplus_standard: '普通 A+',
+    amazon_aplus_advanced_web: '高级 A+ Web',
+    amazon_aplus_advanced_mobile: '高级 A+ 移动端',
+  }
+  return `${labels[mode] ?? mode} · ${ratio}`
+}
+
+export function buildAplusPlanPayload(assetIds: string[], form: AplusForm) {
+  return {
+    asset_ids: assetIds,
+    platform: form.platform,
+    market: form.market,
+    language: form.language,
+    product_info: form.productInfo,
+    selected_modules: form.selectedModules,
+    output_targets: buildAplusOutputTargets(form),
+    dry_run: form.dryRun,
+  }
+}
 
 export const customTypeDefinitions: Array<{ key: CustomCountKey; label: string; description: string }> = [
   { key: 'white_background', label: '白底图', description: '白底主图，多角度呈现商品细节' },

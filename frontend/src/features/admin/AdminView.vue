@@ -25,6 +25,7 @@ const runtimeSettings=ref({ public_asset_base_url: '', public_asset_base_url_con
 const nav=[{key:'providers',label:'模型配置',icon:ApiOutlined},{key:'workflow',label:'Workflow',icon:BranchesOutlined},{key:'prompts',label:'提示词资产',icon:CodeOutlined},{key:'logs',label:'执行日志',icon:FileTextOutlined},{key:'settings',label:'基础配置',icon:SettingOutlined}]
 const sectionTitle=computed(()=>nav.find((item)=>item.key===section.value)?.label||'运营后台')
 const providerGroups=computed(()=>groupProvidersByBusinessRoute(providers.value))
+const activeWorkflowVersion=computed(()=>workflowDetail.value?.versions?.find((item:any)=>item.id===workflowDetail.value.active_version_id)||workflowDetail.value?.versions?.[0])
 
 onMounted(loadSection); watch(section,loadSection)
 async function loadSection(){ loading.value=true; try{ if(section.value==='providers')providers.value=(await api.get('/admin/providers')).data; if(section.value==='prompts'){prompts.value=(await api.get('/admin/prompts')).data;if(prompts.value[0])await loadPrompt(prompts.value[0].id)} if(section.value==='workflow'){workflows.value=(await api.get('/admin/workflows')).data;if(workflows.value[0])await loadWorkflow(workflows.value[0].id)} if(section.value==='logs'){const data=(await api.get('/admin/logs')).data;logs.value=data.items;logTotal.value=data.total} if(section.value==='settings')runtimeSettings.value=(await api.get('/admin/runtime-settings')).data }catch{message.error('后台数据加载失败，请确认 API 已启动')}finally{loading.value=false}}
@@ -40,8 +41,9 @@ async function savePrompt(){const version=(await api.post(`/admin/prompts/${prom
 async function uploadPromptFile(event:Event){const input=event.target as HTMLInputElement;const file=input.files?.[0];if(!file||!promptDetail.value)return;const body=new FormData();body.append('file',file);body.append('change_note',promptNote.value||`上传文件：${file.name}`);try{await api.post(`/admin/prompts/${promptDetail.value.id}/versions/upload`,body);await loadPrompt(promptDetail.value.id);message.success('提示词文件已上传为新版本，请在版本历史中选择启用')}catch(error:any){message.error(error.response?.data?.detail||'提示词文件上传失败')}finally{input.value=''}}
 async function activatePrompt(version:any){await api.post(`/admin/prompts/${promptDetail.value.id}/versions/${version.id}/activate`);await loadPrompt(promptDetail.value.id);message.success(`已启用提示词 v${version.version_no}，后续 Live 任务将引用此版本`)}
 async function loadWorkflow(id:string){workflowDetail.value=(await api.get(`/admin/workflows/${id}`)).data;const active=workflowDetail.value.versions.find((item:any)=>item.id===workflowDetail.value.active_version_id)||workflowDetail.value.versions[0];nodes.value=active.graph.nodes;edges.value=active.graph.edges}
-async function dryrunWorkflow(){const active=workflowDetail.value.versions.find((item:any)=>item.id===workflowDetail.value.active_version_id);const result=(await api.post(`/admin/workflows/${workflowDetail.value.id}/versions/${active.id}/dryrun`)).data;message[result.ok?'success':'error'](result.ok?'Workflow Dryrun 校验通过':result.errors.join('；'))}
-async function saveWorkflow(){const graph={schema_version:'1.0',viewport:{x:30,y:90,zoom:.9},nodes:nodes.value,edges:edges.value};const version=(await api.post(`/admin/workflows/${workflowDetail.value.id}/versions`,{graph,change_note:'画布编辑保存'})).data;if(!version.validation_errors.length)await api.post(`/admin/workflows/${workflowDetail.value.id}/versions/${version.id}/activate`);await loadWorkflow(workflowDetail.value.id);message.success(version.validation_errors.length?'已保存草稿，存在校验错误':'新版本已保存并启用')}
+function onWorkflowSelect(event:Event){const input=event.target as HTMLSelectElement;if(input.value)void loadWorkflow(input.value)}
+async function dryrunWorkflow(){const active=activeWorkflowVersion.value;if(!workflowDetail.value||!active)return;const result=(await api.post(`/admin/workflows/${workflowDetail.value.id}/versions/${active.id}/dryrun`)).data;message[result.ok?'success':'error'](result.ok?'Workflow Dryrun 校验通过':result.errors.join('；'))}
+function previewWorkflowVersion(version:any){nodes.value=version.graph.nodes;edges.value=version.graph.edges}
 async function saveRuntimeSettings(){runtimeSettings.value=(await api.patch('/admin/runtime-settings',{public_asset_base_url:runtimeSettings.value.public_asset_base_url})).data;message.success('基础配置已保存到当前运行实例')}
 </script>
 
@@ -63,7 +65,25 @@ async function saveRuntimeSettings(){runtimeSettings.value=(await api.patch('/ad
           </article></div>
         </section>
       </section>
-      <section v-else-if="section==='workflow'" class="workflow-layout"><div class="workflow-toolbar"><div><span class="active-dot"/>已启用 v{{ workflowDetail?.versions?.find((v:any)=>v.id===workflowDetail.active_version_id)?.version_no }} · 固定执行器</div><button @click="dryrunWorkflow"><PlayCircleOutlined/>Dryrun</button><button class="admin-primary" @click="saveWorkflow"><SaveOutlined/>保存新版本</button></div><div class="flow-canvas"><VueFlow v-model:nodes="nodes" v-model:edges="edges" fit-view-on-init><Background pattern-color="#dad7ea" :gap="22"/><Controls/></VueFlow></div><aside class="flow-inspector"><h3>节点属性</h3><p>版本保存、连线校验和任务版本引用会生效；当前运行顺序仍由后端固定执行器控制，移动或修改画布不会动态改写执行代码。</p><div v-for="node in nodes" :key="node.id"><span>{{ node.type }}</span><b>{{ node.data?.label }}</b></div><h3>版本历史</h3><button v-for="version in workflowDetail?.versions" :key="version.id" @click="nodes=version.graph.nodes;edges=version.graph.edges"><b>v{{ version.version_no }}</b><small>{{ version.change_note }}</small></button></aside></section>
+      <section v-else-if="section==='workflow'" class="workflow-layout">
+        <div class="workflow-toolbar">
+          <div>
+            <select class="workflow-selector" :value="workflowDetail?.id" @change="onWorkflowSelect">
+              <option v-for="workflow in workflows" :key="workflow.id" :value="workflow.id">{{ workflow.name }}</option>
+            </select>
+            <span class="workflow-active-state"><span class="active-dot"/>已启用 v{{ activeWorkflowVersion?.version_no }} · 固定执行器</span>
+          </div>
+          <button @click="dryrunWorkflow"><PlayCircleOutlined/>Dryrun</button>
+        </div>
+        <div class="flow-canvas"><VueFlow v-model:nodes="nodes" v-model:edges="edges" fit-view-on-init><Background pattern-color="#dad7ea" :gap="22"/><Controls/></VueFlow></div>
+        <aside class="flow-inspector">
+          <h3>Workflow 资产</h3>
+          <p>{{ workflowDetail?.description }}。当前画布为只读执行链路视图，版本由后端种子与代码变更管理。</p>
+          <div v-for="node in nodes" :key="node.id"><span>{{ node.type }}</span><b>{{ node.data?.label }}</b></div>
+          <h3>版本历史</h3>
+          <button v-for="version in workflowDetail?.versions" :key="version.id" @click="previewWorkflowVersion(version)"><b>v{{ version.version_no }}</b><small>{{ version.change_note }}</small></button>
+        </aside>
+      </section>
       <section v-else-if="section==='prompts'" class="prompt-layout"><aside><h3>提示词资产</h3><button v-for="prompt in prompts" :key="prompt.id" :class="{active:prompt.id===promptDetail?.id}" @click="loadPrompt(prompt.id)"><CodeOutlined/><span><b>{{ prompt.name }}</b><small>{{ prompt.code }} · {{ prompt.version_count }} 个版本</small></span></button><label class="prompt-upload"><UploadOutlined/>上传到当前提示词<input type="file" accept=".md,.txt,text/markdown,text/plain" @change="uploadPromptFile"/></label><div class="source-lock"><CheckCircleFilled/><p><b>Live Prompt 工程</b><br/>套图规划、商品识别、AI 帮写与二次编辑均引用各自当前启用版本。Artflo 不参与执行。</p></div></aside><div class="prompt-editor"><header><div><strong>{{ promptDetail?.name }}</strong><span>{{ promptDetail?.description }} · 当前启用 v{{ promptDetail?.versions?.find((v:any)=>v.id===promptDetail.active_version_id)?.version_no }}</span></div><button class="admin-primary" @click="savePrompt"><SaveOutlined/>保存并启用新版本</button></header><textarea v-model="promptContent" spellcheck="false"/><footer><input v-model="promptNote" placeholder="版本说明（可选）"/><span>Live 任务会锁定当前启用版本；Dryrun 仅记录版本并走本地确定性状态机。</span></footer></div><aside class="version-panel"><h3>版本历史</h3><article v-for="version in promptDetail?.versions" :key="version.id" :class="{active:version.id===promptDetail.active_version_id}"><button @click="promptContent=version.content"><b>v{{ version.version_no }}<i v-if="version.id===promptDetail.active_version_id">当前生效</i></b><small>{{ version.change_note }}</small><em>{{ version.content_sha256.slice(0,10) }}…</em></button><button v-if="version.id!==promptDetail.active_version_id" class="activate-version" @click="activatePrompt(version)">启用此版本</button></article></aside></section>
       <section v-else-if="section==='logs'" class="logs-card"><div class="log-filters"><select><option>全部节点</option><option>image_generate</option><option>meta_prompt</option><option>video_meta_prompt</option><option>video_submit</option><option>video_generate</option></select><select><option>全部状态</option><option>succeeded</option><option>failed</option></select><span>共 {{ logTotal }} 条</span></div><table><thead><tr><th>时间</th><th>任务 / 节点</th><th>状态</th><th>耗时</th><th>请求摘要</th><th>错误</th></tr></thead><tbody><tr v-for="log in logs" :key="log.id"><td>{{ new Date(log.created_at).toLocaleString() }}</td><td><b>{{ log.node }}</b><small>{{ log.job_id?.slice(0,8) }}</small></td><td><em :class="log.status">{{ log.status }}</em></td><td>{{ log.duration_ms??0 }} ms</td><td><code>{{ JSON.stringify(log.request_summary).slice(0,90) }}</code></td><td>{{ log.error||'—' }}</td></tr></tbody></table></section>
       <section v-else class="runtime-settings-card"><h2>基础配置</h2><p>视频 Live 模式需要公网可访问的资源地址，Seedance 会通过这个地址读取已上传商品图。</p><label>PUBLIC_ASSET_BASE_URL<input v-model="runtimeSettings.public_asset_base_url" placeholder="https://your-domain.com"/></label><small>正式部署建议配置环境变量 LISTINGO_PUBLIC_ASSET_BASE_URL；这里保存只作用于当前后端运行实例。</small><button class="admin-primary" @click="saveRuntimeSettings"><SaveOutlined/>保存基础配置</button></section>
@@ -117,6 +137,9 @@ async function saveRuntimeSettings(){runtimeSettings.value=(await api.patch('/ad
 .runtime-settings-card label { display: flex; flex-direction: column; gap: 8px; margin: 20px 0 8px; font-weight: 650; }
 .runtime-settings-card input { height: 40px; border: 1px solid #dfe1e6; border-radius: 8px; padding: 0 12px; }
 .runtime-settings-card button { margin-top: 18px; }
+.workflow-toolbar > div { display: flex; align-items: center; gap: 12px; }
+.workflow-selector { height: 34px; min-width: 176px; border: 1px solid #dfe1e6; border-radius: 8px; padding: 0 10px; background: #fff; color: #2f343d; font-weight: 650; }
+.workflow-active-state { color: #596170; white-space: nowrap; }
 @media (max-width: 900px) {
   .admin-top { padding: 0 12px; }
   .admin-divider, .admin-top>strong { display: none; }

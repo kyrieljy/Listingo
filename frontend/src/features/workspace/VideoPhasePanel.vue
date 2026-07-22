@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { Modal, message } from 'ant-design-vue'
 import {
   CheckOutlined,
+  CloseOutlined,
   CloudUploadOutlined,
   DownloadOutlined,
   PlayCircleOutlined,
@@ -33,7 +34,6 @@ import {
   videoRatioOptions,
   videoTypeOptions,
 } from './workspace-model'
-import templatePlaceholderImage from '../../assets/video-template-placeholder.png'
 
 const assets = ref<Asset[]>([])
 const form = ref(createDefaultVideoForm())
@@ -121,8 +121,8 @@ async function filesSelected(event: Event) {
 async function useSample() {
   uploading.value = true
   try {
-    const blob = await (await fetch('/demo/tumbler-source.png')).blob()
-    assets.value = [await uploadAsset(new File([blob], 'listingo-demo-tumbler.png', { type: 'image/png' }))]
+    const blob = await (await fetch('/demo/video-skincare-source.png')).blob()
+    assets.value = [await uploadAsset(new File([blob], 'listingo-demo-skincare-device.png', { type: 'image/png' }))]
     message.success('已载入演示商品')
   } catch (error: any) {
     handleRequestError(error, '载入演示商品失败')
@@ -217,7 +217,7 @@ function toggleSelected(id: string) {
       <div class="video-tabs"><button class="active">生成爆款</button><button>爆款复刻</button></div>
 
       <section class="video-section">
-        <header>上传产品图 <small>最多 3 张</small></header>
+        <div class="section-title"><span>1</span><strong>上传产品图</strong><em>最多 3 张</em></div>
         <label class="video-upload" :class="{ disabled: uploading || assets.length >= 3 }">
           <input type="file" accept="image/png,image/jpeg,image/webp" multiple :disabled="uploading || assets.length >= 3" @change="filesSelected" />
           <CloudUploadOutlined />
@@ -227,14 +227,14 @@ function toggleSelected(id: string) {
         <div v-if="assets.length" class="video-assets">
           <figure v-for="asset in assets" :key="asset.id">
             <img :src="asset.url" :alt="asset.original_name" />
-            <button @click="assets = assets.filter((item) => item.id !== asset.id)">×</button>
+            <button class="remove-uploaded-asset" type="button" aria-label="删除已上传商品图" @click="assets = assets.filter((item) => item.id !== asset.id)"><CloseOutlined /></button>
           </figure>
         </div>
         <button v-else class="video-sample" @click="useSample">使用 Listingo 演示商品</button>
       </section>
 
       <section class="video-section">
-        <header>目标市场与语言</header>
+        <div class="section-title"><span>2</span><strong>目标市场与语言</strong></div>
         <div class="video-field-grid">
           <label>市场<select v-model="form.market"><option v-for="value in videoMarketOptions" :key="value">{{ value }}</option></select></label>
           <label>国家<select v-model="form.country"><option v-for="value in videoCountryOptions" :key="value">{{ value }}</option></select></label>
@@ -245,14 +245,14 @@ function toggleSelected(id: string) {
       </section>
 
       <section class="video-section">
-        <header>商品卖点 <button :disabled="helping" @click="aiWrite"><ThunderboltOutlined />{{ helping ? '转写中...' : 'AI 转写' }}</button></header>
+        <div class="section-title"><span>3</span><strong>商品卖点</strong><button :disabled="helping" @click="aiWrite"><ThunderboltOutlined />{{ helping ? '转写中...' : 'AI 转写' }}</button></div>
         <textarea v-model="form.sellingPoints" rows="6" placeholder="输入商品核心卖点、适用人群、使用场景等信息..." />
         <label class="video-full-select">商品名称<input v-model="form.productName" placeholder="可选" /></label>
         <label class="video-full-select">目标人群<input v-model="form.targetAudience" placeholder="可选，例如 20-35 岁通勤人群" /></label>
       </section>
 
       <section class="video-section">
-        <header>视频类型</header>
+        <div class="section-title"><span>4</span><strong>视频类型</strong></div>
         <div class="video-type-grid">
           <button v-for="item in videoTypeOptions" :key="item.key" :class="{ active: form.videoTypes.includes(item.key) }" @click="toggleVideoType(item.key)">
             <CheckOutlined v-if="form.videoTypes.includes(item.key)" />
@@ -308,9 +308,27 @@ function toggleSelected(id: string) {
 
       <template v-else>
         <div class="video-empty">
-          <section class="template-board">
-            <div class="template-board-image">
-              <img :src="templatePlaceholderImage" alt="视频模板说明" />
+          <section class="video-empty-stage" aria-label="爆款视频生成示例">
+            <div class="video-empty-copy">
+              <h2>爆款视频生成</h2>
+              <p>15 秒短视频生成</p>
+            </div>
+            <div class="video-empty-visual" aria-hidden="true">
+              <figure class="video-source-card">
+                <img src="/demo/video-skincare-source.png" alt="" />
+              </figure>
+              <i class="video-empty-arrow" />
+              <figure class="video-result-poster">
+                <img src="/demo/video-skincare-result.png" alt="" />
+              </figure>
+              <article class="video-preview-phone">
+                <img src="/demo/video-skincare-hero.png" alt="" />
+              </article>
+              <div class="video-frame-strip">
+                <img src="/demo/video-skincare-frame-01.png" alt="" />
+                <img src="/demo/video-skincare-frame-02.png" alt="" />
+                <img src="/demo/video-skincare-frame-03.png" alt="" />
+              </div>
             </div>
           </section>
         </div>

@@ -1,9 +1,12 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
+  buildAplusOutputTargets,
+  buildAplusPlanPayload,
   buildCustomTypes,
   buildGenerationPayload,
   buildVideoPayload,
+  createDefaultAplusForm,
   createDefaultVideoForm,
   createDefaultWorkspaceForm,
   generationFailureMessage,
@@ -19,11 +22,13 @@ import {
   videoTypeOptions,
 } from './workspace-model'
 import resultGridSource from './ResultGrid.vue?raw'
+import aplusPanelSource from './APlusPhasePanel.vue?raw'
 import videoPanelSource from './VideoPhasePanel.vue?raw'
 import workspaceSource from './WorkspaceView.vue?raw'
 import apiClientSource from '../../api/client.ts?raw'
 
 const workspaceSuiteCss = readFileSync(new URL('./workspace-suite.css', import.meta.url), 'utf8')
+const workspaceVideoCss = readFileSync(new URL('./workspace-video.css', import.meta.url), 'utf8')
 
 describe('workspace model', () => {
   it('keeps the four planned phase entries in order', () => {
@@ -41,6 +46,20 @@ describe('workspace model', () => {
     expect(payload.count).toBe(7)
     expect(payload.aspect_ratio).toBe('1:1')
     expect(payload.asset_ids).toEqual(['asset-1'])
+  })
+
+  it('treats detail, standard A+ and advanced A+ as mutually exclusive output specs', () => {
+    const form = createDefaultAplusForm()
+    expect(buildAplusOutputTargets(form)).toEqual([{ mode: 'amazon_aplus_standard', aspect_ratio: '970:600' }])
+    form.outputSpec = '3:4'
+    expect(buildAplusOutputTargets(form)).toEqual([{ mode: 'detail', aspect_ratio: '3:4' }])
+    form.outputSpec = 'amazon_aplus_advanced'
+    form.advancedTargets = ['mobile']
+    expect(buildAplusOutputTargets(form)).toEqual([{ mode: 'amazon_aplus_advanced_mobile', aspect_ratio: '600:450' }])
+    form.advancedTargets = ['web', 'mobile']
+    expect(buildAplusOutputTargets(form).map((target) => target.aspect_ratio)).toEqual(['1464:600', '600:450'])
+    form.platform = 'Temu'
+    expect(buildAplusPlanPayload(['asset-1'], form).output_targets).toEqual([{ mode: 'detail', aspect_ratio: '1:1' }])
   })
 
   it('surfaces exact generation failure details from job and item errors', () => {
@@ -281,8 +300,99 @@ describe('workspace model', () => {
 
   it('wires the video phase to the real video workspace instead of the demo panel', () => {
     expect(workspaceSource).toContain("import VideoPhasePanel from './VideoPhasePanel.vue'")
-    expect(workspaceSource).toContain('<VideoPhasePanel v-else />')
-    expect(workspaceSource).toContain("v-if=\"phase!=='video'\" class=\"preview-canvas\"")
+    expect(workspaceSource).toContain('<VideoPhasePanel v-else-if="phase===\'video\'" />')
+    expect(workspaceSource).toContain('APlusPhasePanel v-if="phase===\'aplus\'"')
+  })
+
+  it('uses the prior skincare video detail empty state', () => {
+    expect(videoPanelSource).toContain('/demo/video-skincare-source.png')
+    expect(videoPanelSource).toContain('/demo/video-skincare-hero.png')
+    expect(videoPanelSource).toContain('/demo/video-skincare-result.png')
+    expect(videoPanelSource).toContain('/demo/video-skincare-frame-01.png')
+    expect(videoPanelSource).toContain('/demo/video-skincare-frame-02.png')
+    expect(videoPanelSource).toContain('/demo/video-skincare-frame-03.png')
+    expect(videoPanelSource).toContain('爆款视频生成')
+    expect(videoPanelSource).not.toContain('爆款视频复刻')
+    expect(videoPanelSource).toContain('class="video-empty-stage"')
+    expect(videoPanelSource).toContain('class="video-empty-copy"')
+    expect(videoPanelSource).toContain('class="video-empty-visual"')
+    expect(videoPanelSource).toContain('class="video-source-card"')
+    expect(videoPanelSource).toContain('class="video-preview-phone"')
+    expect(videoPanelSource).toContain('class="video-result-poster"')
+    expect(videoPanelSource).toContain('class="video-frame-strip"')
+    expect(videoPanelSource).not.toContain('const showcaseCards = [')
+    expect(videoPanelSource).not.toContain('video-showcase-card')
+    expect(videoPanelSource).not.toContain('class="video-source-rail"')
+    expect(videoPanelSource).not.toContain('class="video-output-board"')
+    expect(videoPanelSource).not.toContain('video-storyboard-matrix')
+    expect(videoPanelSource).not.toContain('<span><PlayCircleOutlined /></span>')
+    expect(videoPanelSource).not.toContain('/demo/video-backpack-showcase-')
+    expect(videoPanelSource).not.toContain('/demo/tumbler-')
+  })
+
+  it('keeps the prior video detail visual composition in the light workspace', () => {
+    const stageRule = workspaceVideoCss.match(/\.video-empty-stage\s*\{([^}]*)\}/)?.[1] ?? ''
+    const mobileRule = workspaceVideoCss.match(/@media\(max-width: 760px\)\s*\{([\s\S]*)\}\s*$/)?.[1] ?? ''
+    const normalizedStage = stageRule.replace(/\s+/g, '')
+    const normalizedMobile = mobileRule.replace(/\s+/g, '')
+
+    expect(workspaceVideoCss).toContain('.video-workspace { position: absolute; inset: 54px 0 0 72px; display: grid; grid-template-columns: 398px 1fr; background: #f3f4f6;')
+    expect(normalizedStage).toContain('width:min(1080px,100%)')
+    expect(normalizedStage).toContain('grid-template-columns:minmax(240px,300px)minmax(560px,1fr)')
+    expect(workspaceVideoCss).toContain('.video-empty-copy h2')
+    expect(workspaceVideoCss).toContain('.video-empty-visual')
+    expect(workspaceVideoCss).toContain('.video-source-card')
+    expect(workspaceVideoCss).toContain('.video-result-poster')
+    expect(workspaceVideoCss).toContain('.video-preview-phone')
+    expect(workspaceVideoCss).toContain('.video-frame-strip')
+    expect(workspaceVideoCss).not.toContain('video-source-rail')
+    expect(workspaceVideoCss).not.toContain('video-output-board')
+    expect(workspaceVideoCss).not.toContain('video-showcase-card')
+    expect(workspaceVideoCss).not.toContain('bg-black')
+    expect(workspaceVideoCss).not.toContain('background: #000')
+    expect(normalizedMobile).toContain('.video-empty-stage{min-height:auto;padding:0;grid-template-columns:1fr')
+    expect(normalizedMobile).toContain('.video-source-card{left:0;top:88px')
+    expect(normalizedMobile).toContain('.video-result-poster{left:98px;top:132px')
+    expect(normalizedMobile).toContain('.video-empty-arrow{display:none')
+  })
+
+  it('uses five backpack showcase cards for the A+ detail empty state', () => {
+    for (let index = 1; index <= 5; index += 1) {
+      expect(aplusPanelSource).toContain(`/demo/video-backpack-showcase-${String(index).padStart(2, '0')}.png`)
+    }
+    expect(aplusPanelSource).toContain('const aplusShowcaseCards = [')
+    expect(aplusPanelSource).toContain('class="aplus-empty-stage aplus-showcase-stage"')
+    expect(aplusPanelSource).toContain('class="aplus-showcase-gallery"')
+    expect(aplusPanelSource).toContain('class="aplus-showcase-card"')
+    expect(aplusPanelSource).toContain('户外场景生成')
+    expect(aplusPanelSource).toContain('卖点脚本策划')
+    expect(aplusPanelSource).toContain('素材智能拆解')
+    expect(aplusPanelSource).toContain('多平台详情适配')
+    expect(aplusPanelSource).toContain('防水细节展示')
+    expect(aplusPanelSource).not.toContain('class="aplus-source-rail"')
+    expect(aplusPanelSource).not.toContain('class="aplus-output-board"')
+    expect(aplusPanelSource).not.toContain('class="aplus-module-card hero"')
+    expect(aplusPanelSource).not.toContain('/demo/aplus-outdoor-module-')
+    expect(aplusPanelSource).not.toContain('/demo/tumbler-')
+  })
+
+  it('keeps the A+ showcase unframed, compact and horizontally scrollable on mobile', () => {
+    const stageRule = workspaceSuiteCss.match(/\.aplus-empty-stage\.aplus-showcase-stage\s*\{([^}]*)\}/)?.[1] ?? ''
+    const hoverRule = workspaceSuiteCss.match(/\.aplus-showcase-card:hover,[^{]+\.aplus-showcase-card:focus-visible\s*\{([^}]*)\}/)?.[1] ?? ''
+    const mobileRule = workspaceSuiteCss.match(/\.aplus-showcase-gallery\s*\{\s*height: 336px;([^}]*)\}/)?.[1] ?? ''
+    const normalizedStage = stageRule.replace(/\s+/g, '')
+    const normalizedHover = hoverRule.replace(/\s+/g, '')
+    const normalizedMobile = mobileRule.replace(/\s+/g, '')
+
+    expect(normalizedStage).toContain('width:min(1040px,92%)')
+    expect(normalizedStage).toContain('background:transparent')
+    expect(normalizedStage).toContain('box-shadow:none')
+    expect(normalizedStage).toContain('border:0')
+    expect(normalizedHover).toContain('flex:1.9')
+    expect(normalizedMobile).toContain('overflow-x:auto')
+    expect(normalizedMobile).toContain('scroll-snap-type:xmandatory')
+    expect(workspaceSuiteCss).not.toContain('bg-black')
+    expect(workspaceSuiteCss).not.toContain('background: #000')
   })
 
   it('builds video payloads from the selected templates and platform settings', () => {

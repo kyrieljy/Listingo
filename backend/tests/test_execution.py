@@ -278,9 +278,12 @@ def test_live_http_client_forces_ipv4_on_windows() -> None:
 
 
 def test_image2_has_an_explicit_size_route_for_every_core_prompt_ratio() -> None:
-    assert set(IMAGE2_SIZE_MAP) == {"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"}
+    assert set(IMAGE2_SIZE_MAP) == {"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9", "970:600", "1464:600", "600:450"}
     assert IMAGE2_SIZE_MAP["2:3"] == "1024x1536"
     assert IMAGE2_SIZE_MAP["21:9"] == "3840x2160"
+    assert IMAGE2_SIZE_MAP["970:600"] == "auto"
+    assert IMAGE2_SIZE_MAP["1464:600"] == "auto"
+    assert IMAGE2_SIZE_MAP["600:450"] == "auto"
 
 
 def png_bytes(size: tuple[int, int] = (640, 640)) -> bytes:

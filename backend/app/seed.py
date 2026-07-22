@@ -8,10 +8,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.models import Prompt, PromptVersion, Provider, Workflow, WorkflowVersion
-from backend.app.services.workflow_registry import default_workflow_json
+from backend.app.services.workflow_registry import default_workflow_json, workflow_preset_dicts
 
 
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "ecommerce_meta_prompt_v1.md"
+APLUS_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "aplus_meta_prompt_0224.md"
 
 AUXILIARY_PROMPT_PRESETS = [
     ("product-vision", "商品视觉事实提取", "读取商品参考图，输出供核心 Meta Prompt 使用的结构化事实。", "product_vision_v1.md"),
@@ -117,6 +118,33 @@ PROVIDER_PRESETS = [
         },
     },
     {
+        "code": "aplus-mobile-edit-low-cost",
+        "label": "A+ Mobile Edit Low Cost",
+        "capability": "image",
+        "adapter": "openai_images_generation",
+        "base_url": "https://yunwu.ai/v1/images/edits",
+        "model_name": "gpt-image-2",
+        "is_default": False,
+        "is_fallback": False,
+        "config": {
+            "size": "auto",
+            "allowed_sizes": [
+                "auto",
+                "1024x1024",
+                "1536x1024",
+                "1024x1536",
+                "2048x2048",
+                "2048x1152",
+                "3840x2160",
+                "2160x3840",
+            ],
+            "quality": "auto",
+            "format": "png",
+            "compression": 90,
+            "timeout_seconds": 180,
+        },
+    },
+    {
         "code": "shengsuanyun-seedance-1-5-pro",
         "label": "胜算云 Seedance 1.5 Pro",
         "capability": "video",
@@ -201,6 +229,11 @@ def seed_database(session: Session) -> None:
         # Yunwu 的同一 API Key 可调用模型目录中的不同图片模型。
         nano_pro.encrypted_api_key = nano2.encrypted_api_key
         nano_pro.enabled = nano2.enabled
+    image2 = session.scalar(select(Provider).where(Provider.code == "yunwu-image-2"))
+    aplus_mobile = session.scalar(select(Provider).where(Provider.code == "aplus-mobile-edit-low-cost"))
+    if image2 and aplus_mobile and not aplus_mobile.encrypted_api_key and image2.encrypted_api_key:
+        aplus_mobile.encrypted_api_key = image2.encrypted_api_key
+        aplus_mobile.enabled = image2.enabled
 
     prompt = session.scalar(select(Prompt).where(Prompt.code == "ecommerce-meta"))
     if not prompt:
@@ -262,37 +295,64 @@ def seed_database(session: Session) -> None:
         session.flush()
         auxiliary.active_version_id = version.id
 
-    workflow = session.scalar(select(Workflow).where(Workflow.code == "product-suite-v1"))
-    if not workflow:
-        workflow = Workflow(
-            code="product-suite-v1",
-            name="一期商品套图生成",
-            description="输入校验 → Meta Prompt → LLM JSON → 合约校验 → 并发生成 → 聚合",
+    aplus_prompt = session.scalar(select(Prompt).where(Prompt.code == "aplus-meta"))
+    if not aplus_prompt:
+        aplus_prompt = Prompt(
+            code="aplus-meta",
+            name="A+ 详情页 Meta Prompt",
+            description="二期详情页模块方案 Prompt，使用用户上传的 0224 版本作为首版。",
         )
-        session.add(workflow)
+        session.add(aplus_prompt)
         session.flush()
-        workflow_version = WorkflowVersion(
-            workflow_id=workflow.id,
+        content = APLUS_PROMPT_PATH.read_text(encoding="utf-8-sig")
+        version = PromptVersion(
+            prompt_id=aplus_prompt.id,
             version_no=1,
-            graph_json=default_workflow_json(),
-            change_note="一期标准 Workflow 注册",
+            content=content,
+            content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest().upper(),
+            change_note="导入用户提供的 A+ 详情页提示词 0224",
         )
-        session.add(workflow_version)
+        session.add(version)
         session.flush()
-        workflow.active_version_id = workflow_version.id
-    else:
+        aplus_prompt.active_version_id = version.id
+
+    for preset in workflow_preset_dicts():
+        graph_json = json.dumps(preset["graph"], ensure_ascii=False, separators=(",", ":"))
+        workflow = session.scalar(select(Workflow).where(Workflow.code == preset["code"]))
+        if not workflow:
+            workflow = Workflow(
+                code=preset["code"],
+                name=preset["name"],
+                description=preset["description"],
+            )
+            session.add(workflow)
+            session.flush()
+            workflow_version = WorkflowVersion(
+                workflow_id=workflow.id,
+                version_no=1,
+                graph_json=graph_json,
+                change_note=preset["change_note"],
+            )
+            session.add(workflow_version)
+            session.flush()
+            workflow.active_version_id = workflow_version.id
+            continue
+        workflow.name = preset["name"]
+        workflow.description = preset["description"]
         active_workflow = session.get(WorkflowVersion, workflow.active_version_id) if workflow.active_version_id else None
-        if not active_workflow or "product_vision" not in active_workflow.graph_json or "image_qa" in active_workflow.graph_json:
+        needs_default_version = not active_workflow
+        if workflow.code == "product-suite-v1" and active_workflow:
+            needs_default_version = "product_vision" not in active_workflow.graph_json or "image_qa" in active_workflow.graph_json
+        if needs_default_version:
             versions = session.scalars(select(WorkflowVersion).where(WorkflowVersion.workflow_id == workflow.id)).all()
             upgraded = WorkflowVersion(
                 workflow_id=workflow.id,
                 version_no=max((item.version_no for item in versions), default=0) + 1,
-                graph_json=default_workflow_json(),
-                change_note="移除生成审查节点，保留商品视觉事实与语义审查",
+                graph_json=graph_json if workflow.code != "product-suite-v1" else default_workflow_json(),
+                change_note="移除生成审查节点，保留商品视觉事实与语义审查" if workflow.code == "product-suite-v1" else preset["change_note"],
             )
             session.add(upgraded)
             session.flush()
             workflow.active_version_id = upgraded.id
-            workflow.description = "输入校验 → 商品视觉事实 → Meta Prompt → 结构/语义校验 → 并发生图 → 聚合"
 
     session.commit()

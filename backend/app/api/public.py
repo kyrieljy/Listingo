@@ -13,6 +13,9 @@ from sqlalchemy.orm import Session, selectinload
 from backend.app.database import get_session
 from backend.app.models import (
     Asset,
+    AplusItem,
+    AplusJob,
+    AplusVersion,
     ExecutionLog,
     GenerationItem,
     GenerationJob,
@@ -27,6 +30,9 @@ from backend.app.models import (
 )
 from backend.app.schemas import (
     AssetOut,
+    AplusGenerationJobCreate,
+    AplusJobOut,
+    AplusPlanJobCreate,
     CopywritingAssistCreate,
     CopywritingAssistOut,
     GenerationJobCreate,
@@ -37,6 +43,13 @@ from backend.app.schemas import (
     VideoCopywritingAssistOut,
     VideoJobCreate,
     VideoJobOut,
+)
+from backend.app.services.aplus_jobs import (
+    create_aplus_generation_job_from_plan,
+    load_aplus_job,
+    run_aplus_generation_job,
+    run_aplus_plan_job,
+    serialize_aplus_job,
 )
 from backend.app.services.jobs import (
     _call_llm_with_fallback,
@@ -170,6 +183,13 @@ def load_video_job(session: Session, job_id: str) -> VideoJob:
     )
     if not job:
         raise HTTPException(status_code=404, detail="视频任务不存在")
+    return job
+
+
+def load_aplus_job_or_404(session: Session, job_id: str) -> AplusJob:
+    job = load_aplus_job(session, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="A+ 任务不存在")
     return job
 
 
@@ -484,6 +504,138 @@ async def assist_copywriting(
         dry_run=False,
         provider_code=provider.code,
     )
+
+
+@router.post("/aplus-plan-jobs", response_model=AplusJobOut, status_code=201)
+async def create_aplus_plan_job(
+    payload: AplusPlanJobCreate,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    assets = session.scalars(select(Asset).where(Asset.id.in_(payload.asset_ids))).all()
+    if len(assets) != len(payload.asset_ids):
+        raise HTTPException(status_code=422, detail="存在无效商品图")
+    input_text = json.dumps(payload.model_dump(exclude={"asset_ids", "dry_run"}), ensure_ascii=False)
+    try:
+        ensure_content_safe(run_local_text_safety_review(input_text), "输入内容安全拦截")
+    except ContentSafetyBlocked as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not payload.dry_run:
+        try:
+            _enabled_provider(session, "llm", "default")
+            _enabled_provider(session, "llm", "fallback")
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    prompt = session.scalar(select(Prompt).where(Prompt.code == "aplus-meta"))
+    prompt_version = session.get(PromptVersion, prompt.active_version_id) if prompt and prompt.active_version_id else None
+    product_vision = session.scalar(select(Prompt).where(Prompt.code == "product-vision"))
+    product_vision_version = (
+        session.get(PromptVersion, product_vision.active_version_id)
+        if product_vision and product_vision.active_version_id
+        else None
+    )
+    if not prompt_version or not product_vision_version:
+        raise HTTPException(status_code=500, detail="A+ Prompt 工程资产未完整启用")
+    params = payload.model_dump()
+    params["_prompt_versions"] = {"product-vision": product_vision_version.id}
+    job = AplusJob(
+        job_type="plan",
+        status="queued",
+        dry_run=payload.dry_run,
+        params_json=json.dumps(params, ensure_ascii=False),
+        asset_ids_json=json.dumps(payload.asset_ids),
+        count=len(payload.selected_modules),
+        progress=0,
+        prompt_version_id=prompt_version.id,
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    background_tasks.add_task(run_aplus_plan_job, job.id, request.app.state.session_factory, request.app.state.cipher)
+    return serialize_aplus_job(load_aplus_job_or_404(session, job.id))
+
+
+@router.get("/aplus-plan-jobs/{job_id}", response_model=AplusJobOut)
+def get_aplus_plan_job(job_id: str, session: Session = Depends(get_session)):
+    job = load_aplus_job_or_404(session, job_id)
+    if job.job_type != "plan":
+        raise HTTPException(status_code=404, detail="A+ 方案任务不存在")
+    return serialize_aplus_job(job)
+
+
+@router.post("/aplus-generation-jobs", response_model=AplusJobOut, status_code=201)
+async def create_aplus_generation_job(
+    payload: AplusGenerationJobCreate,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    plan_job = load_aplus_job_or_404(session, payload.plan_job_id)
+    if plan_job.job_type != "plan" or plan_job.status != "succeeded":
+        raise HTTPException(status_code=409, detail="A+ 方案尚未生成成功")
+    plan_params = json.loads(plan_job.params_json)
+    if any(target.mode != "detail" for target in payload.output_targets) and plan_params.get("platform") != "亚马逊":
+        raise HTTPException(status_code=422, detail="普通 A+ 和高级 A+ 只支持亚马逊平台")
+    if not payload.dry_run:
+        required_codes = ["yunwu-image-2"]
+        target_modes = {target.mode for target in payload.output_targets}
+        if {"amazon_aplus_advanced_web", "amazon_aplus_advanced_mobile"}.issubset(target_modes):
+            required_codes.append("aplus-mobile-edit-low-cost")
+        unavailable = []
+        for code in required_codes:
+            provider = session.scalar(select(Provider).where(Provider.code == code))
+            if not provider or not provider.enabled or not provider.encrypted_api_key:
+                unavailable.append(code)
+        if unavailable:
+            raise HTTPException(status_code=409, detail=f"Live 模式不可用，请先配置并启用：{', '.join(unavailable)}")
+    prompt = session.scalar(select(Prompt).where(Prompt.code == "aplus-meta"))
+    if not prompt or not prompt.active_version_id:
+        raise HTTPException(status_code=500, detail="A+ Meta Prompt 未启用")
+    job = create_aplus_generation_job_from_plan(session, plan_job, payload, prompt.active_version_id)
+    session.commit()
+    session.refresh(job)
+    background_tasks.add_task(
+        run_aplus_generation_job,
+        job.id,
+        request.app.state.session_factory,
+        request.app.state.settings,
+        request.app.state.cipher,
+    )
+    return serialize_aplus_job(load_aplus_job_or_404(session, job.id))
+
+
+@router.get("/aplus-generation-jobs/{job_id}", response_model=AplusJobOut)
+def get_aplus_generation_job(job_id: str, session: Session = Depends(get_session)):
+    job = load_aplus_job_or_404(session, job_id)
+    if job.job_type != "generation":
+        raise HTTPException(status_code=404, detail="A+ 生成任务不存在")
+    return serialize_aplus_job(job)
+
+
+@router.get("/aplus-generation-jobs/{job_id}/download")
+def download_aplus_results(
+    job_id: str,
+    request: Request,
+    item_ids: str = Query(min_length=1),
+    session: Session = Depends(get_session),
+):
+    job = load_aplus_job_or_404(session, job_id)
+    selected = {item_id for item_id in item_ids.split(",") if item_id}
+    versions: list[tuple[AplusItem, AplusVersion]] = []
+    for item in job.items:
+        if item.id not in selected or not item.current_version_id:
+            continue
+        current = next((version for version in item.versions if version.id == item.current_version_id), None)
+        if current and Path(current.file_path).exists():
+            versions.append((item, current))
+    if not versions:
+        raise HTTPException(status_code=422, detail="没有可下载的 A+ 结果")
+    archive = request.app.state.settings.exports_dir / f"listingo-aplus-{job.id}.zip"
+    with ZipFile(archive, "w", ZIP_DEFLATED) as zip_file:
+        for item, version in versions:
+            zip_file.write(version.file_path, arcname=f"{item.index + 1:02d}-{item.module_name}-{item.aspect_ratio}.png")
+    return FileResponse(archive, media_type="application/zip", filename=f"listingo-aplus-{job.id}.zip")
 
 
 @router.post("/video-copywriting-assist", response_model=VideoCopywritingAssistOut)

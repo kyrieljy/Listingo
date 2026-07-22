@@ -21,8 +21,9 @@ def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(clien
         providers = session.scalars(select(Provider).order_by(Provider.code)).all()
         prompt = session.scalar(select(Prompt).where(Prompt.code == "ecommerce-meta"))
         workflow = session.scalar(select(Workflow).where(Workflow.code == "product-suite-v1"))
+        workflows = session.scalars(select(Workflow).order_by(Workflow.code)).all()
 
-        assert len(providers) == 7
+        assert len(providers) == 8
         assert all(provider.enabled is False for provider in providers)
         assert {provider.model_name for provider in providers} == {
             "bytedance/doubao-seed-2-0-mini",
@@ -33,6 +34,7 @@ def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(clien
             "gpt-image-2",
             "bytedance/doubao-seedance-1-5-pro",
         }
+        aplus_mobile = next(provider for provider in providers if provider.code == "aplus-mobile-edit-low-cost")
         doubao = next(provider for provider in providers if provider.code == "doubao-seed-2-0-mini")
         qwen = next(provider for provider in providers if provider.code == "qwen-3-6")
         nano_pro = next(provider for provider in providers if provider.code == "yunwu-nano-pro")
@@ -44,6 +46,9 @@ def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(clien
         assert nano_pro.is_default is True and nano_pro.is_fallback is False
         assert nano.is_default is False and nano.is_fallback is True
         assert image2.is_default is False and image2.is_fallback is False
+        assert aplus_mobile.capability == "image"
+        assert aplus_mobile.base_url.endswith("/v1/images/edits")
+        assert aplus_mobile.is_default is False and aplus_mobile.is_fallback is False
         assert video.capability == "video"
         assert video.is_default is True and video.is_fallback is False
         assert video.base_url.endswith("/api/v1/tasks/generations")
@@ -60,10 +65,15 @@ def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(clien
             "EF5A14BED89A92B21F0B5EC01E666F788FDE92FF7829D050D011885F7B6C6120"
         )
         assert session.get(WorkflowVersion, workflow.active_version_id).version_no == 1
+        assert {item.code for item in workflows} == {"aplus-detail-v1", "product-suite-v1", "video-v1"}
+        assert all(item.active_version_id for item in workflows)
         copywriting = session.scalar(select(Prompt).where(Prompt.code == "copywriting-assist"))
         video_prompt = session.scalar(select(Prompt).where(Prompt.code == "ecommerce-video-meta-15s"))
+        aplus_prompt = session.scalar(select(Prompt).where(Prompt.code == "aplus-meta"))
         assert video_prompt is not None and video_prompt.active_version_id is not None
+        assert aplus_prompt is not None and aplus_prompt.active_version_id is not None
         assert "电商 AI 视频 Meta Prompt" in session.get(PromptVersion, video_prompt.active_version_id).content
+        assert "A+详情页提示词0224" in session.get(PromptVersion, aplus_prompt.active_version_id).content
         copywriting_version = session.get(PromptVersion, copywriting.active_version_id)
         for required_rule in [
             "仅有图",

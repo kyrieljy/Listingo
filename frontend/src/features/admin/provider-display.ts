@@ -63,6 +63,15 @@ const businessRoutes = [
     ],
   },
   {
+    key: 'aplus-mobile-edit',
+    title: '高级 A+ 移动端 Edit 模型',
+    description: '仅在高级 A+ 同时选择 Web 和移动端时，用 Web 成图派生 600:450 移动端版式；移动端单选走普通生图。',
+    route: 'Web+Mobile 时走独立低成本 edit URL',
+    members: [
+      { code: 'aplus-mobile-edit-low-cost', role: '移动端派生模型' },
+    ],
+  },
+  {
     key: 'video',
     title: '15 秒爆款视频生成',
     description: '前台视频模块使用的 Seedance 异步视频生成链路，接收商品图公网地址与导演脚本。',

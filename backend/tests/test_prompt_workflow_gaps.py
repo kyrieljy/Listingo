@@ -17,7 +17,7 @@ from backend.app.services.prompt_contract import (
 )
 from backend.app.services.execution import validate_plan_with_one_replan
 from backend.app.services.providers import ProviderClient
-from backend.app.services.workflow_registry import default_workflow_json, validate_workflow_graph
+from backend.app.services.workflow_registry import default_workflow_json, validate_workflow_graph, workflow_preset_dicts
 
 
 def _plan(*images: ImagePromptItem) -> MetaPromptPlan:
@@ -130,6 +130,12 @@ def test_default_workflow_registers_visual_facts_semantic_validation_and_image_g
     node_types = [node["type"] for node in graph["nodes"]]
     assert node_types == ["input", "product_vision", "meta_prompt", "llm", "contract", "semantic_validator", "image_generate", "aggregate"]
     assert validate_workflow_graph(graph) == []
+
+
+def test_workflow_registry_exposes_suite_video_and_aplus_assets() -> None:
+    presets = workflow_preset_dicts()
+    assert [preset["code"] for preset in presets] == ["product-suite-v1", "video-v1", "aplus-detail-v1"]
+    assert all(validate_workflow_graph(preset["graph"]) == [] for preset in presets)
 
 
 def test_semantic_plan_is_replanned_only_once() -> None:

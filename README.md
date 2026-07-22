@@ -49,74 +49,12 @@ Set-Location ..
 ```powershell
 Set-Location frontend
 npm run dev
-## 非 Docker 部署（推荐）
-
-### 1) 代码部署
-- git init（首次）
-- git remote add origin https://github.com/kyrieljy/Listingo.git
-- git checkout -B main
-- git add backend frontend *.md docker-compose.yml .github（仅提交代码与配置，不提交运行时数据）
-- git commit -m "chore: sync latest listingo changes"
-- git push -u origin main
-
-### 2) 本机数据备份（数据库与运行文件）
-
-> 项目默认不提交 `data/*` 到 Git（.gitignore 已过滤）。请单独打包迁移。
-
-- 备份数据：
-  - mkdir backup
-  - Copy-Item data\listingo.sqlite3 backup\listingo.sqlite3
-  - Copy-Item data\uploads backup\uploads -Recurse -Force
-  - Copy-Item data\results backup\results -Recurse -Force
-  - Copy-Item data\exports backup\exports -Recurse -Force
-- 打包传输文件：
-  - Compress-Archive -Path backup\* -DestinationPath listingo-data-bundle.zip -Force
-
-### 3) 服务器恢复与启动（不走 Docker）
-
-```bash
-# 服务器拉代码
-git clone https://github.com/kyrieljy/Listingo.git
-cd Listingo
-
-# 解压并恢复数据
-mkdir -p data/uploads data/results data/exports
-# Linux
-unzip /path/to/listingo-data-bundle.zip -d .
-cp -r backup/uploads/* data/uploads/ 2>/dev/null || true
-cp -r backup/results/* data/results/ 2>/dev/null || true
-cp -r backup/exports/* data/exports/ 2>/dev/null || true
-cp backup/listingo.sqlite3 data/listingo.sqlite3
-
-# 启动后端
-python -m venv .venv
-.venv/bin/pip install -r backend/requirements.txt
-.venv/bin/uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
-
-# 启动前端
-cd frontend
-npm install
-npm run build
-npm run preview -- --host 0.0.0.0 --port 5173
 ```
 
-### Windows 启动示例
-
-```powershell
-.\\.venv\\Scripts\\python.exe -m pip install -r backend\\requirements.txt
-.\\.venv\\Scripts\\python.exe -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
-Set-Location frontend
-npm install
-npm run build
-npm run preview -- --host 0.0.0.0 --port 5173
-```
-
-### 访问地址
-- 前台：`http://<服务器IP>:5173/app`
-- 后台：`http://<服务器IP>:5173/admin`
-- API文档：`http://<服务器IP>:8000/docs`
-
-Docker Compose 方案保留用于本地容器化开发，不作为主线部署方式。
+访问：
+- 前台工作台：<http://127.0.0.1:5173/app>
+- 运营后台：<http://127.0.0.1:5173/admin>
+- API 文档：<http://127.0.0.1:8000/docs>
 
 ## 默认安全状态
 
@@ -141,9 +79,13 @@ Docker Compose 方案保留用于本地容器化开发，不作为主线部署�
 
 单条视频顺序执行；单项失败通过 `POST /video-jobs/{id}/retry-failed` 重跑。Dryrun 使用固定 15 秒分镜模板，不提交外部请求。
 
-## Docker Compose（仅本地可选）
+## Docker Compose
 
-当前默认部署流程不走 Docker。若需要快速本机验证，可按上述本机启动流程；若要本地容器化运行，请单独执行。
+```powershell
+docker compose up --build
+```
+
+Compose 同样只映射到本机回环地址。前端为 `http://127.0.0.1:5173`，后端为 `http://127.0.0.1:8000`。
 
 ## 测试
 

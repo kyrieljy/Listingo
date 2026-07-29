@@ -20,13 +20,15 @@ from backend.app.services.content_safety import (
     run_local_text_safety_review,
 )
 from backend.app.services.jobs import _call_llm_with_fallback
+from backend.app.services.provider_routing import enabled_provider_for_route
 from backend.app.services.providers import ProviderClient
 from backend.app.services.redaction import safe_json
 
 
 FINAL_STATUSES = {"succeeded", "partial_failed", "failed"}
-REMOTE_RUNNING_STATUSES = {"SUBMITTING", "PENDING", "SUBMITTED", "QUEUED", "IN_PROGRESS"}
+REMOTE_RUNNING_STATUSES = {"SUBMITTING", "PENDING", "SUBMITTED", "QUEUED", "IN_PROGRESS", "PROCESSING", "RUNNING"}
 REMOTE_FAILED_STATUSES = {"FAILED", "CANCELLED", "TIMEOUT", "UNKNOWN"}
+REMOTE_SUCCESS_STATUSES = {"COMPLETED", "SUCCEEDED", "SUCCESS"}
 
 
 def public_asset_url(settings: Settings, asset: Asset) -> str:
@@ -146,6 +148,12 @@ def extract_progress(data: dict[str, Any]) -> int | None:
     progress = source.get("progress") if isinstance(source, dict) else None
     if isinstance(progress, (int, float)):
         return max(0, min(100, int(progress)))
+    if isinstance(progress, str):
+        normalized = progress.strip().removesuffix("%")
+        try:
+            return max(0, min(100, int(float(normalized))))
+        except ValueError:
+            return None
     return None
 
 
@@ -174,6 +182,13 @@ def extract_video_url(data: Any) -> str | None:
 
 
 def _enabled_provider(session: Session, capability: str, relation: str = "default") -> Provider:
+    route_key = "llm" if capability == "llm" else "video" if capability == "video" else ""
+    if route_key:
+        try:
+            return enabled_provider_for_route(session, route_key, "primary" if relation == "default" else "fallback")
+        except RuntimeError:
+            # Compatibility for older tests and databases that still only use capability-level flags.
+            pass
     column = Provider.is_default if relation == "default" else Provider.is_fallback
     provider = session.scalar(
         select(Provider).where(Provider.capability == capability, column.is_(True), Provider.enabled.is_(True))
@@ -243,6 +258,7 @@ async def _run_video_job(
         prompt_version = session.get(PromptVersion, job.prompt_version_id)
         if not prompt_version:
             raise RuntimeError("视频 Meta Prompt 版本不存在")
+        prompt_content = str(params.get("_admin_prompt_content") or prompt_version.content)
         llm_default = _enabled_provider(session, "llm", "default") if not job.dry_run else None
         llm_fallback = _enabled_provider(session, "llm", "fallback") if not job.dry_run else None
         video_provider = _enabled_provider(session, "video", "default") if not job.dry_run else None
@@ -263,7 +279,7 @@ async def _run_video_job(
             item.id,
             params,
             image_url,
-            prompt_version,
+            prompt_content,
             llm_default,
             llm_fallback,
             video_provider,
@@ -296,7 +312,7 @@ async def _run_video_item(
     item_id: str,
     params: dict[str, Any],
     image_url: str,
-    prompt_version: PromptVersion,
+    prompt_content: str,
     llm_default: Provider | None,
     llm_fallback: Provider | None,
     video_provider: Provider | None,
@@ -339,7 +355,7 @@ async def _run_video_item(
             llm_default,
             llm_fallback,
             cipher,
-            prompt_version.content,
+            prompt_content,
             script_user_prompt,
             response_format=None,
         )
@@ -376,6 +392,14 @@ async def _run_video_item(
             watermark=bool(params.get("watermark", False)),
         )
         request_id = extract_request_id(response)
+        advanced_settings = {
+            "aspect_ratio": params.get("aspect_ratio", "9:16"),
+            "duration": int(params.get("duration", 15)),
+            "resolution": params.get("resolution", "1080p"),
+            "generate_audio": bool(params.get("generate_audio", True)),
+            "camera_fixed": bool(params.get("camera_fixed", False)),
+            "watermark": bool(params.get("watermark", False)),
+        }
         with session_factory() as session:
             item = session.get(VideoItem, item_id)
             item.provider_id = video_provider.id
@@ -386,7 +410,7 @@ async def _run_video_item(
                     provider_id=video_provider.id,
                     status="succeeded",
                     duration_ms=int((perf_counter() - submit_started) * 1000),
-                    request_summary=safe_json({"video_job_id": job_id, "item_id": item_id, "request_id": request_id}),
+                    request_summary=safe_json({"video_job_id": job_id, "item_id": item_id, "request_id": request_id, "advanced_settings": advanced_settings}),
                     response_summary=safe_json(response),
                     dry_run=False,
                 )
@@ -452,7 +476,7 @@ async def poll_video_completion(
                     base = job.progress
                     job.progress = max(base, min(99, progress))
                     session.commit()
-        if status == "COMPLETED":
+        if status in REMOTE_SUCCESS_STATUSES:
             video_url = extract_video_url(data)
             if not video_url:
                 raise RuntimeError("Seedance 任务完成但响应缺少视频 URL")

@@ -55,6 +55,26 @@ export type AplusJob = {
   completed_at?: string | null
   items: AplusItem[]
 }
+export type PromptTestRun = {
+  id: string
+  prompt_id: string
+  prompt_code: string
+  test_type: 'llm_output' | 'full_chain'
+  status: string
+  progress: number
+  prompt_content_sha256: string
+  input_params: Record<string, unknown>
+  raw_output: string
+  parsed_output: Record<string, unknown>
+  validation_errors: string[]
+  related_job_type: string | null
+  related_job_id: string | null
+  artifact_urls: string[]
+  provider_code: string | null
+  error: string | null
+  created_at: string
+  updated_at: string
+}
 
 export async function uploadAsset(file: File): Promise<Asset> {
   const form = new FormData()
@@ -115,6 +135,22 @@ export async function createAplusGenerationJob(payload: Record<string, unknown>)
 
 export async function getAplusGenerationJob(id: string): Promise<AplusJob> {
   return (await api.get(`/aplus-generation-jobs/${id}`)).data
+}
+
+export async function listAplusGenerationJobs(): Promise<AplusJob[]> {
+  return (await api.get('/aplus-generation-jobs')).data
+}
+
+export async function createPromptTestRun(promptId: string, payload: Record<string, unknown>): Promise<PromptTestRun> {
+  return (await api.post(`/admin/prompts/${promptId}/test-runs`, payload)).data
+}
+
+export async function getPromptTestRun(id: string): Promise<PromptTestRun> {
+  return (await api.get(`/admin/prompt-test-runs/${id}`)).data
+}
+
+export async function listPromptTestRuns(promptId: string): Promise<PromptTestRun[]> {
+  return (await api.get(`/admin/prompts/${promptId}/test-runs`)).data
 }
 
 export async function retryFailedVideoItems(jobId: string): Promise<VideoJob> {

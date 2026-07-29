@@ -1,10 +1,7 @@
 .video-workspace { position: absolute; inset: 54px 0 0 72px; display: grid; grid-template-columns: 398px 1fr; background: #f3f4f6; overflow: hidden; }
 .video-panel { background: #fff; border-right: 1px solid #e8e9ef; overflow-y: auto; display: flex; flex-direction: column; }
-.video-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 14px 22px; border-bottom: 1px solid #f0f0f3; }
-.video-tabs button { height: 32px; border-radius: 8px; background: #f2f3f5; color: #596171; font-weight: 650; }
-.video-tabs button.active { background: #fff; color: #20232a; box-shadow: 0 1px 8px rgba(31, 35, 41, .1); }
 .video-section { padding: 19px 22px; border-bottom: 1px solid #f0f0f3; }
-.video-section .section-title button { height: 26px; padding: 0 10px; border-radius: 99px; background: #20232a; color: #fff; font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
+.video-section .section-title button { margin-left: auto; color: #6c5ce7; font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
 .video-upload { height: 104px; border: 1px dashed #d6dbe5; border-radius: 10px; background: #fafbfc; display: grid; place-items: center; align-content: center; gap: 5px; color: #7b68ee; position: relative; }
 .video-upload input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .video-upload b { color: #3b414c; font-size: 13px; }
@@ -21,11 +18,13 @@
 .video-field-grid select, .video-full-select select, .video-full-select input, .video-advanced select, .video-section textarea { height: 34px; border: 1px solid #e2e5eb; border-radius: 8px; background: #fff; padding: 0 9px; color: #252a32; outline: none; }
 .video-full-select { margin-top: 8px; }
 .video-section textarea { height: auto; min-height: 116px; width: 100%; padding: 10px; resize: vertical; line-height: 1.5; }
+.video-selling-points-input::placeholder { color: #a7acb5; opacity: 1; font-size: 13px; line-height: 1.5; }
 .video-type-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.video-type-grid button { min-height: 48px; border-radius: 8px; background: #f6f7f9; display: flex; align-items: center; gap: 7px; padding: 8px; color: #626b78; text-align: left; }
-.video-type-grid button.active { background: #eef4ff; color: #2264d1; box-shadow: inset 0 0 0 1px #9ec2ff; }
-.video-type-grid span { display: flex; flex-direction: column; gap: 2px; }
-.video-type-grid b { font-size: 12px; }
+.video-type-grid button { min-height: 58px; padding: 10px; border: 1px solid #e0e3ea; border-radius: 9px; background: #fff; color: #4b5563; display: flex; align-items: center; gap: 9px; text-align: left; }
+.video-type-grid button.active { border-color: #6c5ce7; background: #f8f6ff; color: #3527bd; }
+.video-type-grid i { width: 16px; height: 16px; border: 1px solid #cfd4dc; border-radius: 4px; display: grid; place-items: center; color: #6c5ce7; font-size: 10px; font-style: normal; flex: 0 0 auto; }
+.video-type-grid span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.video-type-grid b { font-size: 13px; color: inherit; }
 .video-type-grid small { font-size: 10px; color: #9aa0aa; }
 .advanced-trigger { width: 100%; height: 30px; border-radius: 8px; background: #f6f7f9; color: #4c5563; font-weight: 650; }
 .video-advanced { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }

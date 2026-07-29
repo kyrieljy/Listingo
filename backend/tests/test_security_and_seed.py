@@ -1,8 +1,10 @@
+import json
+
 from sqlalchemy import select
 
 from backend.app.models import Provider, Prompt, PromptVersion, Workflow, WorkflowVersion
 from backend.app.security import ApiKeyCipher, mask_api_key
-from backend.app.seed import seed_database
+from backend.app.seed import LEGACY_VIDEO_PROVIDER_CODE, VIDEO_PROVIDER_CODE, seed_database
 
 
 def test_api_key_encrypts_at_rest_and_masks_response(tmp_path) -> None:
@@ -32,7 +34,7 @@ def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(clien
             "gemini-3.1-flash-image",
             "gemini-3-pro-image",
             "gpt-image-2",
-            "bytedance/doubao-seedance-1-5-pro",
+            "bytedance/doubao-seedance-2-0",
         }
         aplus_mobile = next(provider for provider in providers if provider.code == "aplus-mobile-edit-low-cost")
         doubao = next(provider for provider in providers if provider.code == "doubao-seed-2-0-mini")
@@ -40,18 +42,27 @@ def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(clien
         nano_pro = next(provider for provider in providers if provider.code == "yunwu-nano-pro")
         nano = next(provider for provider in providers if provider.code == "yunwu-nano")
         image2 = next(provider for provider in providers if provider.code == "yunwu-image-2")
-        video = next(provider for provider in providers if provider.code == "shengsuanyun-seedance-1-5-pro")
+        video = next(provider for provider in providers if provider.code == "shengsuanyun-doubao-seedance-2-0")
         assert doubao.is_default is True and doubao.is_fallback is False
         assert qwen.is_default is False and qwen.is_fallback is True
         assert nano_pro.is_default is True and nano_pro.is_fallback is False
         assert nano.is_default is False and nano.is_fallback is True
         assert image2.is_default is False and image2.is_fallback is False
+        assert json.loads(image2.config_json)["route_roles"] == {"suite_layout": "primary", "aplus_detail": "primary"}
         assert aplus_mobile.capability == "image"
         assert aplus_mobile.base_url.endswith("/v1/images/edits")
         assert aplus_mobile.is_default is False and aplus_mobile.is_fallback is False
+        assert json.loads(aplus_mobile.config_json)["route_roles"] == {"aplus_mobile": "primary"}
         assert video.capability == "video"
         assert video.is_default is True and video.is_fallback is False
         assert video.base_url.endswith("/api/v1/tasks/generations")
+        assert video.model_name == "bytedance/doubao-seedance-2-0"
+        assert json.loads(video.config_json)["image_role"] == "reference_image"
+        assert json.loads(video.config_json)["route_roles"] == {"video": "primary"}
+        assert json.loads(doubao.config_json)["route_roles"] == {"llm": "primary"}
+        assert json.loads(qwen.config_json)["route_roles"] == {"llm": "fallback"}
+        assert json.loads(nano_pro.config_json)["route_roles"] == {"suite_fidelity": "primary"}
+        assert json.loads(nano.config_json)["route_roles"] == {"suite_fidelity": "fallback"}
         assert doubao.base_url.endswith("/api/v1/chat/completions")
         assert doubao.model_name == "bytedance/doubao-seed-2-0-mini"
         assert nano_pro.base_url.endswith("/v1beta/models/gemini-3-pro-image:generateContent")
@@ -73,7 +84,8 @@ def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(clien
         assert video_prompt is not None and video_prompt.active_version_id is not None
         assert aplus_prompt is not None and aplus_prompt.active_version_id is not None
         assert "电商 AI 视频 Meta Prompt" in session.get(PromptVersion, video_prompt.active_version_id).content
-        assert "A+详情页提示词0224" in session.get(PromptVersion, aplus_prompt.active_version_id).content
+        assert "A+详情页提示词0729" in session.get(PromptVersion, aplus_prompt.active_version_id).content
+        assert "module_selections" in session.get(PromptVersion, aplus_prompt.active_version_id).content
         copywriting_version = session.get(PromptVersion, copywriting.active_version_id)
         for required_rule in [
             "仅有图",
@@ -104,6 +116,26 @@ def test_seed_upgrades_an_existing_legacy_workflow_once(client) -> None:
         assert "product_vision" in upgraded.graph_json
         seed_database(session)
         assert len(session.scalars(select(WorkflowVersion).where(WorkflowVersion.workflow_id == workflow.id)).all()) == 2
+
+
+def test_seed_migrates_legacy_video_provider_without_duplicate_insert(client) -> None:
+    session_factory = client.app.state.session_factory
+    with session_factory() as session:
+        video = session.scalar(select(Provider).where(Provider.code == VIDEO_PROVIDER_CODE))
+        video.code = LEGACY_VIDEO_PROVIDER_CODE
+        video.model_name = "bytedance/doubao-seedance-1-5-pro"
+        session.commit()
+
+        seed_database(session)
+
+        current_video = session.scalar(select(Provider).where(Provider.code == VIDEO_PROVIDER_CODE))
+        legacy_video = session.scalar(select(Provider).where(Provider.code == LEGACY_VIDEO_PROVIDER_CODE))
+        providers = session.scalars(select(Provider)).all()
+        assert current_video is not None
+        assert legacy_video is None
+        assert current_video.model_name == "bytedance/doubao-seedance-2-0"
+        assert json.loads(current_video.config_json)["image_role"] == "reference_image"
+        assert len(providers) == 8
 
 
 def test_seed_upgrades_legacy_copywriting_prompt_once(client) -> None:

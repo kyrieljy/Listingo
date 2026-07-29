@@ -8,11 +8,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.models import Prompt, PromptVersion, Provider, Workflow, WorkflowVersion
+from backend.app.services.provider_routing import (
+    PROVIDER_ROUTE_DEFINITIONS,
+    default_route_roles_for_provider,
+    normalize_route_roles,
+    provider_config,
+    write_provider_config,
+)
 from backend.app.services.workflow_registry import default_workflow_json, workflow_preset_dicts
 
 
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "ecommerce_meta_prompt_v1.md"
-APLUS_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "aplus_meta_prompt_0224.md"
+APLUS_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "aplus_meta_prompt_0729.md"
+LEGACY_VIDEO_PROVIDER_CODE = "shengsuanyun-seedance-1-5-pro"
+VIDEO_PROVIDER_CODE = "shengsuanyun-doubao-seedance-2-0"
 
 AUXILIARY_PROMPT_PRESETS = [
     ("product-vision", "商品视觉事实提取", "读取商品参考图，输出供核心 Meta Prompt 使用的结构化事实。", "product_vision_v1.md"),
@@ -33,7 +42,7 @@ PROVIDER_PRESETS = [
         "model_name": "bytedance/doubao-seed-2-0-mini",
         "is_default": True,
         "is_fallback": False,
-        "config": {"temperature": 0.2, "timeout_seconds": 90, "response_format": "json_object"},
+        "config": {"temperature": 0.2, "timeout_seconds": 90, "response_format": "json_object", "route_roles": {"llm": "primary"}},
     },
     {
         "code": "gpt-5-4-mini",
@@ -55,7 +64,7 @@ PROVIDER_PRESETS = [
         "model_name": "ali/qwen3.6-plus",
         "is_default": False,
         "is_fallback": True,
-        "config": {"temperature": 0.2, "timeout_seconds": 90, "response_format": "json_object"},
+        "config": {"temperature": 0.2, "timeout_seconds": 90, "response_format": "json_object", "route_roles": {"llm": "fallback"}},
     },
     {
         "code": "yunwu-nano-pro",
@@ -71,6 +80,7 @@ PROVIDER_PRESETS = [
             "allowed_resolutions": ["1K", "2K", "4K"],
             "format": "png",
             "timeout_seconds": 240,
+            "route_roles": {"suite_fidelity": "primary"},
         },
     },
     {
@@ -87,6 +97,7 @@ PROVIDER_PRESETS = [
             "allowed_resolutions": ["512", "1K", "2K", "4K"],
             "format": "png",
             "timeout_seconds": 180,
+            "route_roles": {"suite_fidelity": "fallback"},
         },
     },
     {
@@ -115,6 +126,7 @@ PROVIDER_PRESETS = [
             "format": "png",
             "compression": 90,
             "timeout_seconds": 180,
+            "route_roles": {"suite_layout": "primary", "aplus_detail": "primary"},
         },
     },
     {
@@ -142,31 +154,64 @@ PROVIDER_PRESETS = [
             "format": "png",
             "compression": 90,
             "timeout_seconds": 180,
+            "route_roles": {"aplus_mobile": "primary"},
         },
     },
     {
-        "code": "shengsuanyun-seedance-1-5-pro",
-        "label": "胜算云 Seedance 1.5 Pro",
+        "code": VIDEO_PROVIDER_CODE,
+        "label": "胜算云 Doubao-Seedance-2.0",
         "capability": "video",
         "adapter": "shengsuanyun_tasks_generation",
         "base_url": "https://router.shengsuanyun.com/api/v1/tasks/generations",
-        "model_name": "bytedance/doubao-seedance-1-5-pro",
+        "model_name": "bytedance/doubao-seedance-2-0",
         "is_default": True,
         "is_fallback": False,
         "config": {
-            "resolution": "1080p",
-            "allowed_resolutions": ["720p", "1080p"],
+            "resolution": "720p",
+            "allowed_resolutions": ["480p", "720p", "1080p"],
             "duration": 15,
             "timeout_seconds": 600,
             "poll_interval_seconds": 5,
             "generate_audio": True,
+            "image_role": "reference_image",
+            "return_last_frame": False,
+            "draft": False,
+            "tools": [],
             "watermark": False,
+            "route_roles": {"video": "primary"},
         },
     },
 ]
 
 
+def ensure_default_provider_route_roles(session: Session) -> None:
+    providers = session.scalars(select(Provider)).all()
+    assigned_route_keys: set[str] = set()
+    for provider in providers:
+        assigned_route_keys.update(normalize_route_roles(provider_config(provider).get("route_roles")).keys())
+    missing_route_keys = set(PROVIDER_ROUTE_DEFINITIONS) - assigned_route_keys
+    if not missing_route_keys:
+        return
+    by_code = {provider.code: provider for provider in providers}
+    for provider_code, route_roles in ((code, default_route_roles_for_provider(code)) for code in by_code):
+        relevant_roles = {route_key: role for route_key, role in route_roles.items() if route_key in missing_route_keys}
+        if not relevant_roles:
+            continue
+        provider = by_code[provider_code]
+        config = provider_config(provider)
+        roles = normalize_route_roles(config.get("route_roles"))
+        roles.update(relevant_roles)
+        config["route_roles"] = roles
+        write_provider_config(provider, config)
+
+
 def seed_database(session: Session) -> None:
+    legacy_video = session.scalar(select(Provider).where(Provider.code == LEGACY_VIDEO_PROVIDER_CODE))
+    current_video = session.scalar(select(Provider).where(Provider.code == VIDEO_PROVIDER_CODE))
+    if legacy_video and not current_video:
+        legacy_video.code = VIDEO_PROVIDER_CODE
+        session.flush()
+
     for preset in PROVIDER_PRESETS:
         existing = session.scalar(select(Provider).where(Provider.code == preset["code"]))
         if existing:
@@ -189,6 +234,14 @@ def seed_database(session: Session) -> None:
                     config["size"] = "follow_ratio"
                 config["allowed_sizes"] = preset["config"]["allowed_sizes"]
                 existing.config_json = json.dumps(config, ensure_ascii=False)
+            if preset["code"] == VIDEO_PROVIDER_CODE:
+                config = json.loads(existing.config_json)
+                for key, value in preset["config"].items():
+                    config.setdefault(key, value)
+                config["allowed_resolutions"] = preset["config"]["allowed_resolutions"]
+                if config.get("image_role") not in {"reference_image", "first_frame"}:
+                    config["image_role"] = preset["config"]["image_role"]
+                existing.config_json = json.dumps(config, ensure_ascii=False)
             continue
         session.add(
             Provider(
@@ -205,6 +258,12 @@ def seed_database(session: Session) -> None:
             )
         )
     session.flush()
+    ensure_default_provider_route_roles(session)
+
+    legacy_video = session.scalar(select(Provider).where(Provider.code == LEGACY_VIDEO_PROVIDER_CODE))
+    if legacy_video:
+        legacy_video.is_default = False
+        legacy_video.is_fallback = False
 
     doubao = session.scalar(select(Provider).where(Provider.code == "doubao-seed-2-0-mini"))
     qwen = session.scalar(select(Provider).where(Provider.code == "qwen-3-6"))
@@ -296,25 +355,45 @@ def seed_database(session: Session) -> None:
         auxiliary.active_version_id = version.id
 
     aplus_prompt = session.scalar(select(Prompt).where(Prompt.code == "aplus-meta"))
+    aplus_content = APLUS_PROMPT_PATH.read_text(encoding="utf-8-sig")
+    aplus_content_sha256 = hashlib.sha256(aplus_content.encode("utf-8")).hexdigest().upper()
     if not aplus_prompt:
         aplus_prompt = Prompt(
             code="aplus-meta",
             name="A+ 详情页 Meta Prompt",
-            description="二期详情页模块方案 Prompt，使用用户上传的 0224 版本作为首版。",
+            description="二期详情页模块方案 Prompt，使用用户上传的 0729 版本作为首版。",
         )
         session.add(aplus_prompt)
         session.flush()
-        content = APLUS_PROMPT_PATH.read_text(encoding="utf-8-sig")
         version = PromptVersion(
             prompt_id=aplus_prompt.id,
             version_no=1,
-            content=content,
-            content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest().upper(),
-            change_note="导入用户提供的 A+ 详情页提示词 0224",
+            content=aplus_content,
+            content_sha256=aplus_content_sha256,
+            change_note="导入用户提供的 A+ 详情页提示词 0729",
         )
         session.add(version)
         session.flush()
         aplus_prompt.active_version_id = version.id
+    else:
+        active_version = (
+            session.get(PromptVersion, aplus_prompt.active_version_id)
+            if aplus_prompt.active_version_id
+            else None
+        )
+        if not active_version or active_version.content_sha256 != aplus_content_sha256:
+            versions = session.scalars(select(PromptVersion).where(PromptVersion.prompt_id == aplus_prompt.id)).all()
+            version = PromptVersion(
+                prompt_id=aplus_prompt.id,
+                version_no=max((item.version_no for item in versions), default=0) + 1,
+                content=aplus_content,
+                content_sha256=aplus_content_sha256,
+                change_note="升级 A+ 详情页 Meta Prompt：0729 版本",
+            )
+            session.add(version)
+            session.flush()
+            aplus_prompt.active_version_id = version.id
+        aplus_prompt.description = "二期详情页模块方案 Prompt，使用用户上传的 0729 版本。"
 
     for preset in workflow_preset_dicts():
         graph_json = json.dumps(preset["graph"], ensure_ascii=False, separators=(",", ":"))

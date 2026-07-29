@@ -271,6 +271,53 @@ def test_image2_with_reference_image_routes_to_multipart_edit(tmp_path) -> None:
     assert "source.png" in seen["body"]
 
 
+def test_image2_edit_retries_http_429_once(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"fake-png")
+    calls = 0
+    provider = image2_provider()
+    provider.config_json = json.dumps({"size": "follow_ratio", "quality": "auto", "format": "png", "max_retries": 1})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"retry-after": "0"}, json={"error": {"message": "rate limit"}})
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(b"edited").decode()}]})
+
+    async def run() -> bytes:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            return await ProviderClient(http_client).generate_image(
+                provider, "key", "prompt", [str(source)], "4:5"
+            )
+
+    assert asyncio.run(run()) == b"edited"
+    assert calls == 2
+
+
+def test_image2_edit_reports_rate_limit_after_retries(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"fake-png")
+    calls = 0
+    provider = image2_provider()
+    provider.config_json = json.dumps({"size": "follow_ratio", "quality": "auto", "format": "png", "max_retries": 1})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(429, headers={"retry-after": "0"}, json={"error": {"message": "rate limit"}})
+
+    async def run() -> bytes:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            return await ProviderClient(http_client).generate_image(
+                provider, "key", "prompt", [str(source)], "4:5"
+            )
+
+    with pytest.raises(RuntimeError, match="HTTP 429 Too Many Requests"):
+        asyncio.run(run())
+    assert calls == 2
+
+
 def test_live_http_client_forces_ipv4_on_windows() -> None:
     client = build_async_http_client(30)
     assert client._transport._pool._local_address == "0.0.0.0"  # type: ignore[attr-defined]

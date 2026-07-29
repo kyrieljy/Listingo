@@ -9,8 +9,8 @@ import {
 } from '@ant-design/icons-vue'
 import BrandLogo from '../../components/BrandLogo.vue'
 import {
-  assistCopywriting, createJob, editItem, generationDownloadUrl, getJob, listJobs, retryFailedItems, uploadAsset,
-  type Asset, type DownloadFormat, type Job, type JobItem,
+  assistCopywriting, createJob, editItem, generationDownloadUrl, getJob, listAplusGenerationJobs, listJobs, listVideoJobs, retryFailedItems, uploadAsset,
+  type AplusJob, type Asset, type DownloadFormat, type Job, type JobItem, type VideoJob,
 } from '../../api/client'
 import APlusPhasePanel from './APlusPhasePanel.vue'
 import DemoPhasePanel from './DemoPhasePanel.vue'
@@ -25,9 +25,12 @@ import {
 const route = useRoute(); const router = useRouter()
 const phase = computed<PhaseKey>(() => phaseDefinitions.some((item) => item.key === route.params.phase) ? route.params.phase as PhaseKey : 'suite')
 const mobileOpen = ref(false); const uploading = ref(false); const generating = ref(false); const helping = ref(false)
-const assets = ref<Asset[]>([]); const job = ref<Job | null>(null); const history = ref<Job[]>([])
+type HistoryEntry = Job | AplusJob | VideoJob
+type HistoryPanelRef<T> = { openHistoryJob: (entry: T) => Promise<void> }
+const assets = ref<Asset[]>([]); const job = ref<Job | null>(null); const history = ref<HistoryEntry[]>([])
 const historyOpen = ref(false); const previewOpen = ref(false); const editOpen = ref(false); const confirmOpen = ref(false); const activeItem = ref<JobItem | null>(null)
 const downloadMenuOpen = ref(false)
+const aplusPanel = ref<HistoryPanelRef<AplusJob> | null>(null); const videoPanel = ref<HistoryPanelRef<VideoJob> | null>(null)
 const selected = ref<string[]>([]); const editInstruction = ref('背景改为更明亮的淡紫色，保持产品外观不变')
 const aiSuggestion = ref(''); const aiWriteOpen = ref(false); const preferenceOpen = ref(false)
 const sellingPointsEditing = ref(false); const aiSuggestionEditing = ref(false)
@@ -52,9 +55,11 @@ const inputValid = computed(() => form.value.sellingPoints.trim().length > 0)
 const layoutPreferred = computed(() => form.value.modelPreference === 'layout')
 const selectedModelPreference = computed(() => modelPreferenceOptions.find((option) => option.key === form.value.modelPreference) ?? modelPreferenceOptions[0])
 const currentFailureMessage = computed(() => generationFailureMessage(job.value))
+const historyTitle = computed(() => phase.value === 'video' ? '视频历史' : phase.value === 'aplus' ? 'A+ 详情历史' : '套图历史')
+const historyEmptyText = computed(() => phase.value === 'video' ? '暂无视频历史任务' : phase.value === 'aplus' ? '暂无 A+ 详情历史任务' : '暂无套图历史任务')
 
 watch(phase, () => { mobileOpen.value = false; preferenceOpen.value = false })
-onMounted(async () => { try { history.value = await listJobs() } catch { history.value = [] } })
+onMounted(async () => { await loadPhaseHistory() })
 
 function requestDetail(error: any): string {
   const detail = error?.response?.data?.detail
@@ -92,7 +97,29 @@ function createOptimisticJob(payload: Record<string, unknown>): Job {
   }
 }
 
+function preservePendingJobItems(latest: Job): Job {
+  if (latest.items.length || !job.value?.items.length) return latest
+  const items = latest.status === 'failed'
+    ? job.value.items.map((item) => ({ ...item, status: 'failed', error: item.error || latest.error }))
+    : job.value.items
+  return { ...latest, items, count: latest.count || job.value.count }
+}
+
 function navigate(key: PhaseKey) { router.push(`/app/${key}`) }
+async function loadPhaseHistory() {
+  try {
+    if (phase.value === 'video') history.value = await listVideoJobs()
+    else if (phase.value === 'aplus') history.value = await listAplusGenerationJobs()
+    else if (phase.value === 'suite') history.value = await listJobs()
+    else history.value = []
+  } catch {
+    history.value = []
+  }
+}
+async function openHistoryDrawer() {
+  historyOpen.value = true
+  await loadPhaseHistory()
+}
 function selectModelPreference(key: (typeof modelPreferenceOptions)[number]['key']) { form.value.modelPreference = key; preferenceOpen.value = false }
 async function editSellingPoints() { sellingPointsEditing.value = true; await nextTick(); sellingPointsInput.value?.focus() }
 async function editAiSuggestion() { aiSuggestionEditing.value = true; await nextTick(); aiSuggestionInput.value?.focus() }
@@ -145,7 +172,7 @@ function adjustCustomCount(key: CustomCountKey, delta: number) {
 }
 async function waitForJob(jobId: string): Promise<Job> {
   for (let attempt = 0; attempt < 900; attempt += 1) {
-    const latest = await getJob(jobId); job.value = latest
+    const latest = preservePendingJobItems(await getJob(jobId)); job.value = latest
     if (['succeeded', 'partial_failed', 'failed'].includes(latest.status)) return latest
     await new Promise((resolve) => window.setTimeout(resolve, 1000))
   }
@@ -164,7 +191,7 @@ async function runConfirmedGeneration() {
     const payload = buildGenerationPayload(assets.value.map((a) => a.id), form.value.sellingPoints, form.value)
     job.value = createOptimisticJob(payload)
     selected.value = []
-    const created = await createJob(payload); job.value = created
+    const created = preservePendingJobItems(await createJob(payload)); job.value = created
     const finished = await waitForJob(created.id); job.value = finished
     selected.value = finished.items.filter((i) => i.status === 'succeeded').map((i) => i.id); history.value = await listJobs()
     const failureMessage = generationFailureMessage(finished)
@@ -199,7 +226,26 @@ function download(format: DownloadFormat = 'zip') {
   if (job.value.id.startsWith('optimistic-')) return message.warning('任务仍在生成中，请稍后下载')
   window.open(generationDownloadUrl(job.value.id, selected.value, format), '_blank')
 }
-async function openHistoryJob(entry: Job) { job.value = await getJob(entry.id); selected.value = job.value.items.filter((item) => item.status === 'succeeded').map((item) => item.id); historyOpen.value = false }
+function historyThumbnail(entry: HistoryEntry): string {
+  const url = entry.items[0]?.versions.at(-1)?.url || entry.items[0]?.versions[0]?.url || ''
+  if (phase.value === 'video') return '/demo/video-skincare-result.png'
+  if (url) return url
+  return phase.value === 'aplus' ? '/demo/video-backpack-showcase-01.png' : '/demo/tumbler-source.png'
+}
+function historySummary(entry: HistoryEntry): string {
+  if (phase.value === 'video') return `${String(entry.params.platform || '视频')} · ${entry.count} 条`
+  if (phase.value === 'aplus') return `${String(entry.params.platform || 'A+ 详情')} · ${entry.items.length || entry.count} 张`
+  return `${String(entry.params.platform || '商品套图')} · ${entry.count} 张`
+}
+async function openHistoryJob(entry: HistoryEntry) {
+  if (phase.value === 'video') await videoPanel.value?.openHistoryJob(entry as VideoJob)
+  else if (phase.value === 'aplus') await aplusPanel.value?.openHistoryJob(entry as AplusJob)
+  else {
+    job.value = await getJob(entry.id)
+    selected.value = job.value.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
+  }
+  historyOpen.value = false
+}
 </script>
 
 <template>
@@ -209,7 +255,7 @@ async function openHistoryJob(entry: Job) { job.value = await getJob(entry.id); 
       <button class="new-task" @click="startNewTask"><PlusOutlined />新建任务</button>
       <div class="topbar-spacer" />
       <span class="mode-status"><i />{{ form.dryRun ? 'Dryrun 安全模式' : 'Live 模式' }}</span>
-      <button class="header-link" @click="historyOpen = true"><HistoryOutlined />历史记录</button>
+      <button class="header-link" @click="openHistoryDrawer"><HistoryOutlined />历史记录</button>
       <button class="header-link" @click="router.push('/admin/providers')"><SettingOutlined />运营后台</button>
     </header>
     <nav class="phase-rail">
@@ -218,7 +264,7 @@ async function openHistoryJob(entry: Job) { job.value = await getJob(entry.id); 
         <span>{{ item.short }}</span>
       </button>
     </nav>
-    <APlusPhasePanel v-if="phase==='aplus'" />
+    <APlusPhasePanel v-if="phase==='aplus'" ref="aplusPanel" />
     <button v-if="phase==='suite'" class="mobile-config-trigger" @click="mobileOpen = true"><MenuFoldOutlined />参数</button>
     <div v-if="phase==='suite' && mobileOpen" class="mobile-scrim" @click="mobileOpen=false" />
     <aside v-if="phase==='suite'" class="config-panel" :class="{ 'mobile-open': mobileOpen }">
@@ -296,8 +342,8 @@ async function openHistoryJob(entry: Job) { job.value = await getJob(entry.id); 
       </template>
     </main>
     <main v-else-if="phase==='agent'" class="preview-canvas"><DemoPhasePanel :phase="phase"/></main>
-    <VideoPhasePanel v-else-if="phase==='video'" />
-    <a-drawer v-model:open="historyOpen" title="生成历史" width="420"><div class="history-list"><button v-for="entry in history" :key="entry.id" @click="openHistoryJob(entry)"><img :src="entry.items[0]?.versions[0]?.url || '/demo/tumbler-source.png'" alt="历史缩略图"/><span><b>{{ String(entry.params.platform || '商品套图') }} · {{ entry.count }} 张</b><small><ClockCircleOutlined/>{{ new Date(entry.created_at).toLocaleString() }}</small><em>{{ entry.status }}</em></span></button><p v-if="!history.length">暂无历史任务</p></div></a-drawer>
+    <VideoPhasePanel v-else-if="phase==='video'" ref="videoPanel" />
+    <a-drawer v-model:open="historyOpen" :title="historyTitle" width="420"><div class="history-list"><button v-for="entry in history" :key="entry.id" @click="openHistoryJob(entry)"><img :src="historyThumbnail(entry)" alt="历史缩略图"/><span><b>{{ historySummary(entry) }}</b><small><ClockCircleOutlined/>{{ new Date(entry.created_at).toLocaleString() }}</small><em>{{ entry.status }} · {{ entry.dry_run ? 'Dryrun' : 'Live' }}</em></span></button><p v-if="!history.length">{{ historyEmptyText }}</p></div></a-drawer>
     <a-modal v-model:open="previewOpen" title="结果预览" :footer="null" width="720"><img class="modal-preview" :src="currentPreview" alt="结果预览"/><div class="version-strip"><button v-for="version in activeItem?.versions" :key="version.id" @click="activeItem && (activeItem.current_version_id=version.id)">V{{ version.version_no }} · {{ version.instruction }}</button></div></a-modal>
     <a-modal v-model:open="editOpen" title="二次编辑 · 创建子版本" ok-text="生成新版本" cancel-text="取消" @ok="submitEdit"><div class="edit-dialog"><img :src="currentPreview" alt="当前版本"/><label>修改要求<textarea v-model="editInstruction" rows="5"/></label><p>Live 时将使用“当前版本图 + 原始商品图 + 修改要求”调用 generate；Dryrun 使用本地资产演示版本链。</p></div></a-modal>
     <a-modal v-model:open="confirmOpen" title="确认生成策略" ok-text="确认并开始生成" cancel-text="返回修改" @ok="runConfirmedGeneration"><div class="generation-confirm"><p>系统将先读取商品图提取事实，再由当前 Meta Prompt 规划套图；生成前后会拦截黄赌毒、政治内容和政治领导人等安全风险。</p><dl><div><dt>平台 / 市场</dt><dd>{{ form.platform }} / {{ form.market }}</dd></div><div><dt>语言 / 比例</dt><dd>{{ form.language }} / {{ ratioValues[form.ratio] || '1:1' }}</dd></div><div><dt>套图结构</dt><dd>{{ form.mode==='smart' ? `智能匹配 ${count} 张` : `自定义 ${count} 张` }}</dd></div><div><dt>生成偏好</dt><dd>{{ layoutPreferred ? '视觉排版优先' : '商品保持优先' }}</dd></div><div><dt>内容安全</dt><dd>输入、规划文本和最终图片均会进行安全审计</dd></div></dl></div></a-modal>

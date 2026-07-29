@@ -5,9 +5,11 @@ import base64
 import json
 
 import httpx
+import pytest
 from sqlalchemy import select
 
 from backend.app.models import Prompt, Provider
+from backend.app.services.aplus_jobs import _module_text, _parse_aplus_plan, _planning_canvas, _replace_prompt_variables
 from backend.app.services.prompt_contract import (
     ImagePromptItem,
     MetaPromptPlan,
@@ -17,6 +19,7 @@ from backend.app.services.prompt_contract import (
 )
 from backend.app.services.execution import validate_plan_with_one_replan
 from backend.app.services.providers import ProviderClient
+from backend.app.services.video_jobs import extract_progress
 from backend.app.services.workflow_registry import default_workflow_json, validate_workflow_graph, workflow_preset_dicts
 
 
@@ -119,6 +122,66 @@ def test_openai_llm_can_receive_product_images_as_multimodal_input(tmp_path) -> 
     assert user_content[1]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(b"png-bytes").decode()
 
 
+def test_seedance_2_provider_payload_uses_documented_task_schema() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen.update(json.loads(request.content.decode()))
+        return httpx.Response(200, json={"code": "success", "data": {"request_id": "task-123"}})
+
+    provider = Provider(
+        code="shengsuanyun-doubao-seedance-2-0",
+        label="胜算云 Doubao-Seedance-2.0",
+        capability="video",
+        adapter="shengsuanyun_tasks_generation",
+        base_url="https://router.shengsuanyun.com/api/v1/tasks/generations",
+        model_name="bytedance/doubao-seedance-2-0",
+        enabled=True,
+        is_default=True,
+        is_fallback=False,
+        config_json=json.dumps({"timeout_seconds": 30, "return_last_frame": False, "draft": False, "tools": []}),
+    )
+
+    async def run() -> dict[str, object]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            return await ProviderClient(http_client).submit_video_task(
+                provider,
+                "sk-test",
+                "生成 15 秒商品视频",
+                "https://assets.example.test/product.png",
+                aspect_ratio="9:16",
+                duration=15,
+                resolution="720p",
+                generate_audio=True,
+                camera_fixed=True,
+                watermark=False,
+            )
+
+    assert asyncio.run(run())["data"]["request_id"] == "task-123"
+    assert seen["url"] == "https://router.shengsuanyun.com/api/v1/tasks/generations"
+    assert seen["model"] == "bytedance/doubao-seedance-2-0"
+    assert seen["content"] == [
+        {"type": "text", "text": "生成 15 秒商品视频"},
+        {"type": "image_url", "role": "reference_image", "image_url": {"url": "https://assets.example.test/product.png"}},
+    ]
+    assert seen["ratio"] == "9:16"
+    assert seen["resolution"] == "720p"
+    assert seen["duration"] == 15
+    assert seen["generate_audio"] is True
+    assert seen["camera_fixed"] is True
+    assert seen["watermark"] is False
+    assert seen["return_last_frame"] is False
+    assert seen["draft"] is False
+    assert seen["tools"] == []
+
+
+def test_seedance_progress_accepts_percent_strings() -> None:
+    assert extract_progress({"progress": "80%"}) == 80
+    assert extract_progress({"data": {"progress": "99.8%"}}) == 99
+    assert extract_progress({"progress": "not-ready"}) is None
+
+
 def test_seed_exposes_all_prompt_engineering_assets(client) -> None:
     with client.app.state.session_factory() as session:
         codes = set(session.scalars(select(Prompt.code)).all())
@@ -136,6 +199,101 @@ def test_workflow_registry_exposes_suite_video_and_aplus_assets() -> None:
     presets = workflow_preset_dicts()
     assert [preset["code"] for preset in presets] == ["product-suite-v1", "video-v1", "aplus-detail-v1"]
     assert all(validate_workflow_graph(preset["graph"]) == [] for preset in presets)
+
+
+def test_aplus_module_counts_render_prompt_variables_and_canvas() -> None:
+    selections = [{"name": "商品主视觉", "count": 1}, {"name": "卖点拆解", "count": 3}]
+    canvas = _planning_canvas([{"mode": "amazon_aplus_standard", "aspect_ratio": "970:600"}])
+    rendered = _replace_prompt_variables(
+        "${modules}|${width}|${height}|${proportion}|${input_language}|${brand_style}|${reference_assets}|${module_selections}|${canvas}|${output_targets}",
+        {
+            "modules": _module_text(selections),
+            "width": canvas["width"],
+            "height": canvas["height"],
+            "proportion": canvas["proportion"],
+            "input_language": "中文",
+            "brand_style": "现代克制",
+            "reference_assets": '{"sku_count":4}',
+            "module_selections": '[{"name":"商品主视觉","count":1},{"name":"卖点拆解","count":3}]',
+            "canvas": '{"width":970,"height":600,"proportion":"970:600"}',
+            "output_targets": '[{"mode":"amazon_aplus_standard","aspect_ratio":"970:600"}]',
+        },
+    )
+
+    assert _module_text(selections) == "商品主视觉1张/卖点拆解3张"
+    assert rendered == '商品主视觉1张/卖点拆解3张|970|600|970:600|中文|现代克制|{"sku_count":4}|[{"name":"商品主视觉","count":1},{"name":"卖点拆解","count":3}]|{"width":970,"height":600,"proportion":"970:600"}|[{"mode":"amazon_aplus_standard","aspect_ratio":"970:600"}]'
+
+
+def test_aplus_json_plan_parser_routes_multiple_instances_by_module_name_and_index() -> None:
+    selections = [{"name": "商品主视觉", "count": 1}, {"name": "卖点拆解", "count": 2}]
+    raw = json.dumps(
+        {
+            "global_plan": "三张详情页模块",
+            "modules": [
+                {
+                    "module_name": "商品主视觉",
+                    "instance_index": 1,
+                    "image_type": "商品主视觉: 第一印象",
+                    "image_prompt": "#@ 商品主视觉: 第一印象\n产品置中。",
+                    "copy_requirements": "英文标题",
+                },
+                {
+                    "module_name": "卖点拆解",
+                    "instance_index": 1,
+                    "image_type": "卖点拆解: 保温结构",
+                    "image_prompt": "#@ 卖点拆解: 保温结构\n拆解保温层。",
+                    "copy_requirements": "标注核心结构",
+                },
+                {
+                    "module_name": "卖点拆解",
+                    "instance_index": 2,
+                    "image_type": "卖点拆解: 防漏设计",
+                    "image_prompt": "#@ 卖点拆解: 防漏设计\n展示杯盖。",
+                    "copy_requirements": "标注防漏",
+                },
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    global_plan, modules = _parse_aplus_plan(raw, selections)
+
+    assert global_plan == "三张详情页模块"
+    assert [(item["module_name"], item["instance_index"], item["module_index"]) for item in modules] == [
+        ("商品主视觉", 1, 1),
+        ("卖点拆解", 1, 2),
+        ("卖点拆解", 2, 3),
+    ]
+    assert modules[2]["image_prompt"].startswith("#@ 卖点拆解: 防漏设计")
+
+
+def test_aplus_text_block_fallback_parses_route_symbols_in_order() -> None:
+    selections = [{"name": "商品主视觉", "count": 1}, {"name": "生活场景", "count": 1}]
+    raw = """整体规划：两张图。
+#@ 商品主视觉: 冷启动首屏
+【画面文字内容】
+Hero headline
+【画面视觉参考】
+产品居中
+#@ 生活场景: 通勤使用
+此图无需添加任何文字
+产品放在办公室桌面
+"""
+
+    global_plan, modules = _parse_aplus_plan(raw, selections)
+
+    assert global_plan == "整体规划：两张图。"
+    assert [item["module_name"] for item in modules] == ["商品主视觉", "生活场景"]
+    assert modules[0]["copy_requirements"] == "Hero headline"
+    assert modules[1]["copy_requirements"] == "此图无需添加任何文字"
+
+
+def test_aplus_plan_parser_rejects_missing_or_mismatched_module_counts() -> None:
+    selections = [{"name": "商品主视觉", "count": 1}, {"name": "卖点拆解", "count": 1}]
+    raw = json.dumps({"global_plan": "", "modules": [{"module_name": "商品主视觉", "instance_index": 1}]}, ensure_ascii=False)
+
+    with pytest.raises(ValueError, match="modules 数量应为 2"):
+        _parse_aplus_plan(raw, selections)
 
 
 def test_semantic_plan_is_replanned_only_once() -> None:

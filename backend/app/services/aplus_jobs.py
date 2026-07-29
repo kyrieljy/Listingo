@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 from io import BytesIO
 from pathlib import Path
@@ -14,8 +15,11 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from backend.app.config import Settings
 from backend.app.models import AplusItem, AplusJob, AplusVersion, Asset, PromptVersion, Provider, utcnow
+from backend.app.schemas import A_PLUS_MODULE_TOTAL_LIMIT
 from backend.app.security import ApiKeyCipher
-from backend.app.services.jobs import _call_llm_with_fallback, _enabled_provider, _enabled_provider_by_code
+from backend.app.services.execution import run_image_route
+from backend.app.services.jobs import _call_llm_with_fallback, _enabled_provider
+from backend.app.services.provider_routing import route_provider_codes
 from backend.app.services.prompt_contract import parse_product_facts
 from backend.app.services.providers import ProviderClient
 from backend.app.services.redaction import safe_json
@@ -24,15 +28,89 @@ from backend.app.services.redaction import safe_json
 DEMO_ASSET_DIR = Path(__file__).resolve().parents[1] / "static" / "demo"
 DEMO_ASSETS = [DEMO_ASSET_DIR / f"aplus-outdoor-module-{index:02d}.png" for index in range(1, 11)]
 
-DEFAULT_MODULES = ["首屏主视觉", "核心卖点图", "使用场景图", "多角度图", "场景氛围图", "商品细节图"]
-MOBILE_EDIT_PROVIDER_CODE = "aplus-mobile-edit-low-cost"
-WEB_PROVIDER_CODE = "yunwu-image-2"
+DEFAULT_MODULE_SELECTIONS = [
+    {"name": "商品主视觉", "count": 1},
+    {"name": "卖点拆解", "count": 1},
+    {"name": "生活场景", "count": 1},
+    {"name": "全方位展示", "count": 1},
+    {"name": "情绪氛围", "count": 1},
+    {"name": "品质细看", "count": 1},
+]
 OUTPUT_MODE_LABELS = {
     "detail": "详情页",
     "amazon_aplus_standard": "普通 A+",
     "amazon_aplus_advanced_web": "高级 A+ Web",
     "amazon_aplus_advanced_mobile": "高级 A+ 移动端",
 }
+
+
+def _normalize_module_selections(params: dict[str, Any]) -> list[dict[str, Any]]:
+    selections = params.get("module_selections")
+    if not selections:
+        selections = [{"name": name, "count": 1} for name in (params.get("selected_modules") or [])]
+    if not selections:
+        selections = DEFAULT_MODULE_SELECTIONS
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    total = 0
+    for selection in selections:
+        if not isinstance(selection, dict):
+            continue
+        name = str(selection.get("name") or "").strip()
+        count = int(selection.get("count") or 0)
+        if not name or count <= 0 or name in seen:
+            continue
+        seen.add(name)
+        total += count
+        normalized.append({"name": name, "count": count})
+    if total < 1:
+        raise ValueError("请至少生成 1 张详情页模块")
+    if total > A_PLUS_MODULE_TOTAL_LIMIT:
+        raise ValueError(f"详情页模块最多生成 {A_PLUS_MODULE_TOTAL_LIMIT} 张")
+    return normalized
+
+
+def _expand_module_selections(selections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    expanded: list[dict[str, Any]] = []
+    module_index = 1
+    for selection in selections:
+        name = str(selection["name"])
+        count = int(selection["count"])
+        for instance_index in range(1, count + 1):
+            expanded.append(
+                {
+                    "module_name": name,
+                    "instance_index": instance_index,
+                    "module_count": count,
+                    "module_index": module_index,
+                }
+            )
+            module_index += 1
+    return expanded
+
+
+def _module_text(selections: list[dict[str, Any]]) -> str:
+    return "/".join(f"{selection['name']}{int(selection['count'])}张" for selection in selections)
+
+
+def _planning_canvas(output_targets: list[dict[str, str]]) -> dict[str, Any]:
+    preferred = (
+        next((target for target in output_targets if target.get("mode") == "amazon_aplus_advanced_web"), None)
+        or next((target for target in output_targets if target.get("mode") == "amazon_aplus_standard"), None)
+        or output_targets[0]
+    )
+    ratio = preferred.get("aspect_ratio", "1:1")
+    sizes = {
+        "970:600": (970, 600),
+        "1464:600": (1464, 600),
+        "600:450": (600, 450),
+        "1:1": (1024, 1024),
+        "3:4": (900, 1200),
+        "9:16": (1080, 1920),
+        "16:9": (1600, 900),
+    }
+    width, height = sizes.get(ratio, (1024, 1024))
+    return {"width": width, "height": height, "proportion": ratio, "target": preferred}
 
 
 def serialize_aplus_version(version: AplusVersion) -> dict[str, Any]:
@@ -99,7 +177,17 @@ def _replace_prompt_variables(content: str, variables: dict[str, Any]) -> str:
         "${platform}": str(variables.get("platform", "")),
         "${market}": str(variables.get("market", "")),
         "${language}": str(variables.get("language", "")),
-        "${selected_modules}": str(variables.get("selected_modules", "")),
+        "${input_language}": str(variables.get("input_language", "")),
+        "${modules}": str(variables.get("modules", "")),
+        "${selected_modules}": str(variables.get("selected_modules", variables.get("modules", ""))),
+        "${brand_style}": str(variables.get("brand_style", "")),
+        "${reference_assets}": str(variables.get("reference_assets", "")),
+        "${module_selections}": str(variables.get("module_selections", "")),
+        "${canvas}": str(variables.get("canvas", "")),
+        "${output_targets}": str(variables.get("output_targets", "")),
+        "${width}": str(variables.get("width", "")),
+        "${height}": str(variables.get("height", "")),
+        "${proportion}": str(variables.get("proportion", "")),
         "${970:600}": str(variables.get("aspect_ratio", "")),
     }
     for key, value in replacements.items():
@@ -107,7 +195,62 @@ def _replace_prompt_variables(content: str, variables: dict[str, Any]) -> str:
     return rendered
 
 
-def _parse_aplus_plan(raw: str, selected_modules: list[str]) -> tuple[str, list[dict[str, Any]]]:
+def _expected_module_items(module_selections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return _expand_module_selections(module_selections)
+
+
+def _match_expected_module_name(text: str, expected_names: set[str]) -> str:
+    normalized = text.strip()
+    if normalized in expected_names:
+        return normalized
+    return next((name for name in expected_names if normalized.startswith(name) or name in normalized), "")
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _normalize_image_prompt(module_name: str, image_type: str, image_prompt: str) -> str:
+    prompt = image_prompt.strip()
+    header = image_type.strip() or module_name
+    if prompt.startswith("#@"):
+        return prompt
+    if prompt:
+        return f"#@ {header}\n{prompt}"
+    return f"#@ {header}"
+
+
+def _copy_requirements_from_block(block: str) -> str:
+    for marker in ("【画面文字内容】", "【画面文案要求】", "【文案要求】"):
+        if marker not in block:
+            continue
+        section = block.split(marker, 1)[1]
+        section = re.split(r"\n\s*【", section, maxsplit=1)[0]
+        return section.strip()
+    if "此图无需添加任何文字" in block:
+        return "此图无需添加任何文字"
+    return ""
+
+
+def _ordered_modules_from_map(
+    by_key: dict[tuple[str, int], dict[str, Any]],
+    expected: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    missing = [
+        f"{item['module_name']}#{item['instance_index']}"
+        for item in expected
+        if (str(item["module_name"]), int(item["instance_index"])) not in by_key
+    ]
+    if missing:
+        raise ValueError(f"A+ 方案缺少选中模块：{', '.join(missing)}")
+    return [by_key[(str(item["module_name"]), int(item["instance_index"]))] for item in expected]
+
+
+def _parse_aplus_json_plan(raw: str, expected: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
@@ -121,42 +264,115 @@ def _parse_aplus_plan(raw: str, selected_modules: list[str]) -> tuple[str, list[
     modules = parsed.get("modules")
     if not isinstance(modules, list):
         raise ValueError("A+ 方案缺少 modules 数组")
-    by_name: dict[str, dict[str, Any]] = {}
+    if len(modules) != len(expected):
+        raise ValueError(f"A+ 方案 modules 数量应为 {len(expected)}，实际为 {len(modules)}")
+    expected_names = {str(item["module_name"]) for item in expected}
+    by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    occurrences: dict[str, int] = {}
     for index, module in enumerate(modules):
         if not isinstance(module, dict):
             continue
-        image_type = str(module.get("image_type") or selected_modules[index] if index < len(selected_modules) else "")
-        module_name = next((name for name in selected_modules if image_type.startswith(name) or name in image_type), "")
-        if not module_name and index < len(selected_modules):
-            module_name = selected_modules[index]
+        expected_item = expected[index]
+        raw_module_name = str(module.get("module_name") or "")
+        image_type = str(module.get("image_type") or "")
+        image_prompt = str(module.get("image_prompt") or module.get("picture_requirement") or "")
+        module_name = _match_expected_module_name(raw_module_name, expected_names)
+        if not module_name:
+            module_name = _match_expected_module_name(image_type, expected_names)
+        if not module_name:
+            module_name = _match_expected_module_name(image_prompt, expected_names)
+        if not module_name:
+            module_name = str(expected_item["module_name"])
         if not module_name:
             continue
-        by_name[module_name] = {
+        explicit_instance = _positive_int(module.get("instance_index"))
+        if explicit_instance is None:
+            occurrences[module_name] = occurrences.get(module_name, 0) + 1
+            instance_index = occurrences[module_name]
+        else:
+            instance_index = explicit_instance
+            occurrences[module_name] = max(occurrences.get(module_name, 0), instance_index)
+        module_index = int(expected_item["module_index"])
+        key = (module_name, instance_index)
+        if key in by_key:
+            raise ValueError(f"A+ 方案重复模块：{module_name}#{instance_index}")
+        image_type = image_type or f"{module_name}: {module.get('topic') or module.get('core_theme') or ''}".strip()
+        by_key[key] = {
             "module_name": module_name,
-            "module_index": int(module.get("index") or (selected_modules.index(module_name) + 1)),
+            "instance_index": instance_index,
+            "module_index": module_index,
             "image_type": image_type or module_name,
-            "image_prompt": str(module.get("image_prompt") or module.get("picture_requirement") or ""),
+            "image_prompt": _normalize_image_prompt(module_name, image_type or module_name, image_prompt),
             "copy_requirements": str(module.get("copy_requirements") or module.get("copywriting_requirements") or ""),
         }
-    missing = [name for name in selected_modules if name not in by_name]
-    if missing:
-        raise ValueError(f"A+ 方案缺少选中模块：{', '.join(missing)}")
-    return str(parsed.get("global_plan") or ""), [by_name[name] for name in selected_modules]
+    return str(parsed.get("global_plan") or ""), _ordered_modules_from_map(by_key, expected)
+
+
+def _parse_aplus_text_blocks(raw: str, expected: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    pattern = re.compile(r"(?m)^#@\s*(?:\[)?([^:\]：\n]+)(?:\])?\s*[:：]?\s*([^\n]*)")
+    matches = list(pattern.finditer(raw))
+    if not matches:
+        raise ValueError("A+ 方案返回不是 JSON，也未找到 #@ 模块块")
+    if len(matches) != len(expected):
+        raise ValueError(f"A+ 方案 #@ 模块数量应为 {len(expected)}，实际为 {len(matches)}")
+    expected_names = {str(item["module_name"]) for item in expected}
+    by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    occurrences: dict[str, int] = {}
+    for index, match in enumerate(matches):
+        block_end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        block = raw[match.start() : block_end].strip()
+        expected_item = expected[index]
+        module_name = _match_expected_module_name(match.group(1), expected_names) or str(expected_item["module_name"])
+        occurrences[module_name] = occurrences.get(module_name, 0) + 1
+        instance_index = occurrences[module_name]
+        topic = match.group(2).strip()
+        image_type = f"{module_name}: {topic}" if topic else module_name
+        key = (module_name, instance_index)
+        if key in by_key:
+            raise ValueError(f"A+ 方案重复模块：{module_name}#{instance_index}")
+        by_key[key] = {
+            "module_name": module_name,
+            "instance_index": instance_index,
+            "module_index": int(expected_item["module_index"]),
+            "image_type": image_type,
+            "image_prompt": block,
+            "copy_requirements": _copy_requirements_from_block(block),
+        }
+    global_plan = raw[: matches[0].start()].strip()
+    return global_plan, _ordered_modules_from_map(by_key, expected)
+
+
+def _parse_aplus_plan(raw: str, module_selections: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    expected = _expected_module_items(module_selections)
+    try:
+        return _parse_aplus_json_plan(raw, expected)
+    except (json.JSONDecodeError, ValueError) as json_error:
+        try:
+            return _parse_aplus_text_blocks(raw, expected)
+        except ValueError:
+            raise json_error
 
 
 def _dryrun_modules(params: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
-    selected = params.get("selected_modules") or DEFAULT_MODULES
+    selections = _normalize_module_selections(params)
+    expected = _expand_module_selections(selections)
     product_info = params.get("product_info") or "根据商品图识别产品，并围绕核心卖点规划详情页。"
-    modules = [
-        {
-            "module_name": name,
-            "module_index": index + 1,
-            "image_type": f"{name}: Dryrun 详情页模块",
-            "image_prompt": f"{name}，围绕“{product_info}”规划高转化电商详情页画面，产品保持为第一主体，构图清晰，卖点准确。",
-            "copy_requirements": f"使用{params.get('language')}，只表达已提供或图片可见的事实，不虚构参数和承诺。",
-        }
-        for index, name in enumerate(selected)
-    ]
+    modules = []
+    for item in expected:
+        name = str(item["module_name"])
+        instance = int(item["instance_index"])
+        count = int(item["module_count"])
+        image_type = f"{name}: Dryrun 详情页模块 {instance}/{count}" if count > 1 else f"{name}: Dryrun 详情页模块"
+        modules.append(
+            {
+                "module_name": name,
+                "instance_index": instance,
+                "module_index": int(item["module_index"]),
+                "image_type": image_type,
+                "image_prompt": f"#@ {image_type}\n围绕“{product_info}”规划高转化电商详情页画面，产品保持为第一主体，构图清晰，卖点准确。",
+                "copy_requirements": f"使用{params.get('language')}，只表达已提供或图片可见的事实，不虚构参数和承诺。",
+            }
+        )
     return "Dryrun A+ 详情页方案：按选中模块生成可确认的模块规划。", modules
 
 
@@ -211,6 +427,38 @@ def create_plan_items(session: Session, job: AplusJob, global_plan: str, modules
     job.completed_at = utcnow()
 
 
+def _aplus_json_execution_contract(module_selections: list[dict[str, Any]]) -> str:
+    expected = _expand_module_selections(module_selections)
+    expected_lines = "\n".join(
+        f"- {item['module_index']}. {item['module_name']}#{item['instance_index']}"
+        for item in expected
+    )
+    return f"""
+
+## 程序执行契约
+无论上文描述了何种写作格式，最终只输出一个可解析 JSON 对象，不要输出 Markdown 代码围栏或额外解释。
+JSON 顶层结构必须为：
+{{
+  "global_plan": "整体规划说明",
+  "modules": [
+    {{
+      "module_name": "商品主视觉",
+      "instance_index": 1,
+      "image_type": "商品主视觉: 核心主题",
+      "image_prompt": "#@ 商品主视觉: 核心主题\\n完整生图子 prompt",
+      "copy_requirements": "画面文字与文案要求"
+    }}
+  ]
+}}
+modules 数组长度必须等于 {len(expected)}，模块数量必须严格匹配：{_module_text(module_selections)}
+modules 顺序必须按以下清单输出：
+{expected_lines}
+module_name 必须使用清单中的模块名称；同一模块多张时 instance_index 从 1 开始递增，主题不得重复。
+image_prompt 必须保留新 prompt 的 "#@ 模块名称:核心主题" 内容公式，作为实际生图子 prompt。
+copy_requirements 只写画面文字与文案要求；无文字时明确写“此图无需添加任何文字”。
+"""
+
+
 async def run_aplus_plan_job(
     job_id: str,
     session_factory: sessionmaker[Session],
@@ -229,7 +477,12 @@ async def run_aplus_plan_job(
             prompt_version = session.get(PromptVersion, job.prompt_version_id)
             if not prompt_version:
                 raise RuntimeError("A+ Meta Prompt 未启用")
+            prompt_content = str(params.get("_admin_prompt_content") or prompt_version.content)
             session.commit()
+
+        module_selections = _normalize_module_selections(params)
+        modules_text = _module_text(module_selections)
+        canvas = _planning_canvas(params["output_targets"])
 
         if job.dry_run:
             global_plan, modules = _dryrun_modules(params)
@@ -255,26 +508,47 @@ async def run_aplus_plan_job(
             product_facts = parse_product_facts(facts_raw)
             input_mode = "image_with_text" if str(params.get("product_info") or "").strip() else "image_only"
             product_info = params.get("product_info") or json.dumps(product_facts.model_dump(), ensure_ascii=False)
+            product_facts_dict = product_facts.model_dump()
+            reference_assets = json.dumps(product_facts_dict, ensure_ascii=False)
             variables = {
                 "product_info": product_info,
                 "platform": params["platform"],
                 "market": params["market"],
                 "language": params["language"],
-                "selected_modules": ",".join(params["selected_modules"]),
+                "input_language": params.get("input_language") or "中文",
+                "modules": modules_text,
+                "selected_modules": modules_text,
+                "brand_style": params.get("brand_style") or "",
+                "reference_assets": reference_assets,
+                "module_selections": json.dumps(module_selections, ensure_ascii=False),
+                "canvas": json.dumps({"width": canvas["width"], "height": canvas["height"], "proportion": canvas["proportion"]}, ensure_ascii=False),
+                "output_targets": json.dumps(params["output_targets"], ensure_ascii=False),
+                "width": canvas["width"],
+                "height": canvas["height"],
+                "proportion": canvas["proportion"],
                 "aspect_ratio": ", ".join(target["aspect_ratio"] for target in params["output_targets"]),
             }
-            system_prompt = _replace_prompt_variables(prompt_version.content, variables)
+            system_prompt = _replace_prompt_variables(prompt_content, variables) + _aplus_json_execution_contract(module_selections)
             user_prompt = json.dumps(
                 {
                     "input_mode": input_mode,
                     "product_info": product_info,
-                    "product_facts": product_facts.model_dump(),
+                    "product_facts": product_facts_dict,
                     "platform": params["platform"],
                     "market": params["market"],
                     "language": params["language"],
-                    "selected_modules": params["selected_modules"],
+                    "input_language": variables["input_language"],
+                    "brand_style": variables["brand_style"],
+                    "reference_assets": product_facts_dict,
+                    "modules": modules_text,
+                    "module_selections": module_selections,
+                    "canvas": {
+                        "width": canvas["width"],
+                        "height": canvas["height"],
+                        "proportion": canvas["proportion"],
+                    },
                     "output_targets": params["output_targets"],
-                    "instruction": "严格输出 JSON。若 product_info 有文字，卖点事实只能来自文字；若只有图片，则基于图片识别商品事实。",
+                    "instruction": "严格输出 JSON，modules 数量、名称和 instance_index 必须与 module_selections 完全一致。若 product_info 有文字，卖点事实只能来自文字；若只有图片，则基于图片识别商品事实。",
                 },
                 ensure_ascii=False,
             )
@@ -287,7 +561,7 @@ async def run_aplus_plan_job(
                 user_prompt,
                 image_paths=asset_paths,
             )
-            global_plan, modules = _parse_aplus_plan(raw_plan, params["selected_modules"])
+            global_plan, modules = _parse_aplus_plan(raw_plan, module_selections)
 
         with session_factory() as session:
             job = session.get(AplusJob, job_id)
@@ -382,6 +656,10 @@ def create_aplus_generation_job_from_plan(
     return job
 
 
+def _aplus_generation_route_key(output_mode: str) -> str:
+    return "aplus_mobile" if output_mode == "amazon_aplus_advanced_mobile" else "aplus_detail"
+
+
 async def run_aplus_generation_job(
     job_id: str,
     session_factory: sessionmaker[Session],
@@ -400,9 +678,9 @@ async def run_aplus_generation_job(
             asset_ids = json.loads(job.asset_ids_json)
             asset_paths = [asset.file_path for asset in session.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()]
             if not job.dry_run:
-                _enabled_provider_by_code(session, WEB_PROVIDER_CODE)
-                if any(item.output_mode == "amazon_aplus_advanced_mobile" and item.source_web_item_id for item in job.items):
-                    _enabled_provider_by_code(session, MOBILE_EDIT_PROVIDER_CODE)
+                route_keys = {_aplus_generation_route_key(item.output_mode) for item in job.items}
+                for route_key in route_keys:
+                    route_provider_codes(session, route_key)
             session.commit()
 
         if job.dry_run:
@@ -462,9 +740,8 @@ async def _run_generation_item(
         item.status = "running"
         session.commit()
         input_paths = asset_paths
-        provider_code = WEB_PROVIDER_CODE
+        route_key = _aplus_generation_route_key(item.output_mode)
         if item.output_mode == "amazon_aplus_advanced_mobile" and item.source_web_item_id:
-            provider_code = MOBILE_EDIT_PROVIDER_CODE
             source = session.scalar(
                 select(AplusItem)
                 .where(AplusItem.id == item.source_web_item_id)
@@ -477,12 +754,7 @@ async def _run_generation_item(
                 session.commit()
                 return
             input_paths = [source_version.file_path]
-        provider = session.scalar(select(Provider).where(Provider.code == provider_code))
-        if not provider or not provider.encrypted_api_key:
-            item.status = "failed"
-            item.error = f"Provider {provider_code} 未启用或缺少 API Key"
-            session.commit()
-            return
+        provider_codes = route_provider_codes(session, route_key)
         prompt = (
             f"输出模式：{OUTPUT_MODE_LABELS.get(item.output_mode, item.output_mode)}；目标画面比例：{item.aspect_ratio}。\n"
             f"模块：{item.module_name}。\n"
@@ -496,13 +768,20 @@ async def _run_generation_item(
             prompt += "\n按高级 A+ Web 端同等画面规划标准直接生成 600:450 移动端版式，构图为独立移动端成图，不依赖 Web 母版或简单裁切。"
 
     try:
-        image_bytes = await client.generate_image(
-            provider,
-            cipher.decrypt(provider.encrypted_api_key),
-            prompt,
-            input_paths,
-            item.aspect_ratio,
-        )
+        async def generate(provider_code: str) -> bytes:
+            with session_factory() as session:
+                provider = session.scalar(select(Provider).where(Provider.code == provider_code))
+                if not provider or not provider.encrypted_api_key:
+                    raise RuntimeError(f"Provider {provider_code} 未启用或缺少 API Key")
+                return await client.generate_image(
+                    provider,
+                    cipher.decrypt(provider.encrypted_api_key),
+                    prompt,
+                    input_paths,
+                    item.aspect_ratio,
+                )
+
+        image_bytes, used_code = await run_image_route(provider_codes, generate)
         with Image.open(BytesIO(image_bytes)) as image:
             image.verify()
         with Image.open(BytesIO(image_bytes)) as image:
@@ -512,14 +791,14 @@ async def _run_generation_item(
         destination.write_bytes(image_bytes)
         with session_factory() as session:
             item = session.get(AplusItem, item_id)
-            provider = session.scalar(select(Provider).where(Provider.code == provider_code))
+            provider = session.scalar(select(Provider).where(Provider.code == used_code))
             version = AplusVersion(
                 item_id=item.id,
                 version_no=1,
                 instruction="Live A+ 生成",
                 file_path=str(destination),
                 url=f"/files/results/{result_name}",
-                metadata_json=safe_json({"dry_run": False, "provider": provider_code, "actual_size": [width, height]}),
+                metadata_json=safe_json({"dry_run": False, "provider": used_code, "route_key": route_key, "actual_size": [width, height]}),
             )
             session.add(version)
             session.flush()

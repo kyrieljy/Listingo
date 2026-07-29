@@ -7,16 +7,43 @@ from pathlib import Path
 from time import perf_counter
 
 import httpx
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.database import get_session
-from backend.app.models import ExecutionLog, Prompt, PromptVersion, Provider, Workflow, WorkflowVersion
-from backend.app.schemas import PromptVersionCreate, ProviderOut, ProviderTestOut, ProviderUpdate, WorkflowVersionCreate
+from backend.app.models import ExecutionLog, Prompt, PromptTestRun, PromptVersion, Provider, Workflow, WorkflowVersion
+from backend.app.schemas import (
+    PromptTestRunCreate,
+    PromptTestRunOut,
+    PromptVersionCreate,
+    ProviderOut,
+    ProviderTestOut,
+    ProviderUpdate,
+    WorkflowVersionCreate,
+)
 from backend.app.security import mask_api_key
+from backend.app.services.provider_routing import (
+    PROVIDER_ROUTE_DEFINITIONS,
+    VALID_PROVIDER_ROUTE_ROLES,
+    normalize_route_roles,
+    provider_config,
+    provider_route_roles,
+    write_provider_config,
+)
 from backend.app.services.redaction import safe_json
 from backend.app.services.providers import build_async_http_client
+from backend.app.services.jobs import run_generation_job
+from backend.app.services.prompt_testing import (
+    FULL_CHAIN_TEST_TYPE,
+    LLM_TEST_TYPE,
+    create_full_chain_prompt_test_run,
+    create_llm_prompt_test_run,
+    prompt_test_run_dict,
+    refresh_prompt_test_run_from_related_job,
+    run_aplus_full_chain_prompt_test,
+)
+from backend.app.services.video_jobs import run_video_job
 from backend.app.services.workflow_registry import validate_workflow_graph
 
 
@@ -36,6 +63,7 @@ def provider_dict(provider: Provider, request: Request) -> dict:
         "enabled": provider.enabled,
         "is_default": provider.is_default,
         "is_fallback": provider.is_fallback,
+        "route_roles": provider_route_roles(provider),
         "has_api_key": bool(plain),
         "api_key_masked": mask_api_key(plain),
         "config": json.loads(provider.config_json),
@@ -103,7 +131,8 @@ def update_provider(
         raise HTTPException(status_code=404, detail="Provider 不存在")
     updates = payload.model_dump(exclude_unset=True)
     api_key = updates.pop("api_key", None)
-    config = json.loads(provider.config_json)
+    route_role_updates = updates.pop("route_roles", None)
+    config = provider_config(provider)
     for key in ("resolution", "size", "quality", "format", "compression", "timeout_seconds"):
         if key in updates:
             config[key] = updates.pop(key)
@@ -122,6 +151,30 @@ def update_provider(
             setattr(provider, relation_key, enabled_relation)
     if api_key:
         provider.encrypted_api_key = request.app.state.cipher.encrypt(api_key)
+    if route_role_updates is not None:
+        roles = normalize_route_roles(config.get("route_roles"))
+        for route_key, role in route_role_updates.items():
+            if route_key not in PROVIDER_ROUTE_DEFINITIONS:
+                raise HTTPException(status_code=422, detail=f"未知模型链路：{route_key}")
+            route_capability = PROVIDER_ROUTE_DEFINITIONS[route_key]["capability"]
+            if route_capability != provider.capability:
+                raise HTTPException(status_code=422, detail=f"{provider.label} 不能配置到 {route_key} 链路")
+            normalized_role = None if role in (None, "", "none") else role
+            if normalized_role is not None and normalized_role not in VALID_PROVIDER_ROUTE_ROLES:
+                raise HTTPException(status_code=422, detail=f"不支持的链路角色：{role}")
+            if normalized_role is None:
+                roles.pop(route_key, None)
+                continue
+            peers = session.scalars(select(Provider).where(Provider.id != provider.id)).all()
+            for peer in peers:
+                peer_config = provider_config(peer)
+                peer_roles = normalize_route_roles(peer_config.get("route_roles"))
+                if peer_roles.get(route_key) == normalized_role:
+                    peer_roles.pop(route_key, None)
+                    peer_config["route_roles"] = peer_roles
+                    write_provider_config(peer, peer_config)
+            roles[route_key] = normalized_role
+        config["route_roles"] = roles
     provider.config_json = json.dumps(config, ensure_ascii=False)
     session.commit()
     session.refresh(provider)
@@ -151,6 +204,12 @@ async def test_provider(provider_id: str, request: Request, session: Session = D
                 if isinstance(item, dict)
             }
             latency = int((perf_counter() - started) * 1000)
+            if provider.adapter == "shengsuanyun_tasks_generation":
+                return ProviderTestOut(
+                    ok=True,
+                    latency_ms=latency,
+                    message="连接可用，未发起计费视频任务",
+                )
             if provider.model_name not in model_ids:
                 return ProviderTestOut(
                     ok=False,
@@ -316,6 +375,97 @@ def activate_prompt_version(prompt_id: str, version_id: str, session: Session = 
     prompt.active_version_id = version.id
     session.commit()
     return {"id": prompt.id, "active_version_id": prompt.active_version_id}
+
+
+@router.post("/prompts/{prompt_id}/test-runs", response_model=PromptTestRunOut, status_code=201)
+async def create_prompt_test_run(
+    prompt_id: str,
+    payload: PromptTestRunCreate,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    prompt = session.get(Prompt, prompt_id)
+    if not prompt:
+        raise HTTPException(status_code=404, detail="提示词不存在")
+    if payload.test_type == LLM_TEST_TYPE:
+        try:
+            run = await create_llm_prompt_test_run(session, prompt, payload, request.app.state.cipher)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        session.commit()
+        session.refresh(run)
+        return prompt_test_run_dict(run)
+    if payload.test_type == FULL_CHAIN_TEST_TYPE:
+        try:
+            run, schedule = create_full_chain_prompt_test_run(session, prompt, payload, request.app.state.settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        session.commit()
+        session.refresh(run)
+        kind, job_id = schedule
+        if kind == "generation":
+            background_tasks.add_task(
+                run_generation_job,
+                job_id,
+                request.app.state.session_factory,
+                request.app.state.settings,
+                request.app.state.cipher,
+            )
+        elif kind == "video":
+            background_tasks.add_task(
+                run_video_job,
+                job_id,
+                request.app.state.session_factory,
+                request.app.state.settings,
+                request.app.state.cipher,
+            )
+        else:
+            background_tasks.add_task(
+                run_aplus_full_chain_prompt_test,
+                run.id,
+                request.app.state.session_factory,
+                request.app.state.settings,
+                request.app.state.cipher,
+            )
+        return prompt_test_run_dict(run)
+    raise HTTPException(status_code=422, detail="不支持的提示词测试类型")
+
+
+@router.get("/prompt-test-runs/{run_id}", response_model=PromptTestRunOut)
+def get_prompt_test_run(run_id: str, session: Session = Depends(get_session)):
+    run = session.get(PromptTestRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="提示词测试记录不存在")
+    refresh_prompt_test_run_from_related_job(session, run)
+    session.commit()
+    session.refresh(run)
+    return prompt_test_run_dict(run)
+
+
+@router.get("/prompts/{prompt_id}/test-runs", response_model=list[PromptTestRunOut])
+def list_prompt_test_runs(
+    prompt_id: str,
+    limit: int = Query(default=10, ge=1, le=50),
+    session: Session = Depends(get_session),
+):
+    prompt = session.get(Prompt, prompt_id)
+    if not prompt:
+        raise HTTPException(status_code=404, detail="提示词不存在")
+    runs = session.scalars(
+        select(PromptTestRun)
+        .where(PromptTestRun.prompt_id == prompt_id)
+        .order_by(PromptTestRun.created_at.desc())
+        .limit(limit)
+    ).all()
+    for run in runs:
+        refresh_prompt_test_run_from_related_job(session, run)
+    session.commit()
+    return [prompt_test_run_dict(run) for run in runs]
 
 
 @router.get("/workflows")

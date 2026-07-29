@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { Modal, message } from 'ant-design-vue'
 import {
   CheckOutlined,
@@ -45,11 +45,25 @@ const history = ref<VideoJob[]>([])
 const selected = ref<string[]>([])
 const previewItem = ref<VideoItem | null>(null)
 const advancedOpen = ref(false)
+const aiSuggestion = ref('')
+const aiWriteOpen = ref(false)
+const sellingPointsEditing = ref(false)
+const aiSuggestionEditing = ref(false)
+const sellingPointsInput = ref<HTMLTextAreaElement | null>(null)
+const aiSuggestionInput = ref<HTMLTextAreaElement | null>(null)
+
+const videoSellingPointsPlaceholder = `建议包含以下信息：
+1. 商品名称
+2. 核心卖点
+3. 适用人群
+4. 使用场景
+5. 视频转化目标`
 
 const selectedRatioOptions = computed(() => {
   const filtered = videoRatioOptions.filter((item) => item.platform === form.value.platform)
   return filtered.length ? filtered : videoRatioOptions
 })
+const uploadLimitReached = computed(() => assets.value.length >= 3)
 const canGenerate = computed(() => assets.value.length > 0 && form.value.videoTypes.length > 0)
 const currentPreviewUrl = computed(() => {
   const item = previewItem.value
@@ -75,6 +89,16 @@ function handleRequestError(error: any, fallback: string) {
 }
 function isVideoUrl(url: string) {
   return /\.(mp4|webm|mov)(\?|$)/i.test(url)
+}
+async function editSellingPoints() {
+  sellingPointsEditing.value = true
+  await nextTick()
+  sellingPointsInput.value?.focus()
+}
+async function editAiSuggestion() {
+  aiSuggestionEditing.value = true
+  await nextTick()
+  aiSuggestionInput.value?.focus()
 }
 function createOptimisticVideoJob(payload: Record<string, unknown>): VideoJob {
   const types = Array.isArray(payload.video_types) ? payload.video_types as string[] : form.value.videoTypes
@@ -105,7 +129,15 @@ function createOptimisticVideoJob(payload: Record<string, unknown>): VideoJob {
 
 async function filesSelected(event: Event) {
   const input = event.target as HTMLInputElement
-  const files = Array.from(input.files ?? []).slice(0, 3 - assets.value.length)
+  if (uploadLimitReached.value) {
+    message.warning('最多上传 3 张商品图')
+    input.value = ''
+    return
+  }
+  const selectedFiles = Array.from(input.files ?? [])
+  const remaining = 3 - assets.value.length
+  const files = selectedFiles.slice(0, remaining)
+  if (selectedFiles.length > remaining) message.warning(`最多上传 3 张商品图，本次只添加 ${remaining} 张`)
   if (!files.length) return
   uploading.value = true
   try {
@@ -148,13 +180,24 @@ async function aiWrite() {
       video_types: form.value.videoTypes,
       dry_run: form.value.dryRun,
     })
-    form.value.sellingPoints = result.selling_points
-    message.success('AI 转写已回填')
+    aiSuggestion.value = result.selling_points
+    aiSuggestionEditing.value = false
+    aiWriteOpen.value = true
   } catch (error: any) {
     handleRequestError(error, 'AI 转写失败')
   } finally {
     helping.value = false
   }
+}
+async function regenerateCopywriting() {
+  await aiWrite()
+}
+function applyAiSuggestion() {
+  if (!aiSuggestion.value.trim()) return message.warning('AI 转写内容为空，请重新生成')
+  form.value.sellingPoints = aiSuggestion.value.trim()
+  sellingPointsEditing.value = false
+  aiWriteOpen.value = false
+  message.success('AI 转写已确认回填')
 }
 async function waitForVideoJob(jobId: string): Promise<VideoJob> {
   for (let attempt = 0; attempt < 1200; attempt += 1) {
@@ -201,6 +244,10 @@ async function retryFailed() {
     generating.value = false
   }
 }
+async function openHistoryJob(entry: VideoJob) {
+  job.value = await getVideoJob(entry.id)
+  selected.value = job.value.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
+}
 function downloadSelected() {
   if (!job.value || !selected.value.length) return message.warning('请先选择视频')
   if (job.value.id.startsWith('optimistic-video-')) return message.warning('视频还在生成中')
@@ -209,28 +256,28 @@ function downloadSelected() {
 function toggleSelected(id: string) {
   selected.value = selected.value.includes(id) ? selected.value.filter((item) => item !== id) : [...selected.value, id]
 }
+
+defineExpose({ openHistoryJob })
 </script>
 
 <template>
   <section class="video-workspace">
     <aside class="video-panel">
-      <div class="video-tabs"><button class="active">生成爆款</button><button>爆款复刻</button></div>
-
       <section class="video-section">
         <div class="section-title"><span>1</span><strong>上传产品图</strong><em>最多 3 张</em></div>
-        <label class="video-upload" :class="{ disabled: uploading || assets.length >= 3 }">
-          <input type="file" accept="image/png,image/jpeg,image/webp" multiple :disabled="uploading || assets.length >= 3" @change="filesSelected" />
+        <label class="upload-zone" :class="{ disabled: uploading || uploadLimitReached }">
+          <input type="file" accept="image/png,image/jpeg,image/webp" multiple :disabled="uploading || uploadLimitReached" @change="filesSelected" />
           <CloudUploadOutlined />
-          <b>{{ uploading ? '上传中...' : '上传产品图' }}</b>
-          <small>建议上传多张不同角度商品图</small>
+          <b>{{ uploading ? '上传中...' : uploadLimitReached ? '最多上传 3 张' : '点击上传产品图' }}</b>
+          <small>{{ uploadLimitReached ? '删除已有图片后可继续上传' : '建议上传多张不同角度商品图' }}</small>
         </label>
-        <div v-if="assets.length" class="video-assets">
-          <figure v-for="asset in assets" :key="asset.id">
+        <div v-if="assets.length" class="uploaded-row">
+          <div v-for="asset in assets" :key="asset.id">
             <img :src="asset.url" :alt="asset.original_name" />
             <button class="remove-uploaded-asset" type="button" aria-label="删除已上传商品图" @click="assets = assets.filter((item) => item.id !== asset.id)"><CloseOutlined /></button>
-          </figure>
+          </div>
         </div>
-        <button v-else class="video-sample" @click="useSample">使用 Listingo 演示商品</button>
+        <button v-else class="sample-button" @click="useSample">使用 Listingo 演示商品</button>
       </section>
 
       <section class="video-section">
@@ -246,7 +293,21 @@ function toggleSelected(id: string) {
 
       <section class="video-section">
         <div class="section-title"><span>3</span><strong>商品卖点</strong><button :disabled="helping" @click="aiWrite"><ThunderboltOutlined />{{ helping ? '转写中...' : 'AI 转写' }}</button></div>
-        <textarea v-model="form.sellingPoints" rows="6" placeholder="输入商品核心卖点、适用人群、使用场景等信息..." />
+        <div class="markdown-input-frame video-selling-points-markdown-frame">
+          <button v-if="form.sellingPoints.trim() && !sellingPointsEditing" class="markdown-preview" type="button" aria-label="编辑商品卖点" @click="editSellingPoints" v-html="renderMarkdown(form.sellingPoints)"></button>
+          <textarea v-else ref="sellingPointsInput" v-model="form.sellingPoints" class="selling-points-input video-selling-points-input" rows="6" :placeholder="videoSellingPointsPlaceholder" @blur="sellingPointsEditing = false" />
+        </div>
+        <Teleport to="body">
+          <div v-if="aiWriteOpen" class="ai-write-popover" role="dialog" aria-label="AI 转写建议">
+            <header><strong><ThunderboltOutlined />AI 转写建议</strong><button type="button" aria-label="关闭 AI 转写建议" @click="aiWriteOpen = false"><CloseOutlined /></button></header>
+            <div class="markdown-input-frame ai-suggestion-markdown-frame">
+              <button v-if="aiSuggestion.trim() && !aiSuggestionEditing" class="markdown-preview" type="button" aria-label="编辑 AI 转写候选内容" @click="editAiSuggestion" v-html="renderMarkdown(aiSuggestion)"></button>
+              <textarea v-else ref="aiSuggestionInput" v-model="aiSuggestion" rows="8" aria-label="AI 转写候选内容" @blur="aiSuggestionEditing = false" />
+            </div>
+            <p>建议内容可直接修改；确认前不会覆盖原输入。</p>
+            <footer><button type="button" :disabled="helping" @click="regenerateCopywriting"><ThunderboltOutlined />{{ helping ? '生成中...' : '重新转写' }}</button><button type="button" class="apply" @click="applyAiSuggestion">确认回填</button></footer>
+          </div>
+        </Teleport>
         <label class="video-full-select">商品名称<input v-model="form.productName" placeholder="可选" /></label>
         <label class="video-full-select">目标人群<input v-model="form.targetAudience" placeholder="可选，例如 20-35 岁通勤人群" /></label>
       </section>
@@ -255,7 +316,7 @@ function toggleSelected(id: string) {
         <div class="section-title"><span>4</span><strong>视频类型</strong></div>
         <div class="video-type-grid">
           <button v-for="item in videoTypeOptions" :key="item.key" :class="{ active: form.videoTypes.includes(item.key) }" @click="toggleVideoType(item.key)">
-            <CheckOutlined v-if="form.videoTypes.includes(item.key)" />
+            <i><CheckOutlined v-if="form.videoTypes.includes(item.key)" /></i>
             <span><b>{{ item.title }}</b><small>{{ item.subtitle }}</small></span>
           </button>
         </div>
@@ -299,7 +360,11 @@ function toggleSelected(id: string) {
               <div v-else class="video-loading"><span />正在生成视频...</div>
             </div>
             <footer>
-              <div><b>{{ item.video_type }}</b><small>第 {{ item.index + 1 }} 条 · {{ item.status }}</small></div>
+              <div>
+                <b>{{ item.video_type }}</b>
+                <small>第 {{ item.index + 1 }} 条 · {{ item.status }}</small>
+                <small v-if="item.provider_task_id">远程任务号 {{ item.provider_task_id }}</small>
+              </div>
               <button :disabled="!item.script_markdown" @click="previewItem = item"><PlayCircleOutlined />脚本</button>
             </footer>
           </article>

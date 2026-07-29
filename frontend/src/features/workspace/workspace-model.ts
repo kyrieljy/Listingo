@@ -49,7 +49,7 @@ export type AplusForm = {
   market: string
   language: string
   productInfo: string
-  selectedModules: string[]
+  selectedModules: AplusModuleSelection[]
   outputSpec: AplusOutputSpec
   advancedTargets: AplusAdvancedTarget[]
   dryRun: boolean
@@ -61,11 +61,14 @@ export type AplusOutputTargetForm = {
   mode: 'detail' | 'amazon_aplus_standard' | 'amazon_aplus_advanced_web' | 'amazon_aplus_advanced_mobile'
   aspect_ratio: string
 }
+export type AplusModuleDefinition = { name: string; description: string }
+export type AplusModuleSelection = { name: string; count: number }
+export const APLUS_MODULE_TOTAL_LIMIT = 12
 
 export const phaseDefinitions = [
   { key: 'suite' as const, label: '商品套图', short: '套图' },
   { key: 'aplus' as const, label: 'A+详情', short: 'A+' },
-  { key: 'video' as const, label: '视频与爆款复刻', short: '视频' },
+  { key: 'video' as const, label: '爆款视频生成', short: '视频' },
   { key: 'agent' as const, label: 'Agent与画布', short: 'Agent' },
 ]
 
@@ -130,25 +133,38 @@ export const aplusOutputSpecs: Array<{ value: AplusOutputSpec; label: string; de
   { value: 'amazon_aplus_standard', label: '普通 A+', description: '970:600', amazonOnly: true },
   { value: 'amazon_aplus_advanced', label: '高级 A+', description: 'Web / Mobile', amazonOnly: true },
 ]
-export const aplusModules = [
-  '首屏主视觉',
-  '核心卖点图',
-  '使用场景图',
-  '多角度图',
-  '场景氛围图',
-  '商品细节图',
-  '品牌故事图',
-  '尺寸/容量/尺码图',
-  '效果对比图',
-  '详细规格/参数表',
-  '工艺制作图',
-  '配件/赠品图',
-  '系列展示图',
-  '商品成分图',
-  '售后保障图',
-  '使用建议图',
+export const aplusModules: AplusModuleDefinition[] = [
+  { name: '商品主视觉', description: '打造商品第一印象' },
+  { name: '卖点拆解', description: '提炼核心购买价值' },
+  { name: '生活场景', description: '呈现真实使用环境' },
+  { name: '全方位展示', description: '展示商品完整形态' },
+  { name: '情绪氛围', description: '强化视觉感染力' },
+  { name: '品质细看', description: '放大材质与工艺细节' },
+  { name: '品牌心智', description: '传递品牌定位与理念' },
+  { name: '规格指南', description: '展示尺寸与选择信息' },
+  { name: '效果呈现', description: '对比使用前后变化' },
+  { name: '产品资料', description: '汇总参数与基础信息' },
+  { name: '制造揭秘', description: '展示生产工艺过程' },
+  { name: '开箱清单', description: '展示包装与附属内容' },
+  { name: '款式矩阵', description: '展示多SKU组合' },
+  { name: '材质解析', description: '拆解组成与用料' },
+  { name: '服务承诺', description: '展示售后保障' },
+  { name: '使用攻略', description: '提供使用方法建议' },
 ]
-export const defaultAplusModules = aplusModules.slice(0, 6)
+export const defaultAplusModules: AplusModuleSelection[] = aplusModules
+  .slice(0, 6)
+  .map((module) => ({ name: module.name, count: 1 }))
+
+export function aplusModuleTotal(selections: AplusModuleSelection[]): number {
+  return selections.reduce((total, selection) => total + Math.max(0, Number(selection.count) || 0), 0)
+}
+
+export function orderedAplusModuleSelections(selections: AplusModuleSelection[]): AplusModuleSelection[] {
+  const counts = new Map(selections.map((selection) => [selection.name, Math.max(0, Number(selection.count) || 0)]))
+  return aplusModules
+    .map((module) => ({ name: module.name, count: counts.get(module.name) ?? 0 }))
+    .filter((selection) => selection.count > 0)
+}
 
 export function createDefaultAplusForm(): AplusForm {
   return {
@@ -197,13 +213,15 @@ export function aplusTargetLabel(mode: string, ratio: string): string {
 }
 
 export function buildAplusPlanPayload(assetIds: string[], form: AplusForm) {
+  const moduleSelections = orderedAplusModuleSelections(form.selectedModules)
   return {
     asset_ids: assetIds,
     platform: form.platform,
     market: form.market,
     language: form.language,
     product_info: form.productInfo,
-    selected_modules: form.selectedModules,
+    module_selections: moduleSelections,
+    selected_modules: moduleSelections.map((selection) => selection.name),
     output_targets: buildAplusOutputTargets(form),
     dry_run: form.dryRun,
   }

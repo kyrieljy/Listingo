@@ -7,7 +7,7 @@ const props = defineProps<{ phase: Exclude<PhaseKey, 'suite'> }>()
 const progress = ref(0)
 const running = ref(false)
 const completed = ref(false)
-const titles = { aplus: 'A+ 详情页生成', video: '视频与爆款复刻', agent: 'Agent 与画布编辑' }
+const titles = { aplus: 'A+ 详情页生成', video: '爆款视频生成', agent: 'Agent 与画布编辑' }
 const steps = computed(() => props.phase === 'aplus'
   ? ['解析商品信息', '规划 A+ 模块', '生成长图详情', '模块化编辑']
   : props.phase === 'video'
@@ -43,4 +43,3 @@ function runDemo() {
     </div>
   </section>
 </template>
-

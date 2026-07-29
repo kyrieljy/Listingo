@@ -434,6 +434,18 @@
   line-height: 1.6;
 }
 
+.aplus-product-info-markdown-frame .markdown-preview,
+.aplus-product-info-markdown-frame .selling-points-input {
+  min-height: 132px;
+}
+
+.aplus-product-info::placeholder {
+  color: #a7acb5;
+  opacity: 1;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .aplus-output-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -539,40 +551,101 @@
 
 .aplus-module-list {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
 }
 
-.aplus-module-list button {
-  min-height: 36px;
-  padding: 7px 9px;
+.aplus-module-option {
+  min-width: 0;
+  min-height: 42px;
+  padding: 7px 8px 7px 10px;
   border: 1px solid #e0e3ea;
-  border-radius: 9px;
+  border-radius: 8px;
   background: #fff;
   color: #4b5563;
   display: flex;
   align-items: center;
-  gap: 7px;
-  text-align: left;
-  font-size: 12px;
+  justify-content: space-between;
+  gap: 8px;
+  overflow: hidden;
 }
 
-.aplus-module-list button.active {
+.aplus-module-option.active {
   border-color: #6c5ce7;
-  background: #f8f6ff;
+  background: #f3f0ff;
   color: #3527bd;
 }
 
-.aplus-module-list i {
-  width: 16px;
-  height: 16px;
-  border: 1px solid #cfd4dc;
-  border-radius: 4px;
+.aplus-module-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  text-align: left;
+  color: inherit;
+}
+
+.aplus-module-main span {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.aplus-module-main b {
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aplus-module-main small {
+  color: #8d95a3;
+  font-size: 9px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aplus-module-stepper {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 14px 14px 14px;
+  align-items: center;
+  gap: 1px;
+}
+
+.aplus-module-stepper button {
+  width: 14px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #6c5ce7;
   display: grid;
   place-items: center;
-  color: #6c5ce7;
   font-size: 10px;
-  flex: 0 0 auto;
+}
+
+.aplus-module-stepper button:disabled {
+  color: #c8ced8;
+  cursor: not-allowed;
+  background: transparent;
+}
+
+.aplus-module-stepper .anticon {
+  font-size: 10px;
+  line-height: 1;
+}
+
+.aplus-module-stepper strong {
+  color: #2f3440;
+  font-size: 11px;
+  text-align: center;
+  line-height: 1;
 }
 
 .aplus-actions {
@@ -591,11 +664,9 @@
 
 .aplus-workspace {
   padding: 24px;
-  max-width: 1320px;
+  max-width: 1280px;
   margin: 0 auto;
-  display: grid;
-  grid-template-columns: minmax(340px, 430px) 1fr;
-  gap: 18px;
+  display: block;
 }
 
 .aplus-plan-board,
@@ -690,8 +761,8 @@
 
 .aplus-result-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(240px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(3, minmax(240px, 1fr));
+  gap: 16px;
 }
 
 .aplus-result-card {
@@ -723,6 +794,14 @@
 
 .aplus-result-card footer {
   padding: 10px 11px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.aplus-result-meta {
+  min-width: 0;
   display: grid;
   gap: 3px;
 }
@@ -730,16 +809,58 @@
 .aplus-result-card footer b {
   color: #2c3037;
   font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .aplus-result-card footer span {
   color: #87909d;
   font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .aplus-result-card footer small {
   color: #d4380d;
   line-height: 1.35;
+}
+
+.aplus-result-card footer button {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 7px;
+  border: 1px solid #e0e2e8;
+  color: #667085;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.aplus-result-card footer button:disabled {
+  color: #b7bdc7;
+  cursor: not-allowed;
+  background: #f6f7f9;
+}
+
+.aplus-script-preview {
+  max-height: 60vh;
+  overflow: auto;
+  color: #2d333d;
+  line-height: 1.7;
+}
+
+.aplus-script-preview h1,
+.aplus-script-preview h2,
+.aplus-script-preview h3 {
+  margin: 14px 0 8px;
+}
+
+.aplus-script-preview p {
+  margin: 7px 0;
 }
 
 .aplus-empty-results {

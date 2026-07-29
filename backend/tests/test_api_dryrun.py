@@ -85,7 +85,10 @@ def test_aplus_dryrun_plan_and_generation_respect_amazon_a_plus_ratios(client) -
             "market": "美国",
             "language": "英文",
             "product_info": "便携保温杯，适合通勤。",
-            "selected_modules": ["首屏主视觉", "核心卖点图"],
+            "module_selections": [
+                {"name": "商品主视觉", "count": 1},
+                {"name": "卖点拆解", "count": 2},
+            ],
             "output_targets": [
                 {"mode": "amazon_aplus_advanced_web", "aspect_ratio": "1464:600"},
                 {"mode": "amazon_aplus_advanced_mobile", "aspect_ratio": "600:450"},
@@ -96,7 +99,13 @@ def test_aplus_dryrun_plan_and_generation_respect_amazon_a_plus_ratios(client) -
     assert plan_response.status_code == 201, plan_response.text
     plan = client.get(f"/api/v1/aplus-plan-jobs/{plan_response.json()['id']}").json()
     assert plan["status"] == "succeeded"
-    assert [item["module_name"] for item in plan["items"]] == ["首屏主视觉", "核心卖点图"]
+    assert plan["count"] == 3
+    assert plan["params"]["module_total"] == 3
+    assert plan["params"]["module_selections"] == [
+        {"name": "商品主视觉", "count": 1},
+        {"name": "卖点拆解", "count": 2},
+    ]
+    assert [item["module_name"] for item in plan["items"]] == ["商品主视觉", "卖点拆解", "卖点拆解"]
 
     generation_response = client.post(
         "/api/v1/aplus-generation-jobs",
@@ -110,10 +119,13 @@ def test_aplus_dryrun_plan_and_generation_respect_amazon_a_plus_ratios(client) -
     assert generation_response.status_code == 201, generation_response.text
     generation = client.get(f"/api/v1/aplus-generation-jobs/{generation_response.json()['id']}").json()
     assert generation["status"] == "succeeded"
-    assert len(generation["items"]) == 4
+    assert len(generation["items"]) == 6
     assert {item["aspect_ratio"] for item in generation["items"]} == {"1464:600", "600:450"}
+    history = client.get("/api/v1/aplus-generation-jobs").json()
+    assert history[0]["id"] == generation["id"]
+    assert history[0]["job_type"] == "generation"
     mobile_items = [item for item in generation["items"] if item["output_mode"] == "amazon_aplus_advanced_mobile"]
-    assert len(mobile_items) == 2
+    assert len(mobile_items) == 3
     assert all(item["source_web_item_id"] for item in mobile_items)
 
     archive = client.get(
@@ -134,7 +146,10 @@ def test_aplus_advanced_mobile_only_uses_direct_generation_path(client) -> None:
             "market": "美国",
             "language": "英文",
             "product_info": "便携保温杯，适合通勤。",
-            "selected_modules": ["首屏主视觉", "核心卖点图"],
+            "module_selections": [
+                {"name": "商品主视觉", "count": 1},
+                {"name": "生活场景", "count": 1},
+            ],
             "output_targets": [{"mode": "amazon_aplus_advanced_mobile", "aspect_ratio": "600:450"}],
             "dry_run": True,
         },
@@ -171,7 +186,7 @@ def test_aplus_rejects_mixed_output_specs(client) -> None:
             "market": "美国",
             "language": "英文",
             "product_info": "",
-            "selected_modules": ["首屏主视觉"],
+            "selected_modules": ["商品主视觉"],
             "output_targets": [
                 {"mode": "detail", "aspect_ratio": "1:1"},
                 {"mode": "amazon_aplus_standard", "aspect_ratio": "970:600"},
@@ -194,13 +209,51 @@ def test_aplus_rejects_amazon_a_plus_targets_for_non_amazon_platform(client) -> 
             "market": "美国",
             "language": "英文",
             "product_info": "",
-            "selected_modules": ["首屏主视觉"],
+            "selected_modules": ["商品主视觉"],
             "output_targets": [{"mode": "amazon_aplus_standard", "aspect_ratio": "970:600"}],
             "dry_run": True,
         },
     )
     assert response.status_code == 422
     assert "只支持亚马逊平台" in response.text
+
+
+def test_aplus_rejects_legacy_module_names_and_total_over_limit(client) -> None:
+    asset_id = upload_asset(client)
+    legacy_response = client.post(
+        "/api/v1/aplus-plan-jobs",
+        json={
+            "asset_ids": [asset_id],
+            "platform": "亚马逊",
+            "market": "美国",
+            "language": "英文",
+            "product_info": "",
+            "selected_modules": ["首屏主视觉"],
+            "output_targets": [{"mode": "detail", "aspect_ratio": "1:1"}],
+            "dry_run": True,
+        },
+    )
+    assert legacy_response.status_code == 422
+    assert "不支持的详情页模块" in legacy_response.text
+
+    total_response = client.post(
+        "/api/v1/aplus-plan-jobs",
+        json={
+            "asset_ids": [asset_id],
+            "platform": "亚马逊",
+            "market": "美国",
+            "language": "英文",
+            "product_info": "",
+            "module_selections": [
+                {"name": "商品主视觉", "count": 7},
+                {"name": "卖点拆解", "count": 6},
+            ],
+            "output_targets": [{"mode": "detail", "aspect_ratio": "1:1"}],
+            "dry_run": True,
+        },
+    )
+    assert total_response.status_code == 422
+    assert "最多生成 12 张" in total_response.text
 
 
 def test_video_dryrun_creates_one_item_per_selected_type(client) -> None:

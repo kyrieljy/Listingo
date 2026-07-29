@@ -1,11 +1,14 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
+  APLUS_MODULE_TOTAL_LIMIT,
   buildAplusOutputTargets,
   buildAplusPlanPayload,
   buildCustomTypes,
   buildGenerationPayload,
   buildVideoPayload,
+  aplusModuleTotal,
+  aplusModules,
   createDefaultAplusForm,
   createDefaultVideoForm,
   createDefaultWorkspaceForm,
@@ -35,7 +38,7 @@ describe('workspace model', () => {
     expect(phaseDefinitions.map((item) => item.label)).toEqual([
       '商品套图',
       'A+详情',
-      '视频与爆款复刻',
+      '爆款视频生成',
       'Agent与画布',
     ])
   })
@@ -60,6 +63,47 @@ describe('workspace model', () => {
     expect(buildAplusOutputTargets(form).map((target) => target.aspect_ratio)).toEqual(['1464:600', '600:450'])
     form.platform = 'Temu'
     expect(buildAplusPlanPayload(['asset-1'], form).output_targets).toEqual([{ mode: 'detail', aspect_ratio: '1:1' }])
+  })
+
+  it('exposes the new A+ module catalog with per-module quantities', () => {
+    expect(APLUS_MODULE_TOTAL_LIMIT).toBe(12)
+    expect(aplusModules).toEqual([
+      { name: '商品主视觉', description: '打造商品第一印象' },
+      { name: '卖点拆解', description: '提炼核心购买价值' },
+      { name: '生活场景', description: '呈现真实使用环境' },
+      { name: '全方位展示', description: '展示商品完整形态' },
+      { name: '情绪氛围', description: '强化视觉感染力' },
+      { name: '品质细看', description: '放大材质与工艺细节' },
+      { name: '品牌心智', description: '传递品牌定位与理念' },
+      { name: '规格指南', description: '展示尺寸与选择信息' },
+      { name: '效果呈现', description: '对比使用前后变化' },
+      { name: '产品资料', description: '汇总参数与基础信息' },
+      { name: '制造揭秘', description: '展示生产工艺过程' },
+      { name: '开箱清单', description: '展示包装与附属内容' },
+      { name: '款式矩阵', description: '展示多SKU组合' },
+      { name: '材质解析', description: '拆解组成与用料' },
+      { name: '服务承诺', description: '展示售后保障' },
+      { name: '使用攻略', description: '提供使用方法建议' },
+    ])
+  })
+
+  it('builds A+ plan payloads with ordered module selections and total counts', () => {
+    const form = createDefaultAplusForm()
+    form.selectedModules = [
+      { name: '生活场景', count: 2 },
+      { name: '商品主视觉', count: 1 },
+      { name: '卖点拆解', count: 3 },
+      { name: '服务承诺', count: 0 },
+    ]
+    const payload = buildAplusPlanPayload(['asset-1'], form)
+
+    expect(aplusModuleTotal(form.selectedModules)).toBe(6)
+    expect(payload.module_selections).toEqual([
+      { name: '商品主视觉', count: 1 },
+      { name: '卖点拆解', count: 3 },
+      { name: '生活场景', count: 2 },
+    ])
+    expect(payload.selected_modules).toEqual(['商品主视觉', '卖点拆解', '生活场景'])
   })
 
   it('surfaces exact generation failure details from job and item errors', () => {
@@ -258,8 +302,10 @@ describe('workspace model', () => {
 
   it('shows optimistic running cards immediately after generation confirmation', () => {
     expect(workspaceSource).toContain('function createOptimisticJob')
+    expect(workspaceSource).toContain('function preservePendingJobItems')
     expect(workspaceSource).toContain("status: 'running'")
     expect(workspaceSource).toContain('job.value = createOptimisticJob(payload)')
+    expect(workspaceSource).toContain('const created = preservePendingJobItems(await createJob(payload)); job.value = created')
   })
 
   it('uses a modal for content safety interception errors', () => {
@@ -300,8 +346,61 @@ describe('workspace model', () => {
 
   it('wires the video phase to the real video workspace instead of the demo panel', () => {
     expect(workspaceSource).toContain("import VideoPhasePanel from './VideoPhasePanel.vue'")
-    expect(workspaceSource).toContain('<VideoPhasePanel v-else-if="phase===\'video\'" />')
-    expect(workspaceSource).toContain('APlusPhasePanel v-if="phase===\'aplus\'"')
+    expect(workspaceSource).toContain('<VideoPhasePanel v-else-if="phase===\'video\'" ref="videoPanel" />')
+    expect(workspaceSource).toContain('APlusPhasePanel v-if="phase===\'aplus\'" ref="aplusPanel"')
+  })
+
+  it('loads topbar history from the current workspace phase', () => {
+    expect(apiClientSource).toContain("api.get('/aplus-generation-jobs')")
+    expect(workspaceSource).toContain("if (phase.value === 'video') history.value = await listVideoJobs()")
+    expect(workspaceSource).toContain("else if (phase.value === 'aplus') history.value = await listAplusGenerationJobs()")
+    expect(workspaceSource).toContain("else if (phase.value === 'suite') history.value = await listJobs()")
+    expect(workspaceSource).toContain("phase.value === 'video' ? '视频历史'")
+    expect(workspaceSource).toContain("phase.value === 'aplus' ? 'A+ 详情历史'")
+    expect(workspaceSource).toContain("await videoPanel.value?.openHistoryJob(entry as VideoJob)")
+    expect(workspaceSource).toContain("await aplusPanel.value?.openHistoryJob(entry as AplusJob)")
+  })
+
+  it('wires A+ module cards to count steppers and one-click image generation', () => {
+    expect(aplusPanelSource).toContain('selectedModuleTotal')
+    expect(aplusPanelSource).toContain('plannedResultCount')
+    expect(aplusPanelSource).toContain('toggleModule(module.name)')
+    expect(aplusPanelSource).toContain('incrementModule(module.name)')
+    expect(aplusPanelSource).toContain('decrementModule(module.name)')
+    expect(aplusPanelSource).toContain('module.description')
+    expect(aplusPanelSource).toContain('createOptimisticPlanJob')
+    expect(aplusPanelSource).toContain('createOptimisticGenerationJob')
+    expect(aplusPanelSource).toContain('const createdPlan = preservePendingAplusItems(await createAplusPlanJob(planPayload), planJob.value)')
+    expect(aplusPanelSource).toContain('const createdGeneration = preservePendingAplusItems(await createAplusGenerationJob(generationPayload), generationJob.value)')
+    expect(aplusPanelSource).toContain('生成图片 ${plannedResultCount} 张')
+    expect(aplusPanelSource).not.toContain('生成模块方案 · 共 ${selectedModuleTotal} 张')
+    expect(aplusPanelSource).not.toContain('确认模块后生成图片')
+    expect(aplusPanelSource).not.toContain('模块方案确认后')
+    expect(aplusPanelSource).toContain('详情页模块最多生成 ${APLUS_MODULE_TOTAL_LIMIT} 张')
+  })
+
+  it('shows A+ results as a single image grid and hides scripts behind card actions', () => {
+    const workspaceRule = workspaceSuiteCss.match(/\.aplus-workspace\s*\{([^}]*)\}/)?.[1] ?? ''
+    const gridRule = workspaceSuiteCss.match(/\.aplus-result-grid\s*\{([^}]*)\}/)?.[1] ?? ''
+    const normalizedWorkspace = workspaceRule.replace(/\s+/g, '')
+    const normalizedGrid = gridRule.replace(/\s+/g, '')
+
+    expect(aplusPanelSource).not.toContain('class="aplus-plan-board"')
+    expect(aplusPanelSource).not.toContain('class="aplus-plan-card"')
+    expect(aplusPanelSource).toContain('previewItem')
+    expect(aplusPanelSource).toContain('function scriptMarkdown')
+    expect(aplusPanelSource).toContain('A+ 图片脚本')
+    expect(aplusPanelSource).toContain('<PlayCircleOutlined />脚本')
+    expect(normalizedWorkspace).toContain('display:block')
+    expect(normalizedGrid).toContain('grid-template-columns:repeat(3,minmax(240px,1fr))')
+    expect(workspaceSuiteCss).toContain('.aplus-script-preview')
+  })
+
+  it('uses user-facing A+ upload guidance instead of implementation wording', () => {
+    expect(aplusPanelSource).toContain('建议上传主图、细节图和场景图')
+    expect(aplusPanelSource).toContain('删除已有图片后可继续上传')
+    expect(aplusPanelSource).not.toContain('只传图时会先识别商品')
+    expect(aplusPanelSource).not.toContain('严格按文字事实')
   })
 
   it('uses the prior skincare video detail empty state', () => {
@@ -438,6 +537,7 @@ describe('workspace model', () => {
     expect(videoPanelSource).toContain('下载选中')
     expect(videoPanelSource).toContain('重试失败')
     expect(videoPanelSource).toContain('视频导演脚本')
+    expect(videoPanelSource).toContain('远程任务号 {{ item.provider_task_id }}')
     expect(videoPanelSource).toContain('AI 转写')
     expect(videoPanelSource).toContain('安全演示模式')
   })

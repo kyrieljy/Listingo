@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import json
 from pathlib import Path
 from typing import Any
@@ -25,6 +29,46 @@ IMAGE2_SIZE_MAP = {
     "1464:600": "auto",
     "600:450": "auto",
 }
+RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+
+
+def _retry_count(config: dict[str, Any]) -> int:
+    try:
+        configured = int(config.get("max_retries", 2))
+    except (TypeError, ValueError):
+        configured = 2
+    return max(0, min(configured, 5))
+
+
+def _retry_after_header_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+
+
+def _retry_delay_seconds(response: httpx.Response, attempt: int, config: dict[str, Any]) -> float:
+    retry_after = _retry_after_header_seconds(response.headers.get("retry-after"))
+    if retry_after is not None:
+        try:
+            cap = float(config.get("retry_after_cap_seconds", 20))
+        except (TypeError, ValueError):
+            cap = 20.0
+        return min(retry_after, max(0.0, cap))
+    try:
+        base = float(config.get("retry_backoff_seconds", 1))
+    except (TypeError, ValueError):
+        base = 1.0
+    return min(max(base, 0.0) * (2**attempt), 8.0)
 
 
 def _ratio_value(ratio: str) -> float | None:
@@ -144,11 +188,14 @@ class ProviderClient:
         if provider.adapter != "shengsuanyun_tasks_generation":
             raise RuntimeError(f"Provider {provider.code} does not support video generation: {provider.adapter}")
         config = json.loads(provider.config_json)
+        image_role = str(config.get("image_role") or "reference_image")
+        if image_role not in {"reference_image", "first_frame"}:
+            raise RuntimeError(f"Seedance 图片角色不支持：{image_role}")
         payload: dict[str, Any] = {
             "model": provider.model_name,
             "content": [
                 {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "image_url", "role": image_role, "image_url": {"url": image_url}},
             ],
             "ratio": aspect_ratio,
             "duration": duration,
@@ -156,6 +203,9 @@ class ProviderClient:
             "generate_audio": generate_audio,
             "camera_fixed": camera_fixed,
             "watermark": watermark,
+            "return_last_frame": bool(config.get("return_last_frame", False)),
+            "draft": bool(config.get("draft", False)),
+            "tools": config.get("tools", []),
         }
         if config.get("service_tier"):
             payload["service_tier"] = config["service_tier"]
@@ -267,11 +317,18 @@ class ProviderClient:
             inline = file_to_inline_part(path)["inlineData"]
             files.append(("image", (Path(path).name, Path(path).read_bytes(), inline["mimeType"])))
         if self._external_client:
-            response = await self._external_client.post(edit_url, headers=headers, data=form, files=files)
+            response = await self._request_with_retries(
+                provider,
+                config,
+                lambda: self._external_client.post(edit_url, headers=headers, data=form, files=files),
+            )
         else:
             async with build_async_http_client(int(config.get("timeout_seconds", 180))) as client:
-                response = await client.post(edit_url, headers=headers, data=form, files=files)
-        response.raise_for_status()
+                response = await self._request_with_retries(
+                    provider,
+                    config,
+                    lambda: client.post(edit_url, headers=headers, data=form, files=files),
+                )
         response_data = response.json()
         result_data = response_data.get("data")
         result = result_data[0] if isinstance(result_data, list) and result_data else result_data
@@ -287,13 +344,52 @@ class ProviderClient:
         config = json.loads(provider.config_json)
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         if self._external_client:
-            response = await self._external_client.post(provider.base_url, headers=headers, json=payload)
-            response.raise_for_status()
+            response = await self._request_with_retries(
+                provider,
+                config,
+                lambda: self._external_client.post(provider.base_url, headers=headers, json=payload),
+            )
             return response.json()
         async with build_async_http_client(int(config.get("timeout_seconds", 180))) as client:
-            response = await client.post(provider.base_url, headers=headers, json=payload)
-            response.raise_for_status()
+            response = await self._request_with_retries(
+                provider,
+                config,
+                lambda: client.post(provider.base_url, headers=headers, json=payload),
+            )
             return response.json()
+
+    async def _request_with_retries(
+        self,
+        provider: Provider,
+        config: dict[str, Any],
+        send: Callable[[], Awaitable[httpx.Response]],
+    ) -> httpx.Response:
+        max_retries = _retry_count(config)
+        for attempt in range(max_retries + 1):
+            response = await send()
+            if response.status_code not in RETRYABLE_HTTP_STATUS_CODES or attempt >= max_retries:
+                self._raise_for_status(provider, response)
+                return response
+            await asyncio.sleep(_retry_delay_seconds(response, attempt, config))
+        raise RuntimeError(f"{provider.code} request failed after retries")
+
+    def _raise_for_status(self, provider: Provider, response: httpx.Response) -> None:
+        if response.status_code < 400:
+            return
+        detail = response.text.strip()
+        if len(detail) > 300:
+            detail = detail[:300] + "..."
+        if response.status_code == 429:
+            retry_after = response.headers.get("retry-after")
+            retry_hint = f" Retry-After={retry_after}." if retry_after else ""
+            raise RuntimeError(
+                f"{provider.code} rate limited by upstream provider (HTTP 429 Too Many Requests)."
+                f"{retry_hint} Wait and retry, or lower LISTINGO_MAX_JOB_CONCURRENCY."
+            )
+        message = f"{provider.code} upstream request failed (HTTP {response.status_code} {response.reason_phrase})"
+        if detail:
+            message += f": {detail}"
+        raise RuntimeError(message)
 
     async def _download(self, url: str, timeout: int) -> bytes:
         if self._external_client:

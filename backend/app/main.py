@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import inspect, text
 
 from backend.app.config import Settings
 from backend.app.database import build_engine, build_session_factory
@@ -11,6 +12,19 @@ from backend.app.seed import seed_database
 from backend.app.security import ApiKeyCipher
 from backend.app.api.public import router as public_router
 from backend.app.api.admin import router as admin_router
+
+
+def ensure_runtime_schema(engine) -> None:
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.begin() as connection:
+        inspector = inspect(connection)
+        for table_name in ("generation_job", "video_job", "aplus_job"):
+            if not inspector.has_table(table_name):
+                continue
+            columns = {column["name"] for column in inspector.get_columns(table_name)}
+            if "is_admin_test" not in columns:
+                connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN is_admin_test BOOLEAN NOT NULL DEFAULT 0"))
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -22,6 +36,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         Base.metadata.create_all(engine)
+        ensure_runtime_schema(engine)
         with session_factory() as session:
             seed_database(session)
         yield

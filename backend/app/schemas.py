@@ -18,23 +18,24 @@ A_PLUS_OUTPUT_MODES = {
     "amazon_aplus_advanced_mobile",
 }
 A_PLUS_ADVANCED_MODES = {"amazon_aplus_advanced_web", "amazon_aplus_advanced_mobile"}
+A_PLUS_MODULE_TOTAL_LIMIT = 12
 A_PLUS_MODULES = {
-    "首屏主视觉",
-    "核心卖点图",
-    "使用场景图",
-    "多角度图",
-    "场景氛围图",
-    "商品细节图",
-    "品牌故事图",
-    "尺寸/容量/尺码图",
-    "效果对比图",
-    "详细规格/参数表",
-    "工艺制作图",
-    "配件/赠品图",
-    "系列展示图",
-    "商品成分图",
-    "售后保障图",
-    "使用建议图",
+    "商品主视觉",
+    "卖点拆解",
+    "生活场景",
+    "全方位展示",
+    "情绪氛围",
+    "品质细看",
+    "品牌心智",
+    "规格指南",
+    "效果呈现",
+    "产品资料",
+    "制造揭秘",
+    "开箱清单",
+    "款式矩阵",
+    "材质解析",
+    "服务承诺",
+    "使用攻略",
 }
 
 
@@ -241,13 +242,26 @@ def validate_aplus_output_target_selection(output_targets: list[AplusOutputTarge
     raise ValueError("普通 A+、高级 A+、1:1、3:4、9:16、16:9 每次只能选择一个")
 
 
+class AplusModuleSelection(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    count: int = Field(ge=1, le=A_PLUS_MODULE_TOTAL_LIMIT)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if value not in A_PLUS_MODULES:
+            raise ValueError(f"不支持的详情页模块：{value}")
+        return value
+
+
 class AplusPlanJobCreate(BaseModel):
     asset_ids: list[str] = Field(min_length=1, max_length=3)
     platform: str = Field(min_length=1, max_length=80)
     market: str = Field(min_length=1, max_length=80)
     language: str = Field(min_length=1, max_length=80)
     product_info: str = Field(default="", max_length=6000)
-    selected_modules: list[str] = Field(min_length=1, max_length=10)
+    module_selections: list[AplusModuleSelection] | None = Field(default=None, max_length=A_PLUS_MODULE_TOTAL_LIMIT)
+    selected_modules: list[str] | None = Field(default=None, max_length=A_PLUS_MODULE_TOTAL_LIMIT)
     output_targets: list[AplusOutputTarget] = Field(min_length=1, max_length=8)
     dry_run: bool = True
 
@@ -260,7 +274,9 @@ class AplusPlanJobCreate(BaseModel):
 
     @field_validator("selected_modules")
     @classmethod
-    def validate_modules(cls, value: list[str]) -> list[str]:
+    def validate_modules(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return value
         unique: list[str] = []
         for item in value:
             if item not in A_PLUS_MODULES:
@@ -271,13 +287,35 @@ class AplusPlanJobCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_platform_targets(self) -> "AplusPlanJobCreate":
+        if not self.module_selections:
+            if not self.selected_modules:
+                raise ValueError("请至少选择 1 个详情页模块")
+            self.module_selections = [AplusModuleSelection(name=name, count=1) for name in self.selected_modules]
+        seen: set[str] = set()
+        unique: list[AplusModuleSelection] = []
+        for selection in self.module_selections:
+            if selection.name in seen:
+                raise ValueError(f"详情页模块不能重复配置：{selection.name}")
+            seen.add(selection.name)
+            unique.append(selection)
+        self.module_selections = unique
+        self.selected_modules = [selection.name for selection in unique]
+        total = self.module_total
+        if total < 1:
+            raise ValueError("请至少生成 1 张详情页模块")
+        if total > A_PLUS_MODULE_TOTAL_LIMIT:
+            raise ValueError(f"详情页模块最多生成 {A_PLUS_MODULE_TOTAL_LIMIT} 张")
         validate_aplus_output_target_selection(self.output_targets, self.platform)
         return self
+
+    @property
+    def module_total(self) -> int:
+        return sum(selection.count for selection in (self.module_selections or []))
 
 
 class AplusGenerationJobCreate(BaseModel):
     plan_job_id: str
-    module_item_ids: list[str] = Field(default_factory=list, max_length=10)
+    module_item_ids: list[str] = Field(default_factory=list, max_length=A_PLUS_MODULE_TOTAL_LIMIT)
     output_targets: list[AplusOutputTarget] = Field(min_length=1, max_length=8)
     dry_run: bool = True
 
@@ -420,6 +458,7 @@ class ProviderUpdate(BaseModel):
     enabled: bool | None = None
     is_default: bool | None = None
     is_fallback: bool | None = None
+    route_roles: dict[str, str | None] | None = None
     api_key: str | None = Field(default=None, min_length=4, max_length=1000)
     resolution: str | None = None
     size: str | None = None
@@ -440,6 +479,7 @@ class ProviderOut(BaseModel):
     enabled: bool
     is_default: bool
     is_fallback: bool
+    route_roles: dict[str, str]
     has_api_key: bool
     api_key_masked: str | None
     config: dict[str, Any]
@@ -455,6 +495,33 @@ class ProviderTestOut(BaseModel):
 class PromptVersionCreate(BaseModel):
     content: str = Field(min_length=20)
     change_note: str = Field(default="", max_length=500)
+
+
+class PromptTestRunCreate(BaseModel):
+    test_type: Literal["llm_output", "full_chain"]
+    prompt_content: str = Field(min_length=20, max_length=2 * 1024 * 1024)
+    inputs: dict[str, Any] = Field(default_factory=dict)
+
+
+class PromptTestRunOut(BaseModel):
+    id: str
+    prompt_id: str
+    prompt_code: str
+    test_type: str
+    status: str
+    progress: int
+    prompt_content_sha256: str
+    input_params: dict[str, Any]
+    raw_output: str
+    parsed_output: dict[str, Any]
+    validation_errors: list[str]
+    related_job_type: str | None
+    related_job_id: str | None
+    artifact_urls: list[str]
+    provider_code: str | None
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class WorkflowVersionCreate(BaseModel):

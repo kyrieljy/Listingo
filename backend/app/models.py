@@ -66,6 +66,29 @@ class PromptVersion(Base, TimestampMixin):
     prompt: Mapped[Prompt] = relationship(back_populates="versions", foreign_keys=[prompt_id])
 
 
+class PromptTestRun(Base, TimestampMixin):
+    __tablename__ = "prompt_test_run"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    prompt_id: Mapped[str] = mapped_column(ForeignKey("prompt.id", ondelete="CASCADE"), index=True)
+    prompt_code: Mapped[str] = mapped_column(String(80), index=True)
+    test_type: Mapped[str] = mapped_column(String(30), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_content_snapshot: Mapped[str] = mapped_column(Text)
+    prompt_content_sha256: Mapped[str] = mapped_column(String(64))
+    input_params_json: Mapped[str] = mapped_column(Text, default="{}")
+    raw_output: Mapped[str] = mapped_column(Text, default="")
+    parsed_output_json: Mapped[str] = mapped_column(Text, default="{}")
+    validation_errors_json: Mapped[str] = mapped_column(Text, default="[]")
+    related_job_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    related_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    artifact_urls_json: Mapped[str] = mapped_column(Text, default="[]")
+    provider_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt: Mapped[Prompt] = relationship(foreign_keys=[prompt_id])
+
+
 class Workflow(Base, TimestampMixin):
     __tablename__ = "workflow"
 
@@ -110,6 +133,7 @@ class GenerationJob(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_admin_test: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     params_json: Mapped[str] = mapped_column(Text)
     asset_ids_json: Mapped[str] = mapped_column(Text)
     count: Mapped[int] = mapped_column(Integer)
@@ -163,6 +187,7 @@ class VideoJob(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_admin_test: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     params_json: Mapped[str] = mapped_column(Text)
     asset_ids_json: Mapped[str] = mapped_column(Text)
     count: Mapped[int] = mapped_column(Integer)
@@ -218,6 +243,7 @@ class AplusJob(Base, TimestampMixin):
     job_type: Mapped[str] = mapped_column(String(30), default="plan", index=True)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_admin_test: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     params_json: Mapped[str] = mapped_column(Text)
     asset_ids_json: Mapped[str] = mapped_column(Text)
     count: Mapped[int] = mapped_column(Integer)

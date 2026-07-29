@@ -22,7 +22,6 @@ from backend.app.models import (
     GenerationVersion,
     Prompt,
     PromptVersion,
-    Provider,
     VideoItem,
     VideoJob,
     VideoVersion,
@@ -67,6 +66,7 @@ from backend.app.services.content_safety import (
     run_local_text_safety_review,
 )
 from backend.app.services.providers import ProviderClient
+from backend.app.services.provider_routing import route_provider_codes
 from backend.app.services.redaction import safe_json
 from backend.app.services.storage import store_upload
 from backend.app.services.video_jobs import (
@@ -285,23 +285,12 @@ async def create_generation_job(
     if len(assets) != len(payload.asset_ids):
         raise HTTPException(status_code=422, detail="存在无效商品图")
     if not payload.dry_run:
-        providers = session.scalars(select(Provider)).all()
-        required: dict[tuple[str, str], Provider | None] = {
-            ("llm", "default"): next((item for item in providers if item.capability == "llm" and item.is_default), None),
-            ("llm", "fallback"): next((item for item in providers if item.capability == "llm" and item.is_fallback), None),
-        }
-        for code in image_provider_route(payload.model_preference):
-            required[("image", code)] = next((item for item in providers if item.code == code), None)
-        unavailable = [
-            f"{capability}-{relation}"
-            for (capability, relation), provider in required.items()
-            if not provider or not provider.enabled or not provider.encrypted_api_key
-        ]
-        if unavailable:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Live 模式不可用，请先配置并启用：{', '.join(unavailable)}",
-            )
+        try:
+            _enabled_provider(session, "llm", "default")
+            _enabled_provider(session, "llm", "fallback")
+            image_provider_route(payload.model_preference, session)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     prompt = session.scalar(select(Prompt).where(Prompt.code == "ecommerce-meta"))
     workflow = session.scalar(select(Workflow).where(Workflow.code == "product-suite-v1"))
@@ -538,6 +527,7 @@ async def create_aplus_plan_job(
     if not prompt_version or not product_vision_version:
         raise HTTPException(status_code=500, detail="A+ Prompt 工程资产未完整启用")
     params = payload.model_dump()
+    params["module_total"] = payload.module_total
     params["_prompt_versions"] = {"product-vision": product_vision_version.id}
     job = AplusJob(
         job_type="plan",
@@ -545,7 +535,7 @@ async def create_aplus_plan_job(
         dry_run=payload.dry_run,
         params_json=json.dumps(params, ensure_ascii=False),
         asset_ids_json=json.dumps(payload.asset_ids),
-        count=len(payload.selected_modules),
+        count=payload.module_total,
         progress=0,
         prompt_version_id=prompt_version.id,
     )
@@ -578,17 +568,15 @@ async def create_aplus_generation_job(
     if any(target.mode != "detail" for target in payload.output_targets) and plan_params.get("platform") != "亚马逊":
         raise HTTPException(status_code=422, detail="普通 A+ 和高级 A+ 只支持亚马逊平台")
     if not payload.dry_run:
-        required_codes = ["yunwu-image-2"]
-        target_modes = {target.mode for target in payload.output_targets}
-        if {"amazon_aplus_advanced_web", "amazon_aplus_advanced_mobile"}.issubset(target_modes):
-            required_codes.append("aplus-mobile-edit-low-cost")
-        unavailable = []
-        for code in required_codes:
-            provider = session.scalar(select(Provider).where(Provider.code == code))
-            if not provider or not provider.enabled or not provider.encrypted_api_key:
-                unavailable.append(code)
-        if unavailable:
-            raise HTTPException(status_code=409, detail=f"Live 模式不可用，请先配置并启用：{', '.join(unavailable)}")
+        route_keys = {
+            "aplus_mobile" if target.mode == "amazon_aplus_advanced_mobile" else "aplus_detail"
+            for target in payload.output_targets
+        }
+        try:
+            for route_key in route_keys:
+                route_provider_codes(session, route_key)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     prompt = session.scalar(select(Prompt).where(Prompt.code == "aplus-meta"))
     if not prompt or not prompt.active_version_id:
         raise HTTPException(status_code=500, detail="A+ Meta Prompt 未启用")
@@ -603,6 +591,17 @@ async def create_aplus_generation_job(
         request.app.state.cipher,
     )
     return serialize_aplus_job(load_aplus_job_or_404(session, job.id))
+
+
+@router.get("/aplus-generation-jobs", response_model=list[AplusJobOut])
+def list_aplus_generation_jobs(session: Session = Depends(get_session)):
+    jobs = session.scalars(
+        select(AplusJob)
+        .where(AplusJob.job_type == "generation", AplusJob.is_admin_test.is_(False))
+        .options(selectinload(AplusJob.items).selectinload(AplusItem.versions))
+        .order_by(AplusJob.created_at.desc())
+    ).all()
+    return [serialize_aplus_job(job) for job in jobs]
 
 
 @router.get("/aplus-generation-jobs/{job_id}", response_model=AplusJobOut)
@@ -855,6 +854,7 @@ async def create_video_job(
 def list_video_jobs(session: Session = Depends(get_session)):
     jobs = session.scalars(
         select(VideoJob)
+        .where(VideoJob.is_admin_test.is_(False))
         .options(selectinload(VideoJob.items).selectinload(VideoItem.versions))
         .order_by(VideoJob.created_at.desc())
     ).all()
@@ -915,6 +915,7 @@ def download_video_results(
 def list_generation_jobs(session: Session = Depends(get_session)):
     jobs = session.scalars(
         select(GenerationJob)
+        .where(GenerationJob.is_admin_test.is_(False))
         .options(selectinload(GenerationJob.items).selectinload(GenerationItem.versions))
         .order_by(GenerationJob.created_at.desc())
     ).all()

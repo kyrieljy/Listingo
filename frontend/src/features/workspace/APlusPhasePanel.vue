@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   CheckOutlined,
@@ -7,10 +7,14 @@ import {
   CloudUploadOutlined,
   DownloadOutlined,
   LoadingOutlined,
+  MinusOutlined,
+  PlayCircleOutlined,
+  PlusOutlined,
   RocketOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons-vue'
 import {
+  assistCopywriting,
   aplusDownloadUrl,
   createAplusGenerationJob,
   createAplusPlanJob,
@@ -22,8 +26,10 @@ import {
   type Asset,
 } from '../../api/client'
 import {
+  APLUS_MODULE_TOTAL_LIMIT,
   aplusLanguageOptions,
   aplusMarketOptions,
+  aplusModuleTotal,
   aplusModules,
   aplusOutputSpecs,
   aplusPlatformOptions,
@@ -32,11 +38,14 @@ import {
   buildAplusPlanPayload,
   createDefaultAplusForm,
   isAplusAmazon,
+  orderedAplusModuleSelections,
+  renderMarkdown,
   type AplusOutputSpec,
 } from './workspace-model'
 
 const assets = ref<Asset[]>([])
 const uploading = ref(false)
+const helping = ref(false)
 const planning = ref(false)
 const generating = ref(false)
 const form = ref(createDefaultAplusForm())
@@ -44,6 +53,16 @@ const planJob = ref<AplusJob | null>(null)
 const generationJob = ref<AplusJob | null>(null)
 const selectedPlanItemIds = ref<string[]>([])
 const selectedResultIds = ref<string[]>([])
+const previewItem = ref<AplusItem | null>(null)
+const aiSuggestion = ref('')
+const aiWriteOpen = ref(false)
+const productInfoEditing = ref(false)
+const aiSuggestionEditing = ref(false)
+const productInfoInput = ref<HTMLTextAreaElement | null>(null)
+const aiSuggestionInput = ref<HTMLTextAreaElement | null>(null)
+
+const productInfoPlaceholder = `可选：填写商品事实、参数、卖点。
+建议包含商品名称、核心卖点、适用人群、场景和必须遵循的事实。`
 
 const aplusShowcaseCards = [
   {
@@ -82,10 +101,9 @@ const uploadLimitReached = computed(() => assets.value.length >= 3)
 const amazonPlatform = computed(() => isAplusAmazon(form.value.platform))
 const availableOutputSpecs = computed(() => aplusOutputSpecs.filter((item) => !item.amazonOnly || amazonPlatform.value))
 const outputTargets = computed(() => buildAplusOutputTargets(form.value))
-const planReady = computed(() => planJob.value?.status === 'succeeded' && planJob.value.items.length > 0)
-const canPlan = computed(() => assets.value.length > 0 && form.value.selectedModules.length > 0 && outputTargets.value.length > 0)
-const selectedPlanItems = computed(() => (planJob.value?.items ?? []).filter((item) => selectedPlanItemIds.value.includes(item.id)))
-const canGenerate = computed(() => planReady.value && selectedPlanItemIds.value.length > 0 && outputTargets.value.length > 0)
+const selectedModuleTotal = computed(() => aplusModuleTotal(form.value.selectedModules))
+const plannedResultCount = computed(() => selectedModuleTotal.value * outputTargets.value.length)
+const canPlan = computed(() => assets.value.length > 0 && selectedModuleTotal.value > 0 && outputTargets.value.length > 0)
 
 watch(() => form.value.platform, (platform) => {
   if (!isAplusAmazon(platform) && form.value.outputSpec.startsWith('amazon_aplus')) {
@@ -98,6 +116,18 @@ function requestDetail(error: any): string {
   const detail = error?.response?.data?.detail
   if (Array.isArray(detail)) return detail.map((item) => item?.msg || String(item)).join('；')
   return detail || error?.message || ''
+}
+
+async function editProductInfo() {
+  productInfoEditing.value = true
+  await nextTick()
+  productInfoInput.value?.focus()
+}
+
+async function editAiSuggestion() {
+  aiSuggestionEditing.value = true
+  await nextTick()
+  aiSuggestionInput.value?.focus()
 }
 
 async function filesSelected(event: Event) {
@@ -135,17 +165,39 @@ async function useSample() {
   }
 }
 
-function toggleModule(module: string) {
-  const exists = form.value.selectedModules.includes(module)
-  if (exists) {
-    form.value.selectedModules = form.value.selectedModules.filter((item) => item !== module)
+function moduleCount(moduleName: string): number {
+  return form.value.selectedModules.find((item) => item.name === moduleName)?.count ?? 0
+}
+
+function setModuleCount(moduleName: string, count: number) {
+  const normalized = Math.max(0, Math.min(APLUS_MODULE_TOTAL_LIMIT, Math.floor(count) || 0))
+  const next = form.value.selectedModules.filter((item) => item.name !== moduleName)
+  if (normalized > 0) next.push({ name: moduleName, count: normalized })
+  form.value.selectedModules = next
+}
+
+function toggleModule(moduleName: string) {
+  if (moduleCount(moduleName) > 0) {
+    setModuleCount(moduleName, 0)
     return
   }
-  if (form.value.selectedModules.length >= 10) {
-    message.warning('最多选择 10 个详情页模块')
+  if (selectedModuleTotal.value >= APLUS_MODULE_TOTAL_LIMIT) {
+    message.warning(`详情页模块最多生成 ${APLUS_MODULE_TOTAL_LIMIT} 张`)
     return
   }
-  form.value.selectedModules = [...form.value.selectedModules, module]
+  setModuleCount(moduleName, 1)
+}
+
+function incrementModule(moduleName: string) {
+  if (selectedModuleTotal.value >= APLUS_MODULE_TOTAL_LIMIT) {
+    message.warning(`详情页模块最多生成 ${APLUS_MODULE_TOTAL_LIMIT} 张`)
+    return
+  }
+  setModuleCount(moduleName, moduleCount(moduleName) + 1)
+}
+
+function decrementModule(moduleName: string) {
+  setModuleCount(moduleName, moduleCount(moduleName) - 1)
 }
 
 function selectOutputSpec(spec: AplusOutputSpec) {
@@ -170,9 +222,131 @@ function toggleAdvancedTarget(target: 'web' | 'mobile') {
     : [...form.value.advancedTargets, target]
 }
 
+async function aiWrite() {
+  helping.value = true
+  try {
+    const result = await assistCopywriting({
+      asset_ids: assets.value.map((asset) => asset.id),
+      platform: form.value.platform,
+      market: form.value.market,
+      language: form.value.language,
+      selling_points: form.value.productInfo,
+      dry_run: form.value.dryRun,
+    })
+    aiSuggestion.value = result.selling_points
+    aiSuggestionEditing.value = false
+    aiWriteOpen.value = true
+  } catch (error: any) {
+    message.error(requestDetail(error) || 'AI 转写失败，请检查语言模型配置')
+  } finally {
+    helping.value = false
+  }
+}
+
+async function regenerateCopywriting() {
+  await aiWrite()
+}
+
+function applyAiSuggestion() {
+  if (!aiSuggestion.value.trim()) return message.warning('AI 转写内容为空，请重新生成')
+  form.value.productInfo = aiSuggestion.value.trim()
+  productInfoEditing.value = false
+  aiWriteOpen.value = false
+  message.success('AI 转写已确认回填')
+}
+
+function createOptimisticAplusItem(
+  id: string,
+  index: number,
+  moduleIndex: number,
+  moduleName: string,
+  outputMode = '',
+  aspectRatio = '',
+): AplusItem {
+  return {
+    id,
+    index,
+    module_index: moduleIndex,
+    module_name: moduleName,
+    output_mode: outputMode,
+    aspect_ratio: aspectRatio,
+    image_prompt: '',
+    copy_requirements: '',
+    prompt_text: '',
+    status: 'running',
+    provider_id: null,
+    source_web_item_id: null,
+    error: null,
+    current_version_id: null,
+    versions: [],
+  }
+}
+
+function createOptimisticPlanJob(payload: Record<string, unknown>): AplusJob {
+  let itemIndex = 0
+  const items = orderedAplusModuleSelections(form.value.selectedModules).flatMap((selection) =>
+    Array.from({ length: selection.count }, () => {
+      itemIndex += 1
+      return createOptimisticAplusItem(`optimistic-aplus-plan-item-${itemIndex}`, itemIndex - 1, itemIndex, selection.name)
+    }),
+  )
+  return {
+    id: `optimistic-aplus-plan-${Date.now()}`,
+    job_type: 'plan',
+    status: 'running',
+    dry_run: Boolean(payload.dry_run),
+    progress: 0,
+    count: items.length,
+    params: { ...payload, global_plan: '正在自动生成模块方案，完成后会直接开始生成图片。' },
+    source_plan_job_id: null,
+    error: null,
+    created_at: new Date().toISOString(),
+    completed_at: null,
+    items,
+  }
+}
+
+function createOptimisticGenerationJob(planItems: AplusItem[], payload: Record<string, unknown>): AplusJob {
+  const targets = outputTargets.value
+  const items = planItems.flatMap((planItem, planIndex) =>
+    targets.map((target, targetIndex) =>
+      createOptimisticAplusItem(
+        `optimistic-aplus-generation-item-${planIndex}-${targetIndex}`,
+        planIndex * targets.length + targetIndex,
+        planItem.module_index,
+        planItem.module_name,
+        target.mode,
+        target.aspect_ratio,
+      ),
+    ),
+  )
+  return {
+    id: `optimistic-aplus-generation-${Date.now()}`,
+    job_type: 'generation',
+    status: 'running',
+    dry_run: Boolean(payload.dry_run),
+    progress: 0,
+    count: items.length,
+    params: payload,
+    source_plan_job_id: planJob.value?.id ?? null,
+    error: null,
+    created_at: new Date().toISOString(),
+    completed_at: null,
+    items,
+  }
+}
+
+function preservePendingAplusItems(latest: AplusJob, current: AplusJob | null): AplusJob {
+  if (latest.items.length || !current?.items.length) return latest
+  const items = latest.status === 'failed'
+    ? current.items.map((item) => ({ ...item, status: 'failed', error: item.error || latest.error }))
+    : current.items
+  return { ...latest, items, count: latest.count || current.count }
+}
+
 async function waitForPlan(jobId: string): Promise<AplusJob> {
   for (let attempt = 0; attempt < 300; attempt += 1) {
-    const latest = await getAplusPlanJob(jobId)
+    const latest = preservePendingAplusItems(await getAplusPlanJob(jobId), planJob.value)
     planJob.value = latest
     if (['succeeded', 'failed'].includes(latest.status)) return latest
     await new Promise((resolve) => window.setTimeout(resolve, 1000))
@@ -182,7 +356,7 @@ async function waitForPlan(jobId: string): Promise<AplusJob> {
 
 async function waitForGeneration(jobId: string): Promise<AplusJob> {
   for (let attempt = 0; attempt < 900; attempt += 1) {
-    const latest = await getAplusGenerationJob(jobId)
+    const latest = preservePendingAplusItems(await getAplusGenerationJob(jobId), generationJob.value)
     generationJob.value = latest
     if (['succeeded', 'partial_failed', 'failed'].includes(latest.status)) return latest
     await new Promise((resolve) => window.setTimeout(resolve, 1000))
@@ -190,54 +364,86 @@ async function waitForGeneration(jobId: string): Promise<AplusJob> {
   throw new Error('A+ 图片生成等待超时')
 }
 
-async function generatePlan() {
-  if (!canPlan.value) {
-    message.warning('请先上传商品图，并至少选择 1 个模块和 1 个输出比例')
-    return
-  }
-  planning.value = true
-  generationJob.value = null
-  selectedResultIds.value = []
-  try {
-    const created = await createAplusPlanJob(buildAplusPlanPayload(assets.value.map((asset) => asset.id), form.value))
-    planJob.value = created
-    const finished = await waitForPlan(created.id)
-    if (finished.status === 'failed') {
-      message.error(finished.error || 'A+ 方案生成失败')
-      return
-    }
-    selectedPlanItemIds.value = finished.items.map((item) => item.id)
-    message.success('A+ 模块方案已生成')
-  } catch (error: any) {
-    message.error(requestDetail(error) || 'A+ 方案生成失败')
-  } finally {
-    planning.value = false
-  }
-}
-
 async function generateImages() {
-  if (!canGenerate.value || !planJob.value) {
-    message.warning('请先生成并选择模块方案')
+  if (!canPlan.value) {
+    message.warning('请先上传商品图，并至少生成 1 张详情页模块和 1 个输出比例')
     return
   }
+  const planPayload = buildAplusPlanPayload(assets.value.map((asset) => asset.id), form.value)
+  const optimisticPlan = createOptimisticPlanJob(planPayload)
+  planJob.value = optimisticPlan
+  selectedPlanItemIds.value = optimisticPlan.items.map((item) => item.id)
+  generationJob.value = createOptimisticGenerationJob(optimisticPlan.items, {
+    output_targets: outputTargets.value,
+    dry_run: form.value.dryRun,
+  })
+  selectedResultIds.value = []
+  planning.value = true
   generating.value = true
   try {
-    const created = await createAplusGenerationJob({
-      plan_job_id: planJob.value.id,
+    const createdPlan = preservePendingAplusItems(await createAplusPlanJob(planPayload), planJob.value)
+    planJob.value = createdPlan
+    const finishedPlan = await waitForPlan(createdPlan.id)
+    if (finishedPlan.status === 'failed') {
+      if (generationJob.value) {
+        const error = finishedPlan.error || 'A+ 方案生成失败'
+        generationJob.value = {
+          ...generationJob.value,
+          status: 'failed',
+          error,
+          items: generationJob.value.items.map((item) => ({ ...item, status: 'failed', error: item.error || error })),
+        }
+      }
+      message.error(finishedPlan.error || 'A+ 方案生成失败')
+      return
+    }
+    selectedPlanItemIds.value = finishedPlan.items.map((item) => item.id)
+    planning.value = false
+    const generationPayload = {
+      plan_job_id: finishedPlan.id,
       module_item_ids: selectedPlanItemIds.value,
       output_targets: outputTargets.value,
       dry_run: form.value.dryRun,
-    })
-    generationJob.value = created
-    const finished = await waitForGeneration(created.id)
+    }
+    const createdGeneration = preservePendingAplusItems(await createAplusGenerationJob(generationPayload), generationJob.value)
+    generationJob.value = createdGeneration
+    const finished = await waitForGeneration(createdGeneration.id)
     selectedResultIds.value = finished.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
     message[finished.status === 'succeeded' ? 'success' : finished.status === 'partial_failed' ? 'warning' : 'error'](
       finished.status === 'succeeded' ? 'A+ 图片生成完成' : finished.error || 'A+ 图片生成存在失败项',
     )
   } catch (error: any) {
+    if (generationJob.value?.id.startsWith('optimistic-aplus-generation-')) {
+      const detail = requestDetail(error) || 'A+ 图片生成失败'
+      generationJob.value = {
+        ...generationJob.value,
+        status: 'failed',
+        error: detail,
+        items: generationJob.value.items.map((item) => ({ ...item, status: 'failed', error: item.error || detail })),
+      }
+    }
     message.error(requestDetail(error) || 'A+ 图片生成失败')
   } finally {
+    planning.value = false
     generating.value = false
+  }
+}
+
+async function openHistoryJob(entry: AplusJob) {
+  const latest = entry.job_type === 'generation' ? await getAplusGenerationJob(entry.id) : entry
+  generationJob.value = latest.job_type === 'generation' ? latest : null
+  selectedResultIds.value = latest.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
+  if (latest.source_plan_job_id) {
+    try {
+      planJob.value = await getAplusPlanJob(latest.source_plan_job_id)
+      selectedPlanItemIds.value = planJob.value.items.map((item) => item.id)
+    } catch {
+      planJob.value = null
+      selectedPlanItemIds.value = []
+    }
+  } else if (latest.job_type === 'plan') {
+    planJob.value = latest
+    selectedPlanItemIds.value = latest.items.map((item) => item.id)
   }
 }
 
@@ -245,10 +451,20 @@ function currentUrl(item: AplusItem): string | undefined {
   return item.versions.find((version) => version.id === item.current_version_id)?.url ?? item.versions.at(-1)?.url
 }
 
-function togglePlanItem(id: string) {
-  selectedPlanItemIds.value = selectedPlanItemIds.value.includes(id)
-    ? selectedPlanItemIds.value.filter((item) => item !== id)
-    : [...selectedPlanItemIds.value, id]
+function scriptMarkdown(item: AplusItem): string {
+  const sections = [
+    `### ${item.module_index || item.index + 1}. ${item.module_name}`,
+    `- 输出规格：${aplusTargetLabel(item.output_mode, item.aspect_ratio)}`,
+  ]
+  if (item.image_prompt.trim()) sections.push(`### 生图脚本\n${item.image_prompt.trim()}`)
+  if (item.copy_requirements.trim()) sections.push(`### 文案要求\n${item.copy_requirements.trim()}`)
+  if (item.prompt_text.trim()) sections.push(`### 完整 Prompt\n${item.prompt_text.trim()}`)
+  if (item.error?.trim()) sections.push(`### 错误信息\n${item.error.trim()}`)
+  return sections.join('\n\n')
+}
+
+function hasScript(item: AplusItem): boolean {
+  return Boolean(item.image_prompt.trim() || item.copy_requirements.trim() || item.prompt_text.trim() || item.error?.trim())
 }
 
 function toggleResult(id: string) {
@@ -264,6 +480,8 @@ function downloadResults() {
   }
   window.open(aplusDownloadUrl(generationJob.value.id, selectedResultIds.value), '_blank')
 }
+
+defineExpose({ openHistoryJob })
 </script>
 
 <template>
@@ -274,7 +492,7 @@ function downloadResults() {
         <input type="file" accept="image/png,image/jpeg,image/webp" multiple :disabled="uploadLimitReached || uploading" @change="filesSelected" />
         <CloudUploadOutlined />
         <b>{{ uploading ? '上传中' : uploadLimitReached ? '最多上传 3 张' : '点击上传商品图' }}</b>
-        <small>只传图时会先识别商品；图文同时传入时严格按文字事实</small>
+        <small>{{ uploadLimitReached ? '删除已有图片后可继续上传' : '建议上传主图、细节图和场景图' }}</small>
       </label>
       <div v-if="assets.length" class="uploaded-row">
         <div v-for="asset in assets" :key="asset.id">
@@ -292,11 +510,29 @@ function downloadResults() {
         <label>目标市场<select v-model="form.market"><option v-for="value in aplusMarketOptions" :key="value" :value="value">{{ value }}</option></select></label>
         <label>图片语言<select v-model="form.language"><option v-for="value in aplusLanguageOptions" :key="value" :value="value">{{ value }}</option></select></label>
       </div>
-      <textarea v-model="form.productInfo" class="aplus-product-info" rows="5" placeholder="可选：填写商品事实、参数、卖点。填写后系统会严格遵循这些文字，不虚构额外事实。" />
     </section>
 
     <section class="form-section">
-      <div class="section-title"><span>3</span><strong>输出规格</strong><em>{{ outputTargets.length }} 项</em></div>
+      <div class="section-title"><span>3</span><strong>商品卖点与要求</strong><button :disabled="helping" @click="aiWrite"><ThunderboltOutlined />{{ helping ? '转写中...' : 'AI 转写' }}</button></div>
+      <div class="markdown-input-frame aplus-product-info-markdown-frame">
+        <button v-if="form.productInfo.trim() && !productInfoEditing" class="markdown-preview" type="button" aria-label="编辑商品卖点与要求" @click="editProductInfo" v-html="renderMarkdown(form.productInfo)"></button>
+        <textarea v-else ref="productInfoInput" v-model="form.productInfo" class="aplus-product-info selling-points-input" rows="6" :placeholder="productInfoPlaceholder" @blur="productInfoEditing = false" />
+      </div>
+      <Teleport to="body">
+        <div v-if="aiWriteOpen" class="ai-write-popover" role="dialog" aria-label="AI 转写建议">
+          <header><strong><ThunderboltOutlined />AI 转写建议</strong><button type="button" aria-label="关闭 AI 转写建议" @click="aiWriteOpen = false"><CloseOutlined /></button></header>
+          <div class="markdown-input-frame ai-suggestion-markdown-frame">
+            <button v-if="aiSuggestion.trim() && !aiSuggestionEditing" class="markdown-preview" type="button" aria-label="编辑 AI 转写候选内容" @click="editAiSuggestion" v-html="renderMarkdown(aiSuggestion)"></button>
+            <textarea v-else ref="aiSuggestionInput" v-model="aiSuggestion" rows="8" aria-label="AI 转写候选内容" @blur="aiSuggestionEditing = false" />
+          </div>
+          <p>建议内容可直接修改；确认前不会覆盖原输入。</p>
+          <footer><button type="button" :disabled="helping" @click="regenerateCopywriting"><ThunderboltOutlined />{{ helping ? '生成中...' : '重新转写' }}</button><button type="button" class="apply" @click="applyAiSuggestion">确认回填</button></footer>
+        </div>
+      </Teleport>
+    </section>
+
+    <section class="form-section">
+      <div class="section-title"><span>4</span><strong>输出规格</strong><em>{{ outputTargets.length }} 项</em></div>
       <div class="aplus-output-grid">
         <button v-for="spec in availableOutputSpecs" :key="spec.value" type="button" :class="{ active: form.outputSpec === spec.value }" @click="selectOutputSpec(spec.value)">
           <i><CheckOutlined v-if="form.outputSpec === spec.value" /></i>
@@ -312,58 +548,48 @@ function downloadResults() {
     </section>
 
     <section class="form-section">
-      <div class="section-title"><span>4</span><strong>详情页模块</strong><em>{{ form.selectedModules.length }}/10</em></div>
+      <div class="section-title"><span>5</span><strong>详情页模块</strong><em>{{ selectedModuleTotal }}/{{ APLUS_MODULE_TOTAL_LIMIT }} 张</em></div>
       <div class="aplus-module-list">
-        <button v-for="module in aplusModules" :key="module" type="button" :class="{ active: form.selectedModules.includes(module) }" @click="toggleModule(module)">
-          <i><CheckOutlined v-if="form.selectedModules.includes(module)" /></i><span>{{ module }}</span>
-        </button>
+        <article v-for="module in aplusModules" :key="module.name" class="aplus-module-option" :class="{ active: moduleCount(module.name) > 0 }">
+          <button class="aplus-module-main" type="button" @click="toggleModule(module.name)">
+            <span><b>{{ module.name }}</b><small>{{ module.description }}</small></span>
+          </button>
+          <div class="aplus-module-stepper" :aria-label="`${module.name} 生成张数`">
+            <button type="button" :disabled="moduleCount(module.name) <= 0" :aria-label="`减少 ${module.name}`" @click.stop="decrementModule(module.name)"><MinusOutlined /></button>
+            <strong>{{ moduleCount(module.name) }}</strong>
+            <button type="button" :disabled="selectedModuleTotal >= APLUS_MODULE_TOTAL_LIMIT" :aria-label="`增加 ${module.name}`" @click.stop="incrementModule(module.name)"><PlusOutlined /></button>
+          </div>
+        </article>
       </div>
       <label class="switch-row"><span><b>安全演示模式</b><small>本地模拟资产，不调用语言或图片模型</small></span><input v-model="form.dryRun" type="checkbox" /></label>
     </section>
 
     <div class="panel-footer aplus-actions">
-      <button class="generate-button" :disabled="planning || !canPlan" @click="generatePlan"><ThunderboltOutlined />{{ planning ? `生成方案 ${planJob?.progress || 0}%` : '生成模块方案' }}</button>
-      <button class="secondary-action" :disabled="generating || !canGenerate" @click="generateImages"><RocketOutlined />{{ generating ? `生成图片 ${generationJob?.progress || 0}%` : `生成图片 ${selectedPlanItemIds.length * outputTargets.length} 张` }}</button>
+      <button class="generate-button" :disabled="planning || generating || !canPlan" @click="generateImages"><RocketOutlined />{{ planning ? `生成方案 ${planJob?.progress || 0}%` : generating ? `生成图片 ${generationJob?.progress || 0}%` : `生成图片 ${plannedResultCount} 张` }}</button>
     </div>
   </aside>
 
   <main class="preview-canvas aplus-preview-canvas">
-    <div v-if="planReady || generationJob" class="aplus-workspace">
-      <section class="aplus-plan-board">
-        <header>
-          <div><strong>A+ 模块方案</strong><small>{{ planJob?.params.global_plan || '确认模块后生成图片' }}</small></div>
-          <span>{{ selectedPlanItemIds.length }} / {{ planJob?.items.length || 0 }}</span>
-        </header>
-        <article v-for="item in planJob?.items" :key="item.id" class="aplus-plan-card" :class="{ selected: selectedPlanItemIds.includes(item.id) }">
-          <button type="button" class="aplus-plan-check" @click="togglePlanItem(item.id)"><CheckOutlined v-if="selectedPlanItemIds.includes(item.id)" /></button>
-          <div>
-            <b>{{ item.module_index }}. {{ item.module_name }}</b>
-            <textarea v-model="item.image_prompt" rows="3" />
-            <textarea v-model="item.copy_requirements" rows="2" />
-          </div>
-        </article>
-      </section>
-
+    <div v-if="generationJob?.items.length" class="aplus-workspace">
       <section class="aplus-results">
         <header>
-          <div><strong>A+ 生成结果</strong><small>{{ outputTargets.map((target) => aplusTargetLabel(target.mode, target.aspect_ratio)).join(' / ') }}</small></div>
+          <div><strong>{{ generationJob.status === 'succeeded' ? 'A+ 已生成' : generationJob.status === 'running' ? 'A+ 正在生成' : 'A+ 生成结果' }}</strong><small>{{ generationJob.items.length }} 张 · {{ generationJob.dry_run ? 'Dryrun' : 'Live' }} · {{ outputTargets.map((target) => aplusTargetLabel(target.mode, target.aspect_ratio)).join(' / ') }}</small></div>
           <button class="download-button" :disabled="!selectedResultIds.length" @click="downloadResults"><DownloadOutlined />下载选中 ({{ selectedResultIds.length }})</button>
         </header>
-        <div v-if="generationJob?.items.length" class="aplus-result-grid">
+        <div class="aplus-result-grid">
           <article v-for="item in generationJob.items" :key="item.id" class="aplus-result-card" :class="{ selected: selectedResultIds.includes(item.id), failed: item.status === 'failed' }">
             <button class="select-dot" type="button" @click="toggleResult(item.id)"><CheckOutlined v-if="selectedResultIds.includes(item.id)" /></button>
             <img v-if="currentUrl(item)" :src="currentUrl(item)" :alt="item.module_name" />
             <div v-else class="pending-image"><LoadingOutlined spin /><span>{{ item.status === 'failed' ? '生成失败' : '生成中' }}</span></div>
             <footer>
-              <b>{{ item.module_name }}</b>
-              <span>{{ aplusTargetLabel(item.output_mode, item.aspect_ratio) }}</span>
-              <small v-if="item.error">{{ item.error }}</small>
+              <div class="aplus-result-meta">
+                <b>{{ item.module_name }}</b>
+                <span>第 {{ item.index + 1 }} 张 · {{ aplusTargetLabel(item.output_mode, item.aspect_ratio) }}</span>
+                <small v-if="item.error">{{ item.error }}</small>
+              </div>
+              <button type="button" :disabled="!hasScript(item)" @click="previewItem = item"><PlayCircleOutlined />脚本</button>
             </footer>
           </article>
-        </div>
-        <div v-else class="aplus-empty-results">
-          <RocketOutlined />
-          <span>模块方案确认后，会按选中模块和输出规格生成详情页图片。</span>
         </div>
       </section>
     </div>
@@ -387,4 +613,8 @@ function downloadResults() {
       </section>
     </div>
   </main>
+
+  <a-modal :open="!!previewItem" title="A+ 图片脚本" :footer="null" width="760" @update:open="(open) => { if (!open) previewItem = null }">
+    <div v-if="previewItem" class="aplus-script-preview" v-html="renderMarkdown(scriptMarkdown(previewItem))" />
+  </a-modal>
 </template>

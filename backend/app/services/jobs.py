@@ -39,6 +39,7 @@ from backend.app.services.prompt_contract import (
     validate_meta_prompt_semantics,
 )
 from backend.app.services.content_safety import ContentSafetyBlocked, ensure_content_safe, run_content_safety_review
+from backend.app.services.provider_routing import enabled_provider_for_route, route_provider_codes
 from backend.app.services.providers import ProviderClient
 from backend.app.services.redaction import safe_json
 
@@ -86,8 +87,11 @@ PLATFORM_PROMPT_NAMES = {
 }
 
 
-def image_provider_route(preference: str) -> list[str]:
-    return ["yunwu-image-2"] if preference == "layout" else ["yunwu-nano-pro", "yunwu-nano"]
+def image_provider_route(preference: str, session: Session | None = None) -> list[str]:
+    route_key = "suite_layout" if preference == "layout" else "suite_fidelity"
+    if session is not None:
+        return route_provider_codes(session, route_key)
+    return ["yunwu-image-2"] if route_key == "suite_layout" else ["yunwu-nano-pro", "yunwu-nano"]
 
 
 def expand_custom_types(custom_counts: dict[str, Any] | None) -> list[str]:
@@ -152,6 +156,7 @@ def _run_dryrun_job(job_id: str, session_factory: sessionmaker[Session], setting
 
         try:
             prompt_version = session.get(PromptVersion, job.prompt_version_id)
+            prompt_content = str(params.get("_admin_prompt_content") or (prompt_version.content if prompt_version else ""))
             plan = build_dryrun_plan(params, job.count)
             session.add(
                 ExecutionLog(
@@ -163,13 +168,13 @@ def _run_dryrun_job(job_id: str, session_factory: sessionmaker[Session], setting
                     dry_run=True,
                 )
             )
-            combined_length = len(append_runtime_contract(prompt_version.content, job.count)) if prompt_version else 0
+            combined_length = len(append_runtime_contract(prompt_content, job.count)) if prompt_content else 0
             session.add(
                 ExecutionLog(
                     job_id=job.id,
                     node="meta_prompt",
                     status="succeeded",
-                    request_summary=safe_json({"source_chars": len(prompt_version.content) if prompt_version else 0}),
+                    request_summary=safe_json({"source_chars": len(prompt_content)}),
                     response_summary=safe_json({"combined_chars": combined_length, "image_count": len(plan.images)}),
                     dry_run=job.dry_run,
                 )
@@ -290,6 +295,13 @@ async def run_generation_job(
 
 
 def _enabled_provider(session: Session, capability: str, relation: str) -> Provider:
+    route_key = "llm" if capability == "llm" else "video" if capability == "video" else ""
+    if route_key:
+        try:
+            return enabled_provider_for_route(session, route_key, "primary" if relation == "default" else "fallback")
+        except RuntimeError:
+            # Compatibility for tests and older databases that still only mark global default/fallback flags.
+            pass
     column = Provider.is_default if relation == "default" else Provider.is_fallback
     provider = session.scalar(
         select(Provider).where(
@@ -370,12 +382,13 @@ async def _run_live_job(
             ]
             llm_default = _enabled_provider(session, "llm", "default")
             llm_fallback = _enabled_provider(session, "llm", "fallback")
-            image_codes = image_provider_route(params.get("model_preference", "fidelity"))
+            image_codes = image_provider_route(params.get("model_preference", "fidelity"), session)
             for image_code in image_codes:
                 _enabled_provider_by_code(session, image_code)
             prompt_version = session.get(PromptVersion, job.prompt_version_id)
             if not prompt_version:
                 raise RuntimeError("任务引用的 Prompt 版本不存在")
+            prompt_content = str(params.get("_admin_prompt_content") or prompt_version.content)
             prompt_versions = params.get("_prompt_versions") or {}
             vision_prompt = session.get(PromptVersion, prompt_versions.get("product-vision"))
             safety_prompt = session.get(PromptVersion, prompt_versions.get("content-safety-review"))
@@ -443,7 +456,7 @@ async def _run_live_job(
             "image_plan": image_plan,
             "model_preference": "视觉排版优先：加强文字层级与版式组织" if params.get("model_preference") == "layout" else "商品保持优先：强化产品锁定与参考图一致性",
         }
-        combined_prompt = append_runtime_contract(render_prompt_variables(prompt_version.content, prompt_variables), job_count)
+        combined_prompt = append_runtime_contract(render_prompt_variables(prompt_content, prompt_variables), job_count)
         user_prompt = json.dumps({**prompt_variables, "count": job_count}, ensure_ascii=False)
         with session_factory() as session:
             session.add(ExecutionLog(

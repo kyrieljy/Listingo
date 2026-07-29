@@ -60,6 +60,27 @@ class ProductFacts(BaseModel):
     labels_text: list[str] = Field(default_factory=list, max_length=30)
     uncertain: list[str] = Field(default_factory=list, max_length=30)
 
+    @field_validator("visible_features", "materials", "colors", "accessories", "labels_text", "uncertain", mode="before")
+    @classmethod
+    def normalize_string_list_fields(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped:
+            return []
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            return parsed
+        return [
+            piece.strip(" \t\r\n-•")
+            for item in stripped.replace("；", ";").replace("，", ",").replace("、", ",").replace("\n", ",").split(",")
+            for piece in item.split(";")
+            if piece.strip(" \t\r\n-•")
+        ]
+
 
 class ContentSafetyReview(BaseModel):
     model_config = ConfigDict(extra="forbid")

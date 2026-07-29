@@ -100,6 +100,27 @@ def test_product_facts_have_strict_contracts() -> None:
     assert facts.sku_count == 1
 
 
+def test_product_facts_accept_llm_string_list_fields() -> None:
+    facts = parse_product_facts({
+        "schema_version": "1.0",
+        "product_name": "crossbody bag",
+        "category": "bag",
+        "visible_features": "quilted body, gold zipper; chain strap",
+        "materials": "unknown from image",
+        "colors": "black, gold",
+        "sku_count": 1,
+        "accessories": "",
+        "labels_text": "[\"brand badge\", \"logo tag\"]",
+        "uncertain": "exact material; internal capacity",
+    })
+    assert facts.visible_features == ["quilted body", "gold zipper", "chain strap"]
+    assert facts.materials == ["unknown from image"]
+    assert facts.colors == ["black", "gold"]
+    assert facts.accessories == []
+    assert facts.labels_text == ["brand badge", "logo tag"]
+    assert facts.uncertain == ["exact material", "internal capacity"]
+
+
 def test_openai_llm_can_receive_product_images_as_multimodal_input(tmp_path) -> None:
     source = tmp_path / "product.png"
     source.write_bytes(b"png-bytes")

@@ -3,6 +3,7 @@ import base64
 import json
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -12,7 +13,7 @@ from backend.app.api.public import serialize_job
 from sqlalchemy import select
 
 from backend.app.models import GenerationItem, GenerationJob, Prompt, PromptVersion, Provider, Workflow
-from backend.app.services.execution import parse_plan_with_one_repair, run_image_with_fallback
+from backend.app.services.execution import parse_plan_with_one_repair, run_image_route, run_image_with_fallback
 from backend.app.services.jobs import _run_live_item, image_provider_route
 from backend.app.services.providers import IMAGE2_SIZE_MAP, ProviderClient, build_async_http_client
 from backend.app.services.redaction import safe_json
@@ -75,6 +76,22 @@ def test_image_generation_falls_back_from_nano_to_image2_once() -> None:
     assert result == b"image-bytes"
     assert provider_code == "yunwu-image-2"
     assert calls == ["yunwu-nano", "yunwu-image-2"]
+
+
+def test_image_route_errors_use_current_provider_display_name() -> None:
+    async def generate(provider_code: str) -> bytes:
+        raise RuntimeError(f"Provider {provider_code} 不可用")
+
+    display_names = {
+        "yunwu-image-2": "HelloBabyGo GPT Image 2 / gpt-image-2 @ api.hellobabygo.com"
+    }
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(run_image_route(["yunwu-image-2"], generate, display_names))
+
+    message = str(exc_info.value)
+    assert "HelloBabyGo GPT Image 2 / gpt-image-2 @ api.hellobabygo.com" in message
+    assert "yunwu-image-2" not in message
 
 
 def test_frontend_model_preference_routes_to_expected_hidden_providers() -> None:
@@ -140,52 +157,45 @@ def llm_provider() -> Provider:
 def image2_provider() -> Provider:
     return Provider(
         code="yunwu-image-2",
-        label="Yunwu GPT Image 2",
+        label="HelloBabyGo GPT Image 2",
         capability="image",
-        adapter="openai_images_generation",
-        base_url="https://yunwu.ai/v1/images/generations",
+        adapter="hellobabygo_image_generation",
+        base_url="https://api.hellobabygo.com/v1/images/generations",
         model_name="gpt-image-2",
         enabled=True,
         is_default=False,
         is_fallback=True,
-        config_json=json.dumps({"size": "follow_ratio", "quality": "auto", "format": "png"}),
+        config_json=json.dumps({"size": "follow_ratio", "poll_interval_seconds": 0, "max_poll_attempts": 3}),
     )
 
 
 def nano_provider() -> Provider:
     return Provider(
         code="yunwu-nano",
-        label="Yunwu Nano",
+        label="HelloBabyGo Nano Banana 2",
         capability="image",
-        adapter="gemini_generate_content",
-        base_url="https://yunwu.ai/v1beta/models/gemini-3.1-flash-image:generateContent",
-        model_name="gemini-3.1-flash-image",
+        adapter="hellobabygo_image_generation",
+        base_url="https://api.hellobabygo.com/v1/images/generations",
+        model_name="nano_banana_2",
         enabled=True,
         is_default=True,
         is_fallback=False,
-        config_json=json.dumps({"resolution": "2K", "format": "png"}),
+        config_json=json.dumps({"resolution": "2K", "size": "auto", "poll_interval_seconds": 0, "max_poll_attempts": 3}),
     )
 
 
-def test_nano_uses_gemini_image_size_not_openai_size() -> None:
-    seen: dict[str, str] = {}
+def test_nano_submits_hellobabygo_resolution_and_direction() -> None:
+    seen: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["body"] = request.content.decode()
-        return httpx.Response(
-            200,
-            json={
-                "candidates": [
-                    {
-                        "content": {
-                            "parts": [
-                                {"inlineData": {"data": base64.b64encode(b"nano-image").decode()}}
-                            ]
-                        }
-                    }
-                ]
-            },
-        )
+        if request.method == "POST":
+            seen["url"] = str(request.url)
+            seen["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"task_id": "task-nano", "status": "queued"})
+        if str(request.url).endswith("/v1/images/task-nano"):
+            seen["poll_url"] = str(request.url)
+            return httpx.Response(200, json={"id": "task-nano", "status": "completed", "data": [{"url": "https://cdn.example.test/nano.png"}]})
+        return httpx.Response(200, content=b"nano-image")
 
     async def run() -> bytes:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
@@ -194,22 +204,47 @@ def test_nano_uses_gemini_image_size_not_openai_size() -> None:
             )
 
     assert asyncio.run(run()) == b"nano-image"
-    body = json.loads(seen["body"])
-    image_config = body["generationConfig"]["responseFormat"]["image"]
-    assert image_config["imageSize"] == "2K"
-    assert image_config["aspectRatio"] == "16:9"
-    assert "size" not in image_config
-    assert "size" not in body
+    assert seen["url"] == "https://api.hellobabygo.com/v1/images/generations"
+    assert seen["body"] == {"model": "nano_banana_2", "prompt": "prompt", "n": 1, "resolution": "2K", "size": "auto"}
+    assert seen["poll_url"].endswith("/v1/images/task-nano")
+
+
+def test_nano_4k_auto_size_maps_to_runtime_direction() -> None:
+    provider = nano_provider()
+    provider.config_json = json.dumps({"resolution": "4K", "size": "auto", "poll_interval_seconds": 0, "max_poll_attempts": 3})
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            seen["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"task_id": "task-4k", "status": "queued"})
+        if str(request.url).endswith("/v1/images/task-4k"):
+            return httpx.Response(200, json={"status": "completed", "data": [{"url": "https://cdn.example.test/4k.png"}]})
+        return httpx.Response(200, content=b"4k")
+
+    async def run() -> bytes:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            return await ProviderClient(http_client).generate_image(
+                provider, "key", "prompt", [], "16:9"
+            )
+
+    assert asyncio.run(run()) == b"4k"
+    assert seen["body"]["resolution"] == "4K"
+    assert seen["body"]["size"] == "landscape"
 
 
 def test_image2_generate_uses_json_without_reference_image() -> None:
-    seen: dict[str, str] = {}
+    seen: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["url"] = str(request.url)
-        seen["content_type"] = request.headers["content-type"]
-        seen["body"] = request.content.decode()
-        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(b"image").decode()}]})
+        if request.method == "POST":
+            seen["url"] = str(request.url)
+            seen["content_type"] = request.headers["content-type"]
+            seen["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"id": "task-image2", "status": "queued"})
+        if str(request.url).endswith("/v1/images/task-image2"):
+            return httpx.Response(200, json={"id": "task-image2", "status": "completed", "data": [{"url": "https://cdn.example.test/image2.png"}]})
+        return httpx.Response(200, content=b"image")
 
     async def run() -> bytes:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
@@ -220,20 +255,38 @@ def test_image2_generate_uses_json_without_reference_image() -> None:
     assert asyncio.run(run()) == b"image"
     assert seen["url"].endswith("/v1/images/generations")
     assert seen["content_type"].startswith("application/json")
-    assert json.loads(seen["body"])["size"] == "1536x1024"
-    assert json.loads(seen["body"])["format"] == "png"
-    assert "image" not in json.loads(seen["body"])
+    assert seen["body"]["size"] == "1792x1024"
+    assert "quality" not in seen["body"]
+    assert "style" not in seen["body"]
+    assert "response_format" not in seen["body"]
+    assert "images" not in seen["body"]
 
 
-def test_image2_fixed_size_must_match_frontend_ratio_before_http_call() -> None:
+def test_image2_rejects_invalid_configured_size_before_submit() -> None:
     provider = image2_provider()
-    provider.config_json = json.dumps({"size": "1024x1024", "quality": "auto", "format": "png"})
-    called = False
+    provider.config_json = json.dumps({"size": "512x512"})
+
+    async def run() -> bytes:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: httpx.Response(500))) as http_client:
+            return await ProviderClient(http_client).generate_image(
+                provider, "key", "prompt", [], "1:1"
+            )
+
+    with pytest.raises(RuntimeError, match="size=512x512 不合法"):
+        asyncio.run(run())
+
+
+def test_image2_follow_ratio_maps_to_documented_sizes() -> None:
+    provider = image2_provider()
+    seen: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal called
-        called = True
-        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(b"image").decode()}]})
+        if request.method == "POST":
+            seen["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"task_id": "task-portrait", "status": "queued"})
+        if str(request.url).endswith("/v1/images/task-portrait"):
+            return httpx.Response(200, json={"status": "completed", "data": [{"url": "https://cdn.example.test/portrait.png"}]})
+        return httpx.Response(200, content=b"portrait")
 
     async def run() -> bytes:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
@@ -241,81 +294,150 @@ def test_image2_fixed_size_must_match_frontend_ratio_before_http_call() -> None:
                 provider, "key", "prompt", [], "16:9"
             )
 
-    with pytest.raises(RuntimeError, match="固定 size 1024x1024 与前台画面比例 16:9 不匹配"):
-        asyncio.run(run())
-    assert called is False
+    assert asyncio.run(run()) == b"portrait"
+    assert seen["body"]["size"] == "1792x1024"
 
 
-def test_image2_with_reference_image_routes_to_multipart_edit(tmp_path) -> None:
+def test_image2_with_reference_image_uses_public_urls(tmp_path) -> None:
     source = tmp_path / "source.png"
     source.write_bytes(b"fake-png")
-    seen: dict[str, str] = {}
+    seen: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["url"] = str(request.url)
-        seen["content_type"] = request.headers["content-type"]
-        seen["body"] = request.content.decode("latin1")
-        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(b"edited").decode()}]})
+        if request.method == "POST":
+            seen["url"] = str(request.url)
+            seen["content_type"] = request.headers["content-type"]
+            seen["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"task_id": "task-edit", "status": "queued"})
+        if str(request.url).endswith("/v1/images/task-edit"):
+            return httpx.Response(200, json={"status": "completed", "data": [{"url": "https://cdn.example.test/edited.png"}]})
+        return httpx.Response(200, content=b"edited")
 
     async def run() -> bytes:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            return await ProviderClient(http_client).generate_image(
+                image2_provider(),
+                "key",
+                "prompt",
+                [str(source)],
+                "4:5",
+                input_urls=["https://assets.example.test/source.png"],
+            )
+
+    assert asyncio.run(run()) == b"edited"
+    assert seen["url"].endswith("/v1/images/generations")
+    assert seen["content_type"].startswith("application/json")
+    assert seen["body"]["images"] == ["https://assets.example.test/source.png"]
+
+
+def test_image2_content_download_uses_api_key_for_hellobabygo_content_url() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json={"task_id": "task-content", "status": "queued"})
+        if str(request.url).endswith("/v1/images/task-content"):
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "data": [{"url": "https://api.hellobabygo.com/v1/images/task-content/content"}],
+                },
+            )
+        if str(request.url).endswith("/v1/images/task-content/content"):
+            seen["download_authorization"] = request.headers.get("authorization")
+            return httpx.Response(200, content=b"image-content")
+        return httpx.Response(404)
+
+    async def run() -> bytes:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            return await ProviderClient(http_client).generate_image(
+                image2_provider(), "sk-test", "prompt", [], "1:1"
+            )
+
+    assert asyncio.run(run()) == b"image-content"
+    assert seen["download_authorization"] == "Bearer sk-test"
+
+
+def test_image2_with_reference_image_requires_public_url(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"fake-png")
+
+    async def run() -> bytes:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: httpx.Response(500))) as http_client:
             return await ProviderClient(http_client).generate_image(
                 image2_provider(), "key", "prompt", [str(source)], "4:5"
             )
 
-    assert asyncio.run(run()) == b"edited"
-    assert seen["url"].endswith("/v1/images/edits")
-    assert seen["content_type"].startswith("multipart/form-data")
-    assert 'name="image"' in seen["body"]
-    assert 'name="prompt"' in seen["body"]
-    assert "source.png" in seen["body"]
+    with pytest.raises(RuntimeError, match="LISTINGO_PUBLIC_ASSET_BASE_URL"):
+        asyncio.run(run())
 
 
-def test_image2_edit_retries_http_429_once(tmp_path) -> None:
-    source = tmp_path / "source.png"
-    source.write_bytes(b"fake-png")
-    calls = 0
-    provider = image2_provider()
-    provider.config_json = json.dumps({"size": "follow_ratio", "quality": "auto", "format": "png", "max_retries": 1})
-
+def test_image2_failed_task_uses_error_message() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return httpx.Response(429, headers={"retry-after": "0"}, json={"error": {"message": "rate limit"}})
-        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(b"edited").decode()}]})
+        if request.method == "POST":
+            return httpx.Response(200, json={"task_id": "task-failed", "status": "queued"})
+        return httpx.Response(
+            200,
+            json={"task_id": "task-failed", "status": "failed", "error": {"message": "prompt rejected"}},
+        )
 
     async def run() -> bytes:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
             return await ProviderClient(http_client).generate_image(
-                provider, "key", "prompt", [str(source)], "4:5"
+                image2_provider(), "key", "prompt", [], "1:1"
             )
 
-    assert asyncio.run(run()) == b"edited"
-    assert calls == 2
+    with pytest.raises(RuntimeError, match="prompt rejected"):
+        asyncio.run(run())
 
 
-def test_image2_edit_reports_rate_limit_after_retries(tmp_path) -> None:
-    source = tmp_path / "source.png"
-    source.write_bytes(b"fake-png")
-    calls = 0
+def test_image2_generation_retries_http_429_once() -> None:
+    post_calls = 0
     provider = image2_provider()
-    provider.config_json = json.dumps({"size": "follow_ratio", "quality": "auto", "format": "png", "max_retries": 1})
+    provider.config_json = json.dumps({"size": "follow_ratio", "max_retries": 1, "poll_interval_seconds": 0, "max_poll_attempts": 3})
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
+        nonlocal post_calls
+        if request.method == "POST":
+            post_calls += 1
+        if request.method == "POST" and post_calls == 1:
+            return httpx.Response(429, headers={"retry-after": "0"}, json={"error": {"message": "rate limit"}})
+        if request.method == "POST":
+            return httpx.Response(200, json={"task_id": "task-retry", "status": "queued"})
+        if str(request.url).endswith("/v1/images/task-retry"):
+            return httpx.Response(200, json={"status": "completed", "data": [{"url": "https://cdn.example.test/retry.png"}]})
+        return httpx.Response(200, content=b"retried")
+
+    async def run() -> bytes:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            return await ProviderClient(http_client).generate_image(
+                provider, "key", "prompt", [], "4:5"
+            )
+
+    assert asyncio.run(run()) == b"retried"
+    assert post_calls == 2
+
+
+def test_image2_generation_reports_rate_limit_after_retries() -> None:
+    post_calls = 0
+    provider = image2_provider()
+    provider.config_json = json.dumps({"size": "follow_ratio", "max_retries": 1})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal post_calls
+        post_calls += 1
         return httpx.Response(429, headers={"retry-after": "0"}, json={"error": {"message": "rate limit"}})
 
     async def run() -> bytes:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
             return await ProviderClient(http_client).generate_image(
-                provider, "key", "prompt", [str(source)], "4:5"
+                provider, "key", "prompt", [], "4:5"
             )
 
     with pytest.raises(RuntimeError, match="HTTP 429 Too Many Requests"):
         asyncio.run(run())
-    assert calls == 2
+    assert post_calls == 2
 
 
 def test_live_http_client_forces_ipv4_on_windows() -> None:
@@ -326,11 +448,11 @@ def test_live_http_client_forces_ipv4_on_windows() -> None:
 
 def test_image2_has_an_explicit_size_route_for_every_core_prompt_ratio() -> None:
     assert set(IMAGE2_SIZE_MAP) == {"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9", "970:600", "1464:600", "600:450"}
-    assert IMAGE2_SIZE_MAP["2:3"] == "1024x1536"
-    assert IMAGE2_SIZE_MAP["21:9"] == "3840x2160"
-    assert IMAGE2_SIZE_MAP["970:600"] == "auto"
-    assert IMAGE2_SIZE_MAP["1464:600"] == "auto"
-    assert IMAGE2_SIZE_MAP["600:450"] == "auto"
+    assert IMAGE2_SIZE_MAP["2:3"] == "1024x1792"
+    assert IMAGE2_SIZE_MAP["21:9"] == "1792x1024"
+    assert IMAGE2_SIZE_MAP["970:600"] == "1792x1024"
+    assert IMAGE2_SIZE_MAP["1464:600"] == "1792x1024"
+    assert IMAGE2_SIZE_MAP["600:450"] == "1792x1024"
 
 
 def png_bytes(size: tuple[int, int] = (640, 640)) -> bytes:

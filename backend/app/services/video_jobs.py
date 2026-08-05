@@ -6,13 +6,12 @@ import shutil
 from pathlib import Path
 from time import perf_counter
 from typing import Any
-from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.config import Settings
-from backend.app.models import Asset, ExecutionLog, PromptVersion, Provider, VideoItem, VideoJob, VideoVersion, utcnow
+from backend.app.models import Asset, ExecutionLog, Prompt, PromptVersion, Provider, VideoItem, VideoJob, VideoVersion, utcnow
 from backend.app.security import ApiKeyCipher
 from backend.app.services.content_safety import (
     ensure_content_safe,
@@ -21,24 +20,22 @@ from backend.app.services.content_safety import (
 )
 from backend.app.services.jobs import _call_llm_with_fallback
 from backend.app.services.provider_routing import enabled_provider_for_route
-from backend.app.services.providers import ProviderClient
+from backend.app.services.providers import HELLOBABYGO_VIDEO_ADAPTER, ProviderClient
 from backend.app.services.redaction import safe_json
+from backend.app.services.storage import public_file_url
 
 
-FINAL_STATUSES = {"succeeded", "partial_failed", "failed"}
+FINAL_STATUSES = {"succeeded", "partial_failed", "failed", "cancelled", "partial_cancelled"}
+ITEM_FINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+CANCEL_REQUESTED_STATUSES = {"cancelling", "cancelled", "partial_cancelled"}
+USER_CANCELLED_ERROR = "用户已取消任务"
 REMOTE_RUNNING_STATUSES = {"SUBMITTING", "PENDING", "SUBMITTED", "QUEUED", "IN_PROGRESS", "PROCESSING", "RUNNING"}
 REMOTE_FAILED_STATUSES = {"FAILED", "CANCELLED", "TIMEOUT", "UNKNOWN"}
 REMOTE_SUCCESS_STATUSES = {"COMPLETED", "SUCCEEDED", "SUCCESS"}
 
 
 def public_asset_url(settings: Settings, asset: Asset) -> str:
-    base = settings.public_asset_base_url.strip().rstrip("/")
-    if not base:
-        raise RuntimeError("视频生成需要配置公网资源地址 PUBLIC_ASSET_BASE_URL")
-    parsed = urlparse(base)
-    if parsed.hostname in {"localhost", "127.0.0.1", "0.0.0.0"}:
-        raise RuntimeError("视频生成需要公网可访问的资源地址，不能使用 localhost/127.0.0.1")
-    return f"{base}{asset.url if asset.url.startswith('/') else '/' + asset.url}"
+    return public_file_url(settings, asset.file_path)
 
 
 def build_video_copywriting_user_prompt(payload: Any) -> str:
@@ -62,7 +59,7 @@ def build_video_copywriting_user_prompt(payload: Any) -> str:
     )
 
 
-def build_video_script_user_prompt(params: dict[str, Any], item: VideoItem, image_url: str) -> str:
+def build_video_script_user_prompt(params: dict[str, Any], item: VideoItem, image_urls: list[str]) -> str:
     input_mode = "image_with_text" if str(params.get("selling_points", "")).strip() else "image_only"
     return json.dumps(
         {
@@ -77,7 +74,8 @@ def build_video_script_user_prompt(params: dict[str, Any], item: VideoItem, imag
             "product_name": params.get("product_name", ""),
             "target_audience": params.get("target_audience", ""),
             "selling_points": params.get("selling_points", ""),
-            "product_image_url": image_url,
+            "product_image_url": image_urls[0] if image_urls else "",
+            "product_image_urls": image_urls,
             "instruction": (
                 "请根据当前视频类型从 10 个母模板中选择最匹配模板，输出固定 15 秒导演分镜 Markdown。"
                 "输出必须可直接交给 Seedance 生成视频，包含镜头、人物/动作、运镜、口播/字幕、节奏和最后定格画面。"
@@ -181,6 +179,23 @@ def extract_video_url(data: Any) -> str | None:
     return None
 
 
+def extract_error_message(data: dict[str, Any]) -> str:
+    for source in (data, data.get("data") if isinstance(data.get("data"), dict) else {}):
+        if not isinstance(source, dict):
+            continue
+        error = source.get("error")
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("error") or error.get("detail")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+        message = source.get("message") or source.get("error_message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return "上游任务失败"
+
+
 def _enabled_provider(session: Session, capability: str, relation: str = "default") -> Provider:
     route_key = "llm" if capability == "llm" else "video" if capability == "video" else ""
     if route_key:
@@ -199,11 +214,70 @@ def _enabled_provider(session: Session, capability: str, relation: str = "defaul
 
 
 def _job_status(items: list[VideoItem]) -> str:
+    if any(item.status == "cancelled" for item in items):
+        return "partial_cancelled" if any(item.status in {"succeeded", "failed"} for item in items) else "cancelled"
     if all(item.status == "succeeded" for item in items):
         return "succeeded"
     if any(item.status == "succeeded" for item in items):
         return "partial_failed"
     return "failed"
+
+
+def finalize_video_cancellation(session: Session, job: VideoJob) -> None:
+    for item in job.items:
+        if item.status == "queued":
+            item.status = "cancelled"
+            item.error = USER_CANCELLED_ERROR
+    statuses = [item.status for item in job.items]
+    if not statuses:
+        job.status = "cancelled"
+        job.progress = 100
+        job.completed_at = utcnow()
+        return
+    if any(status in {"queued", "running"} for status in statuses):
+        job.status = "cancelling"
+        return
+    job.status = _job_status(job.items)
+    job.progress = 100
+    job.completed_at = utcnow()
+
+
+def cancel_video_job(session: Session, job: VideoJob) -> VideoJob:
+    if job.status in FINAL_STATUSES:
+        return job
+    job.status = "cancelling"
+    finalize_video_cancellation(session, job)
+    session.commit()
+    session.refresh(job)
+    return job
+
+
+def video_cancel_requested(session_factory, job_id: str) -> bool:
+    with session_factory() as session:
+        job = session.scalar(
+            select(VideoJob).where(VideoJob.id == job_id).options(selectinload(VideoJob.items))
+        )
+        if not job:
+            return True
+        if job.status not in CANCEL_REQUESTED_STATUSES:
+            return False
+        finalize_video_cancellation(session, job)
+        session.commit()
+        return True
+
+
+def cancel_video_item_if_requested(session_factory, job_id: str, item_id: str) -> bool:
+    with session_factory() as session:
+        job = session.get(VideoJob, job_id)
+        item = session.get(VideoItem, item_id)
+        if not job or not item:
+            return True
+        if job.status not in CANCEL_REQUESTED_STATUSES and item.status != "cancelled":
+            return False
+        item.status = "cancelled"
+        item.error = USER_CANCELLED_ERROR
+        session.commit()
+        return True
 
 
 async def run_video_job(job_id: str, session_factory, settings: Settings, cipher: ApiKeyCipher) -> None:
@@ -213,6 +287,10 @@ async def run_video_job(job_id: str, session_factory, settings: Settings, cipher
             select(VideoJob).where(VideoJob.id == job_id).options(selectinload(VideoJob.items))
         )
         if not job:
+            return
+        if job.status in CANCEL_REQUESTED_STATUSES:
+            finalize_video_cancellation(session, job)
+            session.commit()
             return
         job.status = "running"
         job.started_at = utcnow()
@@ -226,6 +304,10 @@ async def run_video_job(job_id: str, session_factory, settings: Settings, cipher
                 select(VideoJob).where(VideoJob.id == job_id).options(selectinload(VideoJob.items))
             )
             if job:
+                if job.status in CANCEL_REQUESTED_STATUSES:
+                    finalize_video_cancellation(session, job)
+                    session.commit()
+                    return
                 job.status = "failed"
                 job.error = str(exc)
                 job.completed_at = utcnow()
@@ -251,10 +333,16 @@ async def _run_video_job(
             return
         params = json.loads(job.params_json)
         asset_ids = json.loads(job.asset_ids_json)
-        asset = session.scalar(select(Asset).where(Asset.id == asset_ids[0]))
-        if not asset:
+        assets = session.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()
+        assets_by_id = {asset.id: asset for asset in assets}
+        ordered_assets = [assets_by_id.get(asset_id) for asset_id in asset_ids]
+        if any(asset is None for asset in ordered_assets):
             raise RuntimeError("视频任务引用的商品图不存在")
-        image_url = public_asset_url(settings, asset) if not job.dry_run else asset.url
+        image_urls = (
+            [public_asset_url(settings, asset) for asset in ordered_assets if asset]
+            if not job.dry_run
+            else [asset.url for asset in ordered_assets if asset]
+        )
         prompt_version = session.get(PromptVersion, job.prompt_version_id)
         if not prompt_version:
             raise RuntimeError("视频 Meta Prompt 版本不存在")
@@ -262,14 +350,71 @@ async def _run_video_job(
         llm_default = _enabled_provider(session, "llm", "default") if not job.dry_run else None
         llm_fallback = _enabled_provider(session, "llm", "fallback") if not job.dry_run else None
         video_provider = _enabled_provider(session, "video", "default") if not job.dry_run else None
+        safety_prompt_model = session.scalar(select(Prompt).where(Prompt.code == "content-safety-review")) if not job.dry_run else None
+        safety_prompt = (
+            session.get(PromptVersion, safety_prompt_model.active_version_id)
+            if safety_prompt_model and safety_prompt_model.active_version_id
+            else None
+        )
+        if not job.dry_run and not safety_prompt:
+            raise RuntimeError("内容安全审计 Prompt 未启用")
+
+    if video_cancel_requested(session_factory, job_id):
+        return
+    if not job.dry_run:
+        input_text = json.dumps({key: value for key, value in params.items() if not key.startswith("_") and key not in {"asset_ids", "dry_run"}}, ensure_ascii=False)
+        try:
+            input_review, input_provider = await run_content_safety_review(
+                client,
+                llm_default,
+                llm_fallback,
+                cipher,
+                safety_prompt,
+                subject="video_generation_input",
+                text=input_text,
+                image_paths=[asset.file_path for asset in ordered_assets if asset],
+            )
+            ensure_content_safe(input_review, "输入内容安全拦截")
+            with session_factory() as session:
+                session.add(
+                    ExecutionLog(
+                        node="content_safety",
+                        provider_id=input_provider.id,
+                        status="succeeded",
+                        request_summary=safe_json({"subject": "video_generation_input", "asset_count": len(ordered_assets)}),
+                        response_summary=safe_json(input_review.model_dump()),
+                        dry_run=False,
+                    )
+                )
+                session.commit()
+        except Exception as exc:
+            with session_factory() as session:
+                session.add(
+                    ExecutionLog(
+                        node="content_safety",
+                        status="failed",
+                        request_summary=safe_json({"subject": "video_generation_input", "asset_count": len(ordered_assets)}),
+                        response_summary=safe_json(getattr(exc, "review", {}).model_dump() if getattr(exc, "review", None) else {}),
+                        error=str(exc),
+                        dry_run=False,
+                    )
+                )
+                session.commit()
+            raise RuntimeError(str(exc)) from exc
+    if video_cancel_requested(session_factory, job_id):
+        return
 
     for index, _ in enumerate(range(len(job.items))):
         with session_factory() as session:
             job = session.scalar(
                 select(VideoJob).where(VideoJob.id == job_id).options(selectinload(VideoJob.items).selectinload(VideoItem.versions))
             )
+            if job.status in CANCEL_REQUESTED_STATUSES:
+                finalize_video_cancellation(session, job)
+                session.commit()
+                return
             item = job.items[index]
-            if item.status == "succeeded":
+            if item.status in {"succeeded", "cancelled"}:
                 continue
             item.status = "running"
             session.commit()
@@ -278,7 +423,7 @@ async def _run_video_job(
             job_id,
             item.id,
             params,
-            image_url,
+            image_urls,
             prompt_content,
             llm_default,
             llm_fallback,
@@ -293,7 +438,7 @@ async def _run_video_job(
             job = session.scalar(
                 select(VideoJob).where(VideoJob.id == job_id).options(selectinload(VideoJob.items))
             )
-            finished = sum(1 for item in job.items if item.status in {"succeeded", "failed"})
+            finished = sum(1 for item in job.items if item.status in ITEM_FINAL_STATUSES)
             job.progress = round(finished * 100 / max(1, job.count))
             session.commit()
 
@@ -311,7 +456,7 @@ async def _run_video_item(
     job_id: str,
     item_id: str,
     params: dict[str, Any],
-    image_url: str,
+    image_urls: list[str],
     prompt_content: str,
     llm_default: Provider | None,
     llm_fallback: Provider | None,
@@ -325,6 +470,11 @@ async def _run_video_item(
         item = session.get(VideoItem, item_id)
         job = session.get(VideoJob, job_id)
         if not item or not job:
+            return
+        if job.status in CANCEL_REQUESTED_STATUSES or item.status == "cancelled":
+            item.status = "cancelled"
+            item.error = USER_CANCELLED_ERROR
+            session.commit()
             return
         if job.dry_run:
             script = dryrun_video_script(params, item.video_type)
@@ -348,7 +498,9 @@ async def _run_video_item(
 
     started = perf_counter()
     try:
-        script_user_prompt = build_video_script_user_prompt(params, item, image_url)
+        if cancel_video_item_if_requested(session_factory, job_id, item_id):
+            return
+        script_user_prompt = build_video_script_user_prompt(params, item, image_urls)
         ensure_content_safe(run_local_text_safety_review(script_user_prompt), "内容安全拦截")
         script, llm_provider = await _call_llm_with_fallback(
             client,
@@ -377,28 +529,25 @@ async def _run_video_item(
             )
             session.commit()
 
+        if cancel_video_item_if_requested(session_factory, job_id, item_id):
+            return
         submit_started = perf_counter()
         api_key = cipher.decrypt(video_provider.encrypted_api_key or "")
         response = await client.submit_video_task(
             video_provider,
             api_key,
             seedance_prompt_from_script(script.strip(), params, item),
-            image_url,
+            image_urls,
             aspect_ratio=params.get("aspect_ratio", "9:16"),
             duration=int(params.get("duration", 15)),
             resolution=params.get("resolution", "1080p"),
-            generate_audio=bool(params.get("generate_audio", True)),
-            camera_fixed=bool(params.get("camera_fixed", False)),
-            watermark=bool(params.get("watermark", False)),
         )
         request_id = extract_request_id(response)
-        advanced_settings = {
-            "aspect_ratio": params.get("aspect_ratio", "9:16"),
-            "duration": int(params.get("duration", 15)),
+        generation_settings = {
+            "size": params.get("aspect_ratio", "9:16"),
+            "seconds": int(params.get("duration", 15)),
             "resolution": params.get("resolution", "1080p"),
-            "generate_audio": bool(params.get("generate_audio", True)),
-            "camera_fixed": bool(params.get("camera_fixed", False)),
-            "watermark": bool(params.get("watermark", False)),
+            "image_count": len(image_urls),
         }
         with session_factory() as session:
             item = session.get(VideoItem, item_id)
@@ -410,7 +559,7 @@ async def _run_video_item(
                     provider_id=video_provider.id,
                     status="succeeded",
                     duration_ms=int((perf_counter() - submit_started) * 1000),
-                    request_summary=safe_json({"video_job_id": job_id, "item_id": item_id, "request_id": request_id, "advanced_settings": advanced_settings}),
+                    request_summary=safe_json({"video_job_id": job_id, "item_id": item_id, "request_id": request_id, "generation_settings": generation_settings}),
                     response_summary=safe_json(response),
                     dry_run=False,
                 )
@@ -418,7 +567,13 @@ async def _run_video_item(
             session.commit()
 
         remote_url = await poll_video_completion(client, video_provider, api_key, request_id, job_id, item_id, session_factory)
-        local_url, file_path = await save_remote_video(client, settings, remote_url, job_id, item_id)
+        content_api_key = (
+            api_key
+            if video_provider.adapter == HELLOBABYGO_VIDEO_ADAPTER
+            and remote_url.startswith(video_provider.base_url.rstrip("/") + "/")
+            else None
+        )
+        local_url, file_path = await save_remote_video(client, settings, remote_url, job_id, item_id, api_key=content_api_key)
         with session_factory() as session:
             item = session.get(VideoItem, item_id)
             version = VideoVersion(
@@ -440,6 +595,8 @@ async def _run_video_item(
         with session_factory() as session:
             item = session.get(VideoItem, item_id)
             if item:
+                if item.status == "cancelled":
+                    return
                 item.status = "failed"
                 item.error = str(exc)
                 session.add(
@@ -477,12 +634,14 @@ async def poll_video_completion(
                     job.progress = max(base, min(99, progress))
                     session.commit()
         if status in REMOTE_SUCCESS_STATUSES:
+            if provider.adapter == HELLOBABYGO_VIDEO_ADAPTER:
+                return provider.base_url.rstrip("/") + f"/{request_id}/content"
             video_url = extract_video_url(data)
             if not video_url:
                 raise RuntimeError("Seedance 任务完成但响应缺少视频 URL")
             return video_url
         if status in REMOTE_FAILED_STATUSES:
-            raise RuntimeError(f"Seedance 视频任务失败：{status}")
+            raise RuntimeError(f"Seedance 视频任务失败：{extract_error_message(data)}")
         if status not in REMOTE_RUNNING_STATUSES:
             raise RuntimeError(f"Seedance 视频任务状态未知：{status}")
         await asyncio.sleep(5)
@@ -495,8 +654,11 @@ async def save_remote_video(
     remote_url: str,
     job_id: str,
     item_id: str,
+    *,
+    api_key: str | None = None,
 ) -> tuple[str, Path]:
-    content = await client._download(remote_url, 600)
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    content = await client._download(remote_url, 600, headers=headers)
     video_dir = settings.results_dir / "videos" / job_id
     video_dir.mkdir(parents=True, exist_ok=True)
     destination = video_dir / f"{item_id}.mp4"

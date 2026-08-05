@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile
@@ -13,6 +14,26 @@ from backend.app.models import Asset
 
 
 ALLOWED_MIME = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+
+
+def public_url_base(settings: Settings) -> str:
+    base = settings.public_asset_base_url.strip().rstrip("/")
+    if not base:
+        raise RuntimeError("Live 参考资源需要配置 LISTINGO_PUBLIC_ASSET_BASE_URL（公网资源地址）")
+    parsed = urlparse(base)
+    if parsed.hostname in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        raise RuntimeError("LISTINGO_PUBLIC_ASSET_BASE_URL 必须是公网可访问地址，不能使用 localhost / 127.0.0.1")
+    return base
+
+
+def public_file_url(settings: Settings, file_path: str | Path) -> str:
+    path = Path(file_path).resolve()
+    data_dir = settings.data_dir.resolve()
+    try:
+        relative = path.relative_to(data_dir)
+    except ValueError as exc:
+        raise RuntimeError("Live 参考资源必须位于 LISTINGO data_dir 下") from exc
+    return f"{public_url_base(settings)}/files/{relative.as_posix()}"
 
 
 async def store_upload(upload: UploadFile, settings: Settings) -> Asset:
@@ -48,4 +69,3 @@ async def store_upload(upload: UploadFile, settings: Settings) -> Asset:
         byte_size=len(content),
         sha256=hashlib.sha256(content).hexdigest(),
     )
-

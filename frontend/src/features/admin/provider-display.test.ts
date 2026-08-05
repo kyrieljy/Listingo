@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -7,6 +9,8 @@ import {
   type ProviderDisplayRecord,
 } from './provider-display'
 import adminSource from './AdminView.vue?raw'
+
+const adminPromptUploadCss = readFileSync(new URL('./admin-prompt-upload.css', import.meta.url), 'utf-8')
 
 function provider(
   code: string,
@@ -140,11 +144,13 @@ describe('provider business display', () => {
 
   it('separates Nano resolution from Image 2 ratio-following size settings', () => {
     expect(adminSource).toContain('providerResolutions(selectedProvider)')
-    expect(adminSource).toContain('selectedProvider.adapter===\'gemini_generate_content\'')
+    expect(adminSource).toContain("selectedProvider.capability==='image' && Array.isArray(selectedProvider.config.allowed_resolutions)")
+    expect(adminSource).toContain('Array.isArray(selectedProvider.config.allowed_sizes)')
     expect(adminSource).not.toContain('v-model="selectedProvider.config.aspect_ratio"')
     expect(adminSource).toContain('class="image2-size-warning"')
     expect(adminSource).toContain('value="follow_ratio"')
     expect(adminSource).toContain('高级固定尺寸')
+    expect(adminSource).toContain("selectedProvider.config.quality!==undefined")
   })
 
   it('shows runtime public asset base URL settings for video generation', () => {
@@ -207,5 +213,15 @@ describe('provider business display', () => {
     expect(adminSource).toContain('生图 / 视频结果')
     expect(adminSource).toContain('promptTestResult?.input_params')
     expect(adminSource).toContain('promptTestResult.artifact_urls')
+  })
+
+  it('marks the prompt version currently being viewed', () => {
+    expect(adminSource).toContain('promptViewedVersionId')
+    expect(adminSource).toContain('function viewPromptVersion')
+    expect(adminSource).toContain('selected:version.id===promptViewedVersionId')
+    expect(adminSource).toContain('@click="viewPromptVersion(version)"')
+    expect(adminSource).toContain(':aria-selected="version.id===promptViewedVersionId"')
+    expect(adminPromptUploadCss).toContain('.version-panel article.selected')
+    expect(adminPromptUploadCss).toContain('box-shadow: inset 3px 0 0 #6c5ce7')
   })
 })

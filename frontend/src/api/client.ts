@@ -4,7 +4,7 @@ export const api = axios.create({ baseURL: '/api/v1', timeout: 20_000 })
 
 export type Asset = { id: string; original_name: string; url: string; width: number; height: number }
 export type Version = { id: string; parent_version_id: string | null; version_no: number; instruction: string; url: string; created_at: string }
-export type JobItem = { id: string; index: number; image_type: string; status: string; error: string | null; current_version_id: string | null; versions: Version[] }
+export type JobItem = { id: string; index: number; image_type: string; prompt_text: string; status: string; error: string | null; current_version_id: string | null; versions: Version[] }
 export type Job = { id: string; status: string; dry_run: boolean; progress: number; count: number; params: Record<string, unknown>; error: string | null; created_at: string; items: JobItem[] }
 export type DownloadFormat = 'zip' | 'long_image'
 export type VideoVersion = Version & { remote_url: string }
@@ -90,6 +90,10 @@ export async function getJob(id: string): Promise<Job> {
   return (await api.get(`/generation-jobs/${id}`)).data
 }
 
+export async function cancelJob(id: string): Promise<Job> {
+  return (await api.post(`/generation-jobs/${id}/cancel`)).data
+}
+
 export async function listJobs(): Promise<Job[]> {
   return (await api.get('/generation-jobs')).data
 }
@@ -117,6 +121,10 @@ export async function getVideoJob(id: string): Promise<VideoJob> {
   return (await api.get(`/video-jobs/${id}`)).data
 }
 
+export async function cancelVideoJob(id: string): Promise<VideoJob> {
+  return (await api.post(`/video-jobs/${id}/cancel`)).data
+}
+
 export async function listVideoJobs(): Promise<VideoJob[]> {
   return (await api.get('/video-jobs')).data
 }
@@ -129,12 +137,20 @@ export async function getAplusPlanJob(id: string): Promise<AplusJob> {
   return (await api.get(`/aplus-plan-jobs/${id}`)).data
 }
 
+export async function cancelAplusPlanJob(id: string): Promise<AplusJob> {
+  return (await api.post(`/aplus-plan-jobs/${id}/cancel`)).data
+}
+
 export async function createAplusGenerationJob(payload: Record<string, unknown>): Promise<AplusJob> {
   return (await api.post('/aplus-generation-jobs', payload)).data
 }
 
 export async function getAplusGenerationJob(id: string): Promise<AplusJob> {
   return (await api.get(`/aplus-generation-jobs/${id}`)).data
+}
+
+export async function cancelAplusGenerationJob(id: string): Promise<AplusJob> {
+  return (await api.post(`/aplus-generation-jobs/${id}/cancel`)).data
 }
 
 export async function listAplusGenerationJobs(): Promise<AplusJob[]> {
@@ -159,6 +175,10 @@ export async function retryFailedVideoItems(jobId: string): Promise<VideoJob> {
 
 export async function editItem(id: string, instruction: string): Promise<Version> {
   return (await api.post(`/generation-items/${id}/versions`, { instruction })).data
+}
+
+export async function editAplusItem(id: string, instruction: string): Promise<Version> {
+  return (await api.post(`/aplus-items/${id}/versions`, { instruction })).data
 }
 
 export async function retryFailedItems(jobId: string): Promise<Job> {

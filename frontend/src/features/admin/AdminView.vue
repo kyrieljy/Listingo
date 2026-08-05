@@ -50,7 +50,7 @@ import {
 type Provider = ProviderDisplayRecord
 const route=useRoute(); const router=useRouter(); const section=computed(()=>String(route.params.section||'providers'))
 const providers=ref<Provider[]>([]); const selectedProvider=ref<Provider|null>(null); const providerOpen=ref(false); const apiKey=ref('')
-const prompts=ref<any[]>([]); const promptDetail=ref<any>(null); const promptContent=ref(''); const promptNote=ref('')
+const prompts=ref<any[]>([]); const promptDetail=ref<any>(null); const promptContent=ref(''); const promptNote=ref(''); const promptViewedVersionId=ref('')
 const promptTestInputs=ref({platform:'亚马逊',market:'美国',country:'美国',language:'英文',aspect_ratio:'1:1',selling_points:'便携保温水杯，适合通勤、健身和日常补水；杯身轻量，密封防漏，适合放入背包。',product_name:'便携保温水杯',product_info:'便携保温水杯，316 不锈钢内胆，杯身轻量，密封防漏，适合通勤、健身和户外短途使用。',instruction:'保持商品本体不变，把画面改成更适合移动端信息流的通勤生活场景。',text:'普通电商商品描述测试。',video_type:'UGC 种草',duration:15,resolution:'1080p',output_spec:'amazon_aplus_standard' as AplusOutputSpec,advanced_targets:['web'] as AplusAdvancedTarget[],target_audience:'20-35 岁通勤与健身人群'})
 const promptAplusModules=ref<AplusModuleSelection[]>([{name:'商品主视觉',count:1},{name:'卖点拆解',count:1},{name:'生活场景',count:1}])
 const promptTestAssets=ref<any[]>([]); const promptTestRuns=ref<any[]>([]); const promptTestResult=ref<any|null>(null)
@@ -89,13 +89,14 @@ async function loadLogs(){const params:Record<string,string>={};if(logFilters.va
 async function loadSection(){ loading.value=true; try{ if(section.value==='providers')providers.value=(await api.get('/admin/providers')).data; if(section.value==='prompts'){prompts.value=(await api.get('/admin/prompts')).data;if(prompts.value[0])await loadPrompt(prompts.value[0].id)} if(section.value==='workflow'){workflows.value=(await api.get('/admin/workflows')).data;if(workflows.value[0])await loadWorkflow(workflows.value[0].id)} if(section.value==='logs')await loadLogs(); if(section.value==='settings')runtimeSettings.value=(await api.get('/admin/runtime-settings')).data }catch{message.error('后台数据加载失败，请确认 API 已启动')}finally{loading.value=false}}
 function go(key:string){router.push(`/admin/${key}`)}
 function editProvider(provider:Provider){const copied=JSON.parse(JSON.stringify(provider));copied.route_roles=copied.route_roles||{};selectedProvider.value=copied;apiKey.value='';providerOpen.value=true}
-async function saveProvider(){if(!selectedProvider.value)return;const p=selectedProvider.value;await api.patch(`/admin/providers/${p.id}`,{label:p.label,base_url:p.base_url,model_name:p.model_name,enabled:p.enabled,route_roles:p.route_roles,api_key:apiKey.value||undefined,resolution:p.config.resolution,size:p.config.size,quality:p.config.quality,format:p.config.format,compression:p.config.compression,timeout_seconds:p.config.timeout_seconds});providerOpen.value=false;await loadSection();message.success('模型配置已保存')}
+async function saveProvider(){if(!selectedProvider.value)return;const p=selectedProvider.value;await api.patch(`/admin/providers/${p.id}`,{label:p.label,base_url:p.base_url,model_name:p.model_name,enabled:p.enabled,route_roles:p.route_roles,api_key:apiKey.value||undefined,resolution:p.config.resolution,size:p.config.size,quality:p.config.quality,style:p.config.style,format:p.config.format,response_format:p.config.response_format,compression:p.config.compression,timeout_seconds:p.config.timeout_seconds,poll_interval_seconds:p.config.poll_interval_seconds});providerOpen.value=false;await loadSection();message.success('模型配置已保存')}
 async function testProvider(provider:Provider){message.loading({content:`正在测试 ${provider.label}`,key:'provider-test'});try{const result=(await api.post(`/admin/providers/${provider.id}/test`)).data;message[result.ok?'success':'error']({content:result.message,key:'provider-test'})}catch(error:any){message.error({content:error.response?.data?.detail||'连通测试失败',key:'provider-test'})}}
 async function toggleProvider(provider:Provider){await api.patch(`/admin/providers/${provider.id}`,{enabled:!provider.enabled});await loadSection()}
 function onRouteRoleChange(routeKey:string,event:Event){if(!selectedProvider.value)return;const value=(event.target as HTMLSelectElement).value;const next={...(selectedProvider.value.route_roles||{})};if(value==='none')delete next[routeKey];else next[routeKey]=value as 'primary'|'fallback';selectedProvider.value.route_roles=next}
 function providerResolutions(provider:Provider):string[]{return Array.isArray(provider.config.allowed_resolutions)?provider.config.allowed_resolutions as string[]:['1K','2K','4K']}
-function providerImage2Sizes(provider:Provider):string[]{return Array.isArray(provider.config.allowed_sizes)?(provider.config.allowed_sizes as string[]).filter((value)=>value!=='follow_ratio'):['auto','1024x1024','1536x1024','1024x1536','2048x2048','2048x1152','3840x2160','2160x3840']}
-async function loadPrompt(id:string){promptDetail.value=(await api.get(`/admin/prompts/${id}`)).data;promptContent.value=promptDetail.value.active_version.content;promptNote.value='';await loadPromptTestRuns();promptTestResult.value=promptTestRuns.value[0]||null}
+function providerImage2Sizes(provider:Provider):string[]{return Array.isArray(provider.config.allowed_sizes)?(provider.config.allowed_sizes as string[]).filter((value)=>value!=='follow_ratio'):['auto','1024x1024','1792x1024','1024x1792']}
+async function loadPrompt(id:string){promptDetail.value=(await api.get(`/admin/prompts/${id}`)).data;promptContent.value=promptDetail.value.active_version.content;promptViewedVersionId.value=promptDetail.value.active_version.id;promptNote.value='';await loadPromptTestRuns();promptTestResult.value=promptTestRuns.value[0]||null}
+function viewPromptVersion(version:any){promptContent.value=version.content;promptViewedVersionId.value=version.id}
 async function savePrompt(){const version=(await api.post(`/admin/prompts/${promptDetail.value.id}/versions`,{content:promptContent.value,change_note:promptNote.value||'后台保存新版本'})).data;await api.post(`/admin/prompts/${promptDetail.value.id}/versions/${version.id}/activate`);await loadPrompt(promptDetail.value.id);message.success('提示词新版本已保存并启用')}
 async function uploadPromptFile(event:Event){const input=event.target as HTMLInputElement;const file=input.files?.[0];if(!file||!promptDetail.value)return;const body=new FormData();body.append('file',file);body.append('change_note',promptNote.value||`上传文件：${file.name}`);try{await api.post(`/admin/prompts/${promptDetail.value.id}/versions/upload`,body);await loadPrompt(promptDetail.value.id);message.success('提示词文件已上传为新版本，请在版本历史中选择启用')}catch(error:any){message.error(error.response?.data?.detail||'提示词文件上传失败')}finally{input.value=''}}
 async function activatePrompt(version:any){await api.post(`/admin/prompts/${promptDetail.value.id}/versions/${version.id}/activate`);await loadPrompt(promptDetail.value.id);message.success(`已启用提示词 v${version.version_no}，后续 Live 任务将引用此版本`)}
@@ -266,7 +267,7 @@ async function saveRuntimeSettings(){savingRuntimeSettings.value=true;try{runtim
         </aside>
         <aside class="version-panel">
           <h3>版本历史</h3>
-          <article v-for="version in promptDetail?.versions" :key="version.id" :class="{active:version.id===promptDetail.active_version_id}"><button @click="promptContent=version.content"><b>v{{ version.version_no }}<i v-if="version.id===promptDetail.active_version_id">当前生效</i></b><small>{{ version.change_note }}</small><em>{{ version.content_sha256.slice(0,10) }}…</em></button><button v-if="version.id!==promptDetail.active_version_id" class="activate-version" @click="activatePrompt(version)">启用此版本</button></article>
+          <article v-for="version in promptDetail?.versions" :key="version.id" :class="{active:version.id===promptDetail.active_version_id, selected:version.id===promptViewedVersionId}"><button @click="viewPromptVersion(version)" :aria-selected="version.id===promptViewedVersionId"><b>v{{ version.version_no }}<i v-if="version.id===promptDetail.active_version_id">当前生效</i></b><small>{{ version.change_note }}</small><em>{{ version.content_sha256.slice(0,10) }}…</em></button><button v-if="version.id!==promptDetail.active_version_id" class="activate-version" @click="activatePrompt(version)">启用此版本</button></article>
         </aside>
       </section>
       <section v-else-if="section==='logs'" class="logs-card"><div class="log-filters"><select v-model="logFilters.node"><option value="">全部节点</option><option value="image_generate">image_generate</option><option value="meta_prompt">meta_prompt</option><option value="video_meta_prompt">video_meta_prompt</option><option value="video_submit">video_submit</option><option value="video_generate">video_generate</option></select><select v-model="logFilters.status"><option value="">全部状态</option><option value="succeeded">succeeded</option><option value="failed">failed</option></select><button class="admin-primary" :disabled="loading" @click="loadLogs">筛选</button><span>共 {{ logTotal }} 条</span></div><table><thead><tr><th>时间</th><th>任务 / 节点</th><th>状态</th><th>耗时</th><th>请求摘要</th><th>错误</th></tr></thead><tbody><tr v-for="log in logs" :key="log.id"><td>{{ new Date(log.created_at).toLocaleString() }}</td><td><b>{{ log.node }}</b><small>{{ log.job_id?.slice(0,8) }}</small></td><td><em :class="log.status">{{ log.status }}</em></td><td>{{ log.duration_ms??0 }} ms</td><td><code>{{ JSON.stringify(log.request_summary).slice(0,90) }}</code></td><td>{{ log.error||'—' }}</td></tr></tbody></table></section>
@@ -279,14 +280,14 @@ async function saveRuntimeSettings(){savingRuntimeSettings.value=true;try{runtim
         <label>API 端点<input v-model="selectedProvider.base_url"/></label>
         <label>API Key<input v-model="apiKey" type="password" :placeholder="selectedProvider.api_key_masked||'手工录入，不自动复制'"/></label>
         <label>超时（秒）<input v-model.number="selectedProvider.config.timeout_seconds" type="number"/></label>
-        <label v-if="selectedProvider.adapter==='gemini_generate_content'">
+        <label v-if="selectedProvider.capability==='image' && Array.isArray(selectedProvider.config.allowed_resolutions)">
           清晰度档位（imageSize）
           <select v-model="selectedProvider.config.resolution">
             <option v-for="value in providerResolutions(selectedProvider)" :key="value" :value="value">{{ value }}</option>
           </select>
           <small>Nano / Nano Pro 只在后台配置清晰度档位；画面比例始终由前台任务单独传入，不在这里设置。</small>
         </label>
-        <label v-else-if="selectedProvider.adapter==='openai_images_generation'">
+        <label v-else-if="Array.isArray(selectedProvider.config.allowed_sizes)">
           输出尺寸（size）
           <select v-model="selectedProvider.config.size">
             <option value="follow_ratio">跟随前台画面比例（推荐）</option>
@@ -294,12 +295,13 @@ async function saveRuntimeSettings(){savingRuntimeSettings.value=true;try{runtim
               <option v-for="value in providerImage2Sizes(selectedProvider)" :key="value" :value="value">{{ value }}</option>
             </optgroup>
           </select>
-          <small>Image 2 使用像素尺寸；推荐保持“跟随前台画面比例”，系统会按用户选择的比例自动映射尺寸。</small>
-          <small v-if="selectedProvider.config.size && selectedProvider.config.size !== 'follow_ratio'" class="image2-size-warning">当前为固定 size，会覆盖前台比例；若与任务比例不匹配，后端会在调用模型前直接失败并提示精确原因。</small>
+          <small>Image 2 使用斑点蛙文档支持的像素尺寸；推荐保持“跟随前台画面比例”，系统会按用户选择的比例自动映射尺寸。</small>
+          <small v-if="selectedProvider.config.size && selectedProvider.config.size !== 'follow_ratio'" class="image2-size-warning">当前为固定 size，会覆盖前台比例。</small>
         </label>
-        <div v-if="selectedProvider.capability==='image'" class="two-col">
-          <label>质量<select v-model="selectedProvider.config.quality"><option v-for="value in ['auto','low','medium','high']" :key="value">{{ value }}</option></select></label>
-          <label>格式<select v-model="selectedProvider.config.format"><option v-for="value in ['png','jpeg','webp']" :key="value">{{ value }}</option></select></label>
+        <div v-if="selectedProvider.capability==='image' && (selectedProvider.config.quality!==undefined || selectedProvider.config.style!==undefined || selectedProvider.config.format!==undefined)" class="two-col">
+          <label v-if="selectedProvider.config.quality!==undefined">质量<select v-model="selectedProvider.config.quality"><option v-for="value in ['standard','auto','low','medium','high']" :key="value">{{ value }}</option></select></label>
+          <label v-if="selectedProvider.config.style!==undefined">风格<select v-model="selectedProvider.config.style"><option v-for="value in ['vivid','natural']" :key="value">{{ value }}</option></select></label>
+          <label v-if="selectedProvider.config.format!==undefined">格式<select v-model="selectedProvider.config.format"><option v-for="value in ['png','jpeg','webp']" :key="value">{{ value }}</option></select></label>
         </div>
         <div class="provider-route-role-editor">
           <b>业务链路角色</b>

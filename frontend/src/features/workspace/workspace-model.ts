@@ -38,9 +38,6 @@ export type VideoForm = {
   videoTypes: string[]
   duration: number
   resolution: string
-  generateAudio: boolean
-  cameraFixed: boolean
-  watermark: boolean
   dryRun: boolean
 }
 
@@ -270,9 +267,6 @@ export function createDefaultVideoForm(): VideoForm {
     videoTypes: ['UGC 种草'],
     duration: 15,
     resolution: '1080p',
-    generateAudio: true,
-    cameraFixed: false,
-    watermark: false,
     dryRun: true,
   }
 }
@@ -334,9 +328,6 @@ export function buildVideoPayload(assetIds: string[], form: VideoForm) {
     video_types: form.videoTypes,
     duration: form.duration,
     resolution: form.resolution,
-    generate_audio: form.generateAudio,
-    camera_fixed: form.cameraFixed,
-    watermark: form.watermark,
     dry_run: form.dryRun,
   }
 }

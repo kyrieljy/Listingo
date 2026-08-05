@@ -39,9 +39,14 @@ from backend.app.services.prompt_contract import (
     validate_meta_prompt_semantics,
 )
 from backend.app.services.content_safety import ContentSafetyBlocked, ensure_content_safe, run_content_safety_review
-from backend.app.services.provider_routing import enabled_provider_for_route, route_provider_codes
-from backend.app.services.providers import ProviderClient
+from backend.app.services.provider_routing import (
+    enabled_provider_for_route,
+    provider_display_names_by_code,
+    route_provider_codes,
+)
+from backend.app.services.providers import HELLOBABYGO_IMAGE_ADAPTER, ProviderClient
 from backend.app.services.redaction import safe_json
+from backend.app.services.storage import public_file_url
 
 
 DEMO_ASSET_DIR = Path(__file__).resolve().parents[1] / "static" / "demo"
@@ -51,6 +56,10 @@ DEMO_ASSETS = [
     DEMO_ASSET_DIR / "tumbler-commute.png",
     DEMO_ASSET_DIR / "tumbler-source.png",
 ]
+JOB_FINAL_STATUSES = {"succeeded", "partial_failed", "failed", "cancelled", "partial_cancelled"}
+ITEM_FINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+CANCEL_REQUESTED_STATUSES = {"cancelling", "cancelled", "partial_cancelled"}
+USER_CANCELLED_ERROR = "用户已取消任务"
 SMART_TYPES = [
     "首屏主视觉",
     "核心卖点图",
@@ -92,6 +101,56 @@ def image_provider_route(preference: str, session: Session | None = None) -> lis
     if session is not None:
         return route_provider_codes(session, route_key)
     return ["yunwu-image-2"] if route_key == "suite_layout" else ["yunwu-nano-pro", "yunwu-nano"]
+
+
+def generation_status_from_item_statuses(statuses: list[str]) -> str:
+    success_count = statuses.count("succeeded")
+    failed_count = statuses.count("failed")
+    cancelled_count = statuses.count("cancelled")
+    if cancelled_count:
+        return "partial_cancelled" if success_count or failed_count else "cancelled"
+    return "succeeded" if failed_count == 0 else "failed" if success_count == 0 else "partial_failed"
+
+
+def finalize_generation_cancellation(session: Session, job: GenerationJob) -> None:
+    for item in job.items:
+        if item.status == "queued":
+            item.status = "cancelled"
+            item.error = USER_CANCELLED_ERROR
+    statuses = [item.status for item in job.items]
+    if not statuses:
+        job.status = "cancelled"
+        job.progress = 100
+        job.completed_at = utcnow()
+        return
+    if any(status in {"queued", "running"} for status in statuses):
+        job.status = "cancelling"
+        return
+    job.status = generation_status_from_item_statuses(statuses)
+    job.progress = 100
+    job.completed_at = utcnow()
+
+
+def cancel_generation_job(session: Session, job: GenerationJob) -> GenerationJob:
+    if job.status in JOB_FINAL_STATUSES:
+        return job
+    job.status = "cancelling"
+    finalize_generation_cancellation(session, job)
+    session.commit()
+    session.refresh(job)
+    return job
+
+
+def generation_cancel_requested(session_factory: sessionmaker[Session], job_id: str) -> bool:
+    with session_factory() as session:
+        job = session.get(GenerationJob, job_id)
+        if not job:
+            return True
+        if job.status not in CANCEL_REQUESTED_STATUSES:
+            return False
+        finalize_generation_cancellation(session, job)
+        session.commit()
+        return True
 
 
 def expand_custom_types(custom_counts: dict[str, Any] | None) -> list[str]:
@@ -138,6 +197,10 @@ def _run_dryrun_job(job_id: str, session_factory: sessionmaker[Session], setting
     with session_factory() as session:
         job = session.get(GenerationJob, job_id)
         if not job:
+            return
+        if job.status in CANCEL_REQUESTED_STATUSES:
+            finalize_generation_cancellation(session, job)
+            session.commit()
             return
         params = json.loads(job.params_json)
         job.status = "running"
@@ -194,6 +257,8 @@ def _run_dryrun_job(job_id: str, session_factory: sessionmaker[Session], setting
             )
 
             for index, prompt_item in enumerate(plan.images):
+                if generation_cancel_requested(session_factory, job_id):
+                    return
                 item = GenerationItem(
                     job_id=job.id,
                     index=index,
@@ -255,6 +320,10 @@ def _run_dryrun_job(job_id: str, session_factory: sessionmaker[Session], setting
         except Exception as exc:
             job = session.get(GenerationJob, job_id)
             if job:
+                if job.status in CANCEL_REQUESTED_STATUSES:
+                    finalize_generation_cancellation(session, job)
+                    session.commit()
+                    return
                 succeeded = session.scalar(
                     select(GenerationItem).where(
                         GenerationItem.job_id == job.id, GenerationItem.status == "succeeded"
@@ -372,6 +441,10 @@ async def _run_live_job(
             job = session.get(GenerationJob, job_id)
             if not job:
                 return
+            if job.status in CANCEL_REQUESTED_STATUSES:
+                finalize_generation_cancellation(session, job)
+                session.commit()
+                return
             job.status = "running"
             job.started_at = utcnow()
             params = json.loads(job.params_json)
@@ -409,6 +482,61 @@ async def _run_live_job(
             )
             session.commit()
 
+        if generation_cancel_requested(session_factory, job_id):
+            return
+        input_text = json.dumps({key: value for key, value in params.items() if not key.startswith("_") and key not in {"asset_ids", "dry_run"}}, ensure_ascii=False)
+        try:
+            input_safety, input_safety_provider = await run_content_safety_review(
+                client,
+                llm_default,
+                llm_fallback,
+                cipher,
+                safety_prompt,
+                subject="generation_input",
+                text=input_text,
+                image_paths=asset_paths,
+            )
+            ensure_content_safe(input_safety, "输入内容安全拦截")
+            with session_factory() as session:
+                session.add(ExecutionLog(
+                    job_id=job_id,
+                    node="content_safety",
+                    provider_id=input_safety_provider.id,
+                    status="succeeded",
+                    request_summary=safe_json({"subject": "generation_input", "asset_count": len(asset_paths)}),
+                    response_summary=safe_json(input_safety.model_dump()),
+                    dry_run=False,
+                ))
+                session.commit()
+        except ContentSafetyBlocked as exc:
+            with session_factory() as session:
+                session.add(ExecutionLog(
+                    job_id=job_id,
+                    node="content_safety",
+                    status="failed",
+                    request_summary=safe_json({"subject": "generation_input", "asset_count": len(asset_paths)}),
+                    response_summary=safe_json(exc.review.model_dump() if exc.review else {}),
+                    error=str(exc),
+                    dry_run=False,
+                ))
+                session.commit()
+            raise RuntimeError(str(exc)) from exc
+        except Exception as exc:
+            with session_factory() as session:
+                session.add(ExecutionLog(
+                    job_id=job_id,
+                    node="content_safety",
+                    status="failed",
+                    request_summary=safe_json({"subject": "generation_input", "asset_count": len(asset_paths)}),
+                    response_summary="{}",
+                    error=str(exc),
+                    dry_run=False,
+                ))
+                session.commit()
+            raise RuntimeError(f"输入内容安全拦截：安全审计失败：{exc}") from exc
+        if generation_cancel_requested(session_factory, job_id):
+            return
+
         facts_raw, facts_provider = await _call_llm_with_fallback(
             client,
             llm_default,
@@ -429,6 +557,8 @@ async def _run_live_job(
             ),
             image_paths=asset_paths,
         )
+        if generation_cancel_requested(session_factory, job_id):
+            return
         product_facts = parse_product_facts(facts_raw)
         image_plan = custom_count_instruction(params.get("custom_counts")) if params.get("mode") == "custom" else f"由核心提示词智能匹配，共 {job_count} 张"
         product_info_parts = [
@@ -473,6 +603,8 @@ async def _run_live_job(
         raw_plan, llm_used = await _call_llm_with_fallback(
             client, llm_default, llm_fallback, cipher, combined_prompt, user_prompt, image_paths=asset_paths
         )
+        if generation_cancel_requested(session_factory, job_id):
+            return
 
         async def repair(raw: str, error: str) -> str:
             repair_system = append_runtime_contract(
@@ -508,6 +640,8 @@ async def _run_live_job(
             return await parse_plan_with_one_repair(raw, job_count, repair)
 
         plan = await validate_plan_with_one_replan(plan, semantic_context, replan)
+        if generation_cancel_requested(session_factory, job_id):
+            return
         try:
             plan_safety, safety_provider = await run_content_safety_review(
                 client,
@@ -561,6 +695,10 @@ async def _run_live_job(
             job = session.get(GenerationJob, job_id)
             if not job:
                 return
+            if job.status in CANCEL_REQUESTED_STATUSES:
+                finalize_generation_cancellation(session, job)
+                session.commit()
+                return
             for index, prompt_item in enumerate(plan.images):
                 session.add(
                     GenerationItem(
@@ -597,6 +735,8 @@ async def _run_live_job(
                 select(GenerationItem.id).where(GenerationItem.job_id == job.id).order_by(GenerationItem.index)
             ).all()
 
+        if generation_cancel_requested(session_factory, job_id):
+            return
         semaphore = asyncio.Semaphore(settings.max_job_concurrency)
 
         async def guarded(item_id: str) -> None:
@@ -621,7 +761,8 @@ async def _run_live_job(
             ).all()
             success_count = statuses.count("succeeded")
             failed_count = statuses.count("failed")
-            job.status = "succeeded" if failed_count == 0 else "failed" if success_count == 0 else "partial_failed"
+            cancelled_count = statuses.count("cancelled")
+            job.status = generation_status_from_item_statuses(statuses)
             job.progress = 100
             job.completed_at = utcnow()
             session.add(
@@ -630,7 +771,7 @@ async def _run_live_job(
                     node="aggregate",
                     status=job.status,
                     request_summary=safe_json({"items": len(statuses)}),
-                    response_summary=safe_json({"succeeded": success_count, "failed": failed_count}),
+                    response_summary=safe_json({"succeeded": success_count, "failed": failed_count, "cancelled": cancelled_count}),
                     dry_run=False,
                 )
             )
@@ -639,6 +780,10 @@ async def _run_live_job(
         with session_factory() as session:
             job = session.get(GenerationJob, job_id)
             if job:
+                if job.status in CANCEL_REQUESTED_STATUSES:
+                    finalize_generation_cancellation(session, job)
+                    session.commit()
+                    return
                 job.status = "failed"
                 job.error = str(exc)
                 job.completed_at = utcnow()
@@ -671,26 +816,44 @@ async def _run_live_item(
         item = session.get(GenerationItem, item_id)
         if not item:
             return
+        job = session.get(GenerationJob, item.job_id)
+        if not job or job.status in CANCEL_REQUESTED_STATUSES or item.status == "cancelled":
+            if item and item.status == "queued":
+                item.status = "cancelled"
+                item.error = USER_CANCELLED_ERROR
+                session.commit()
+            return
         item.status = "running"
         prompt_item = json.loads(item.prompt_text)
         prompt = f"{prompt_item['picture_requirement']}\n\n文案要求：{prompt_item['copywriting_requirements']}"
+        provider_display_names = provider_display_names_by_code(session, provider_codes)
         session.commit()
 
     async def generate(provider_code: str) -> bytes:
         with session_factory() as session:
+            item = session.get(GenerationItem, item_id)
+            job = session.get(GenerationJob, item.job_id) if item else None
+            if not item or not job or job.status in CANCEL_REQUESTED_STATUSES:
+                raise RuntimeError(USER_CANCELLED_ERROR)
             provider = session.scalar(select(Provider).where(Provider.code == provider_code))
             if not provider or not provider.encrypted_api_key:
                 raise RuntimeError(f"Provider {provider_code} 不可用")
+            input_urls = (
+                [public_file_url(settings, path) for path in asset_paths]
+                if provider.adapter == HELLOBABYGO_IMAGE_ADAPTER and asset_paths
+                else None
+            )
             return await client.generate_image(
                 provider,
                 cipher.decrypt(provider.encrypted_api_key),
                 prompt,
                 asset_paths,
                 aspect_ratio,
+                input_urls=input_urls,
             )
 
     try:
-        image_bytes, used_code = await run_image_route(provider_codes, generate)
+        image_bytes, used_code = await run_image_route(provider_codes, generate, provider_display_names)
         with Image.open(BytesIO(image_bytes)) as image:
             image.verify()
         with Image.open(BytesIO(image_bytes)) as image:
@@ -807,6 +970,14 @@ async def _run_live_item(
         with session_factory() as session:
             item = session.get(GenerationItem, item_id)
             if item:
+                if item.status == "cancelled":
+                    return
+                job = session.get(GenerationJob, item.job_id)
+                if job and job.status in CANCEL_REQUESTED_STATUSES and str(exc) == USER_CANCELLED_ERROR:
+                    item.status = "cancelled"
+                    item.error = USER_CANCELLED_ERROR
+                    session.commit()
+                    return
                 item.status = "failed"
                 item.error = str(exc)
                 session.add(
@@ -878,6 +1049,7 @@ async def create_live_child_version(
     image_codes = image_provider_route(params.get("model_preference", "fidelity"))
     for image_code in image_codes:
         _enabled_provider_by_code(session, image_code)
+    provider_display_names = provider_display_names_by_code(session, image_codes)
     asset_ids = json.loads(job.asset_ids_json)
     original_paths = [asset.file_path for asset in session.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()]
     client = ProviderClient()
@@ -906,15 +1078,21 @@ async def create_live_child_version(
         provider = session.scalar(select(Provider).where(Provider.code == provider_code))
         if not provider or not provider.encrypted_api_key:
             raise RuntimeError(f"Provider {provider_code} 不可用")
+        input_urls = (
+            [public_file_url(settings, path) for path in input_paths]
+            if provider.adapter == HELLOBABYGO_IMAGE_ADAPTER and input_paths
+            else None
+        )
         return await client.generate_image(
             provider,
             cipher.decrypt(provider.encrypted_api_key),
             prompt,
             input_paths,
             params["aspect_ratio"],
+            input_urls=input_urls,
         )
 
-    image_bytes, used_code = await run_image_route(image_codes, generate)
+    image_bytes, used_code = await run_image_route(image_codes, generate, provider_display_names)
     with Image.open(BytesIO(image_bytes)) as image:
         image.verify()
     with Image.open(BytesIO(image_bytes)) as image:
@@ -1048,7 +1226,6 @@ async def retry_failed_live_items(
     with session_factory() as session:
         job = session.get(GenerationJob, job_id)
         statuses = session.scalars(select(GenerationItem.status).where(GenerationItem.job_id == job_id)).all()
-        successes, failures = statuses.count("succeeded"), statuses.count("failed")
-        job.status = "succeeded" if failures == 0 else "failed" if successes == 0 else "partial_failed"
+        job.status = generation_status_from_item_statuses(statuses)
         job.completed_at = utcnow()
         session.commit()

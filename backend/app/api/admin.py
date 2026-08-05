@@ -32,7 +32,7 @@ from backend.app.services.provider_routing import (
     write_provider_config,
 )
 from backend.app.services.redaction import safe_json
-from backend.app.services.providers import build_async_http_client
+from backend.app.services.providers import HELLOBABYGO_IMAGE_ADAPTER, HELLOBABYGO_VIDEO_ADAPTER, build_async_http_client
 from backend.app.services.jobs import run_generation_job
 from backend.app.services.prompt_testing import (
     FULL_CHAIN_TEST_TYPE,
@@ -133,7 +133,17 @@ def update_provider(
     api_key = updates.pop("api_key", None)
     route_role_updates = updates.pop("route_roles", None)
     config = provider_config(provider)
-    for key in ("resolution", "size", "quality", "format", "compression", "timeout_seconds"):
+    for key in (
+        "resolution",
+        "size",
+        "quality",
+        "style",
+        "format",
+        "response_format",
+        "compression",
+        "timeout_seconds",
+        "poll_interval_seconds",
+    ):
         if key in updates:
             config[key] = updates.pop(key)
     for key in ("label", "base_url", "model_name", "enabled"):
@@ -204,11 +214,11 @@ async def test_provider(provider_id: str, request: Request, session: Session = D
                 if isinstance(item, dict)
             }
             latency = int((perf_counter() - started) * 1000)
-            if provider.adapter == "shengsuanyun_tasks_generation":
+            if provider.adapter in {HELLOBABYGO_IMAGE_ADAPTER, HELLOBABYGO_VIDEO_ADAPTER, "shengsuanyun_tasks_generation"}:
                 return ProviderTestOut(
                     ok=True,
                     latency_ms=latency,
-                    message="连接可用，未发起计费视频任务",
+                    message="连接可用，未发起计费生成任务",
                 )
             if provider.model_name not in model_ids:
                 return ProviderTestOut(

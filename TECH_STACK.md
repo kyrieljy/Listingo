@@ -37,9 +37,8 @@
 外部模型通过 Provider 适配器隔离：
 
 - `openai_chat`：Doubao Seed 2.0 Mini、Qwen-3.6、GPT-5.4-Mini，用于商品视觉事实、核心规划、帮写、编辑转写、内容安全和视频分镜。
-- `gemini_generate_content`：Nano Banana Pro / Nano Banana 2，用于商品保持优先套图路线。
-- `openai_images_generation`：Image 2 与 A+ 移动端低成本编辑路线，用于套图排版、A+ 详情和移动端派生。
-- `shengsuanyun_tasks_generation`：Doubao-Seedance-2.0 视频提交与轮询。
+- `hellobabygo_image_generation`：斑点蛙 `gpt-image-2`、`nano_banana_pro`、`nano_banana_2` 图片异步任务提交、轮询和结果下载，用于套图、A+ 详情和移动端派生。
+- `hellobabygo_video_generation`：斑点蛙 `seedance-2.0` 视频异步任务提交、轮询和 mp4 下载。
 
 Provider route roles 由 `backend/app/services/provider_routing.py` 定义。当前 route key 为 `llm`、`suite_fidelity`、`suite_layout`、`aplus_detail`、`aplus_mobile`、`video`。Live 创建时按 route role 选择可用 Provider，而不是仅按全局默认/备用字段。
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -107,6 +108,26 @@ def normalize_route_roles(value: Any) -> dict[str, ProviderRouteRole]:
 
 def write_provider_config(provider: Provider, config: dict[str, Any]) -> None:
     provider.config_json = json.dumps(config, ensure_ascii=False)
+
+
+def provider_display_name(provider: Provider) -> str:
+    label = (provider.label or "").strip()
+    model_name = (provider.model_name or "").strip()
+    base_url = (provider.base_url or "").strip()
+    host = urlparse(base_url).netloc or base_url
+    name = label or model_name or provider.code
+    if model_name and model_name not in name:
+        name = f"{name} / {model_name}"
+    if host:
+        name = f"{name} @ {host}"
+    return name
+
+
+def provider_display_names_by_code(session: Session, provider_codes: list[str]) -> dict[str, str]:
+    if not provider_codes:
+        return {}
+    providers = session.scalars(select(Provider).where(Provider.code.in_(provider_codes))).all()
+    return {provider.code: provider_display_name(provider) for provider in providers}
 
 
 def set_provider_route_role(provider: Provider, route_key: str, role: ProviderRouteRole | None) -> None:

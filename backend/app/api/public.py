@@ -32,6 +32,7 @@ from backend.app.schemas import (
     AplusGenerationJobCreate,
     AplusJobOut,
     AplusPlanJobCreate,
+    AplusVersionOut,
     CopywritingAssistCreate,
     CopywritingAssistOut,
     GenerationJobCreate,
@@ -44,7 +45,10 @@ from backend.app.schemas import (
     VideoJobOut,
 )
 from backend.app.services.aplus_jobs import (
+    cancel_aplus_job,
     create_aplus_generation_job_from_plan,
+    create_dryrun_aplus_child_version,
+    create_live_aplus_child_version,
     load_aplus_job,
     run_aplus_generation_job,
     run_aplus_plan_job,
@@ -53,6 +57,7 @@ from backend.app.services.aplus_jobs import (
 from backend.app.services.jobs import (
     _call_llm_with_fallback,
     _enabled_provider,
+    cancel_generation_job,
     create_dryrun_child_version,
     create_live_child_version,
     image_provider_route,
@@ -71,6 +76,7 @@ from backend.app.services.redaction import safe_json
 from backend.app.services.storage import store_upload
 from backend.app.services.video_jobs import (
     build_video_copywriting_user_prompt,
+    cancel_video_job,
     dryrun_video_script,
     public_asset_url,
     run_video_job,
@@ -99,6 +105,7 @@ def serialize_job(job: GenerationJob) -> dict:
                 "index": item.index,
                 "route_symbol": item.route_symbol,
                 "image_type": item.image_type,
+                "prompt_text": item.prompt_text,
                 "status": item.status,
                 "provider_id": item.provider_id,
                 "error": item.error,
@@ -312,42 +319,6 @@ async def create_generation_job(
     except ContentSafetyBlocked as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    if not payload.dry_run:
-        safety_prompt = next((item for item in auxiliary_prompts if item.code == "content-safety-review"), None)
-        safety_version = session.get(PromptVersion, safety_prompt.active_version_id) if safety_prompt and safety_prompt.active_version_id else None
-        if not safety_version:
-            raise HTTPException(status_code=500, detail="内容安全审计 Prompt 未启用")
-        assets_by_id = {asset.id: asset for asset in assets}
-        image_paths = [assets_by_id[asset_id].file_path for asset_id in payload.asset_ids]
-        llm_default = _enabled_provider(session, "llm", "default")
-        llm_fallback = _enabled_provider(session, "llm", "fallback")
-        try:
-            review, provider = await run_content_safety_review(
-                ProviderClient(),
-                llm_default,
-                llm_fallback,
-                request.app.state.cipher,
-                safety_version,
-                subject="generation_input",
-                text=input_text,
-                image_paths=image_paths,
-            )
-            ensure_content_safe(review, "输入内容安全拦截")
-        except ContentSafetyBlocked as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"输入内容安全拦截：安全审计失败：{exc}") from exc
-        session.add(
-            ExecutionLog(
-                node="content_safety",
-                provider_id=provider.id,
-                status="succeeded",
-                request_summary=safe_json({"subject": "generation_input", "asset_count": len(image_paths)}),
-                response_summary=safe_json(review.model_dump()),
-                dry_run=False,
-            )
-        )
-        session.commit()
     job = GenerationJob(
         status="queued",
         dry_run=payload.dry_run,
@@ -554,6 +525,14 @@ def get_aplus_plan_job(job_id: str, session: Session = Depends(get_session)):
     return serialize_aplus_job(job)
 
 
+@router.post("/aplus-plan-jobs/{job_id}/cancel", response_model=AplusJobOut)
+def cancel_aplus_plan_job(job_id: str, session: Session = Depends(get_session)):
+    job = load_aplus_job_or_404(session, job_id)
+    if job.job_type != "plan":
+        raise HTTPException(status_code=404, detail="A+ 方案任务不存在")
+    return serialize_aplus_job(cancel_aplus_job(session, job))
+
+
 @router.post("/aplus-generation-jobs", response_model=AplusJobOut, status_code=201)
 async def create_aplus_generation_job(
     payload: AplusGenerationJobCreate,
@@ -612,6 +591,14 @@ def get_aplus_generation_job(job_id: str, session: Session = Depends(get_session
     return serialize_aplus_job(job)
 
 
+@router.post("/aplus-generation-jobs/{job_id}/cancel", response_model=AplusJobOut)
+def cancel_aplus_generation_job(job_id: str, session: Session = Depends(get_session)):
+    job = load_aplus_job_or_404(session, job_id)
+    if job.job_type != "generation":
+        raise HTTPException(status_code=404, detail="A+ 生成任务不存在")
+    return serialize_aplus_job(cancel_aplus_job(session, job))
+
+
 @router.get("/aplus-generation-jobs/{job_id}/download")
 def download_aplus_results(
     job_id: str,
@@ -635,6 +622,33 @@ def download_aplus_results(
         for item, version in versions:
             zip_file.write(version.file_path, arcname=f"{item.index + 1:02d}-{item.module_name}-{item.aspect_ratio}.png")
     return FileResponse(archive, media_type="application/zip", filename=f"listingo-aplus-{job.id}.zip")
+
+
+@router.post("/aplus-items/{item_id}/versions", response_model=AplusVersionOut, status_code=201)
+async def create_aplus_version(
+    item_id: str,
+    payload: GenerationVersionCreate,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    item = session.scalar(
+        select(AplusItem).where(AplusItem.id == item_id).options(selectinload(AplusItem.versions))
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="A+ 生成项不存在")
+    job = session.get(AplusJob, item.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="A+ 任务不存在")
+    if job.dry_run:
+        return create_dryrun_aplus_child_version(session, item, payload.instruction, request.app.state.settings)
+    try:
+        return await create_live_aplus_child_version(
+            session, item, payload.instruction, request.app.state.settings, request.app.state.cipher
+        )
+    except RuntimeError as exc:
+        if str(exc).startswith("内容安全拦截"):
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise
 
 
 @router.post("/video-copywriting-assist", response_model=VideoCopywritingAssistOut)
@@ -780,42 +794,10 @@ async def create_video_job(
             _enabled_provider(session, "llm", "default")
             _enabled_provider(session, "llm", "fallback")
             _enabled_provider(session, "video", "default")
-            public_asset_url(request.app.state.settings, assets[0])
+            for asset in assets:
+                public_asset_url(request.app.state.settings, asset)
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        safety_prompt = session.scalar(select(Prompt).where(Prompt.code == "content-safety-review"))
-        safety_version = session.get(PromptVersion, safety_prompt.active_version_id) if safety_prompt and safety_prompt.active_version_id else None
-        if not safety_version:
-            raise HTTPException(status_code=500, detail="内容安全审计 Prompt 未启用")
-        llm_default = _enabled_provider(session, "llm", "default")
-        llm_fallback = _enabled_provider(session, "llm", "fallback")
-        try:
-            review, provider = await run_content_safety_review(
-                ProviderClient(),
-                llm_default,
-                llm_fallback,
-                request.app.state.cipher,
-                safety_version,
-                subject="video_generation_input",
-                text=input_text,
-                image_paths=[asset.file_path for asset in assets],
-            )
-            ensure_content_safe(review, "输入内容安全拦截")
-        except ContentSafetyBlocked as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"输入内容安全拦截：安全审计失败：{exc}") from exc
-        session.add(
-            ExecutionLog(
-                node="content_safety",
-                provider_id=provider.id,
-                status="succeeded",
-                request_summary=safe_json({"subject": "video_generation_input", "asset_count": len(assets)}),
-                response_summary=safe_json(review.model_dump()),
-                dry_run=False,
-            )
-        )
-        session.commit()
 
     params["_prompt_versions"] = {"ecommerce-video-meta-15s": prompt_version.id}
     job = VideoJob(
@@ -864,6 +846,11 @@ def list_video_jobs(session: Session = Depends(get_session)):
 @router.get("/video-jobs/{job_id}", response_model=VideoJobOut)
 def get_video_job(job_id: str, session: Session = Depends(get_session)):
     return serialize_video_job(load_video_job(session, job_id))
+
+
+@router.post("/video-jobs/{job_id}/cancel", response_model=VideoJobOut)
+def cancel_video_generation_job(job_id: str, session: Session = Depends(get_session)):
+    return serialize_video_job(cancel_video_job(session, load_video_job(session, job_id)))
 
 
 @router.post("/video-jobs/{job_id}/retry-failed", response_model=VideoJobOut)
@@ -925,6 +912,11 @@ def list_generation_jobs(session: Session = Depends(get_session)):
 @router.get("/generation-jobs/{job_id}", response_model=GenerationJobOut)
 def get_generation_job(job_id: str, session: Session = Depends(get_session)):
     return serialize_job(load_job(session, job_id))
+
+
+@router.post("/generation-jobs/{job_id}/cancel", response_model=GenerationJobOut)
+def cancel_generation_job_endpoint(job_id: str, session: Session = Depends(get_session)):
+    return serialize_job(cancel_generation_job(session, load_job(session, job_id)))
 
 
 @router.post("/generation-jobs/{job_id}/retry-failed", response_model=GenerationJobOut)

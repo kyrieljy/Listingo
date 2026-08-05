@@ -31,10 +31,10 @@ def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(clien
             "bytedance/doubao-seed-2-0-mini",
             "openai/gpt-5.4-mini",
             "ali/qwen3.6-plus",
-            "gemini-3.1-flash-image",
-            "gemini-3-pro-image",
+            "nano_banana_2",
+            "nano_banana_pro",
             "gpt-image-2",
-            "bytedance/doubao-seedance-2-0",
+            "seedance-2.0",
         }
         aplus_mobile = next(provider for provider in providers if provider.code == "aplus-mobile-edit-low-cost")
         doubao = next(provider for provider in providers if provider.code == "doubao-seed-2-0-mini")
@@ -49,15 +49,29 @@ def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(clien
         assert nano.is_default is False and nano.is_fallback is True
         assert image2.is_default is False and image2.is_fallback is False
         assert json.loads(image2.config_json)["route_roles"] == {"suite_layout": "primary", "aplus_detail": "primary"}
+        assert image2.adapter == "hellobabygo_image_generation"
+        assert image2.base_url == "https://api.hellobabygo.com/v1/images/generations"
+        assert "quality" not in json.loads(image2.config_json)
+        assert "style" not in json.loads(image2.config_json)
+        assert "response_format" not in json.loads(image2.config_json)
         assert aplus_mobile.capability == "image"
-        assert aplus_mobile.base_url.endswith("/v1/images/edits")
+        assert aplus_mobile.adapter == "hellobabygo_image_generation"
+        assert aplus_mobile.base_url == "https://api.hellobabygo.com/v1/images/generations"
         assert aplus_mobile.is_default is False and aplus_mobile.is_fallback is False
         assert json.loads(aplus_mobile.config_json)["route_roles"] == {"aplus_mobile": "primary"}
+        assert "quality" not in json.loads(aplus_mobile.config_json)
+        assert "style" not in json.loads(aplus_mobile.config_json)
+        assert "response_format" not in json.loads(aplus_mobile.config_json)
         assert video.capability == "video"
         assert video.is_default is True and video.is_fallback is False
-        assert video.base_url.endswith("/api/v1/tasks/generations")
-        assert video.model_name == "bytedance/doubao-seedance-2-0"
-        assert json.loads(video.config_json)["image_role"] == "reference_image"
+        assert video.adapter == "hellobabygo_video_generation"
+        assert video.base_url == "https://api.hellobabygo.com/v1/videos"
+        assert video.model_name == "seedance-2.0"
+        assert "image_role" not in json.loads(video.config_json)
+        assert "duration" not in json.loads(video.config_json)
+        assert "resolution" not in json.loads(video.config_json)
+        assert "generate_audio" not in json.loads(video.config_json)
+        assert "watermark" not in json.loads(video.config_json)
         assert json.loads(video.config_json)["route_roles"] == {"video": "primary"}
         assert json.loads(doubao.config_json)["route_roles"] == {"llm": "primary"}
         assert json.loads(qwen.config_json)["route_roles"] == {"llm": "fallback"}
@@ -65,8 +79,10 @@ def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(clien
         assert json.loads(nano.config_json)["route_roles"] == {"suite_fidelity": "fallback"}
         assert doubao.base_url.endswith("/api/v1/chat/completions")
         assert doubao.model_name == "bytedance/doubao-seed-2-0-mini"
-        assert nano_pro.base_url.endswith("/v1beta/models/gemini-3-pro-image:generateContent")
-        assert nano.base_url.endswith("/v1beta/models/gemini-3.1-flash-image:generateContent")
+        assert nano_pro.adapter == "hellobabygo_image_generation"
+        assert nano.adapter == "hellobabygo_image_generation"
+        assert nano_pro.base_url == "https://api.hellobabygo.com/v1/images/generations"
+        assert nano.base_url == "https://api.hellobabygo.com/v1/images/generations"
         assert prompt is not None and prompt.active_version_id is not None
         assert workflow is not None and workflow.active_version_id is not None
         assert session.get(PromptVersion, prompt.active_version_id).content.startswith(
@@ -133,8 +149,9 @@ def test_seed_migrates_legacy_video_provider_without_duplicate_insert(client) ->
         providers = session.scalars(select(Provider)).all()
         assert current_video is not None
         assert legacy_video is None
-        assert current_video.model_name == "bytedance/doubao-seedance-2-0"
-        assert json.loads(current_video.config_json)["image_role"] == "reference_image"
+        assert current_video.model_name == "seedance-2.0"
+        assert current_video.adapter == "hellobabygo_video_generation"
+        assert "image_role" not in json.loads(current_video.config_json)
         assert len(providers) == 8
 
 

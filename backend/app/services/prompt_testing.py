@@ -159,9 +159,6 @@ def _video_payload(inputs: dict[str, Any], *, dry_run: bool) -> VideoJobCreate:
         video_types=[str(item) for item in video_types],
         duration=int(inputs.get("duration") or 15),
         resolution=str(inputs.get("resolution") or "1080p"),
-        generate_audio=bool(inputs.get("generate_audio", True)),
-        camera_fixed=bool(inputs.get("camera_fixed", False)),
-        watermark=bool(inputs.get("watermark", False)),
         dry_run=dry_run,
     )
 
@@ -305,10 +302,10 @@ def _build_llm_test_prompts(
     if code == "ecommerce-video-meta-15s":
         payload = _video_payload({**inputs, "asset_ids": [asset.id for asset in assets] or inputs.get("asset_ids") or ["prompt-test-placeholder"]}, dry_run=False)
         item = SimpleNamespace(video_type=payload.video_types[0])
-        image_url = assets[0].url if assets else str(inputs.get("product_image_url") or "")
+        image_urls = [asset.url for asset in assets] or [str(inputs.get("product_image_url") or "")]
         return (
             prompt_content,
-            build_video_script_user_prompt(payload.model_dump(), item, image_url),
+            build_video_script_user_prompt(payload.model_dump(), item, image_urls),
             None,
         )
     if code == "aplus-meta":

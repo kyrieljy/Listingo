@@ -22,6 +22,8 @@ PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "ecommerce_meta_prom
 APLUS_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "aplus_meta_prompt_0729.md"
 LEGACY_VIDEO_PROVIDER_CODE = "shengsuanyun-seedance-1-5-pro"
 VIDEO_PROVIDER_CODE = "shengsuanyun-doubao-seedance-2-0"
+HELLOBABYGO_IMAGE_URL = "https://api.hellobabygo.com/v1/images/generations"
+HELLOBABYGO_VIDEO_URL = "https://api.hellobabygo.com/v1/videos"
 
 AUXILIARY_PROMPT_PRESETS = [
     ("product-vision", "商品视觉事实提取", "读取商品参考图，输出供核心 Meta Prompt 使用的结构化事实。", "product_vision_v1.md"),
@@ -68,44 +70,48 @@ PROVIDER_PRESETS = [
     },
     {
         "code": "yunwu-nano-pro",
-        "label": "Yunwu Nano Banana Pro",
+        "label": "HelloBabyGo Nano Banana Pro",
         "capability": "image",
-        "adapter": "gemini_generate_content",
-        "base_url": "https://yunwu.ai/v1beta/models/gemini-3-pro-image:generateContent",
-        "model_name": "gemini-3-pro-image",
+        "adapter": "hellobabygo_image_generation",
+        "base_url": HELLOBABYGO_IMAGE_URL,
+        "model_name": "nano_banana_pro",
         "is_default": True,
         "is_fallback": False,
         "config": {
             "resolution": "2K",
             "allowed_resolutions": ["1K", "2K", "4K"],
-            "format": "png",
-            "timeout_seconds": 240,
+            "size": "auto",
+            "allowed_sizes": ["auto", "landscape", "portrait", "square"],
+            "timeout_seconds": 600,
+            "poll_interval_seconds": 5,
             "route_roles": {"suite_fidelity": "primary"},
         },
     },
     {
         "code": "yunwu-nano",
-        "label": "Yunwu Nano 2",
+        "label": "HelloBabyGo Nano Banana 2",
         "capability": "image",
-        "adapter": "gemini_generate_content",
-        "base_url": "https://yunwu.ai/v1beta/models/gemini-3.1-flash-image:generateContent",
-        "model_name": "gemini-3.1-flash-image",
+        "adapter": "hellobabygo_image_generation",
+        "base_url": HELLOBABYGO_IMAGE_URL,
+        "model_name": "nano_banana_2",
         "is_default": False,
         "is_fallback": True,
         "config": {
             "resolution": "1K",
-            "allowed_resolutions": ["512", "1K", "2K", "4K"],
-            "format": "png",
-            "timeout_seconds": 180,
+            "allowed_resolutions": ["1K", "2K", "4K"],
+            "size": "auto",
+            "allowed_sizes": ["auto", "landscape", "portrait", "square"],
+            "timeout_seconds": 600,
+            "poll_interval_seconds": 5,
             "route_roles": {"suite_fidelity": "fallback"},
         },
     },
     {
         "code": "yunwu-image-2",
-        "label": "Yunwu GPT Image 2",
+        "label": "HelloBabyGo GPT Image 2",
         "capability": "image",
-        "adapter": "openai_images_generation",
-        "base_url": "https://yunwu.ai/v1/images/generations",
+        "adapter": "hellobabygo_image_generation",
+        "base_url": HELLOBABYGO_IMAGE_URL,
         "model_name": "gpt-image-2",
         "is_default": False,
         "is_fallback": False,
@@ -113,71 +119,49 @@ PROVIDER_PRESETS = [
             "size": "follow_ratio",
             "allowed_sizes": [
                 "follow_ratio",
-                "auto",
                 "1024x1024",
-                "1536x1024",
-                "1024x1536",
-                "2048x2048",
-                "2048x1152",
-                "3840x2160",
-                "2160x3840",
+                "1792x1024",
+                "1024x1792",
             ],
-            "quality": "auto",
-            "format": "png",
-            "compression": 90,
-            "timeout_seconds": 180,
+            "timeout_seconds": 600,
+            "poll_interval_seconds": 5,
             "route_roles": {"suite_layout": "primary", "aplus_detail": "primary"},
         },
     },
     {
         "code": "aplus-mobile-edit-low-cost",
-        "label": "A+ Mobile Edit Low Cost",
+        "label": "HelloBabyGo A+ Mobile Image",
         "capability": "image",
-        "adapter": "openai_images_generation",
-        "base_url": "https://yunwu.ai/v1/images/edits",
+        "adapter": "hellobabygo_image_generation",
+        "base_url": HELLOBABYGO_IMAGE_URL,
         "model_name": "gpt-image-2",
         "is_default": False,
         "is_fallback": False,
         "config": {
-            "size": "auto",
+            "size": "follow_ratio",
             "allowed_sizes": [
-                "auto",
+                "follow_ratio",
                 "1024x1024",
-                "1536x1024",
-                "1024x1536",
-                "2048x2048",
-                "2048x1152",
-                "3840x2160",
-                "2160x3840",
+                "1792x1024",
+                "1024x1792",
             ],
-            "quality": "auto",
-            "format": "png",
-            "compression": 90,
-            "timeout_seconds": 180,
+            "timeout_seconds": 600,
+            "poll_interval_seconds": 5,
             "route_roles": {"aplus_mobile": "primary"},
         },
     },
     {
         "code": VIDEO_PROVIDER_CODE,
-        "label": "胜算云 Doubao-Seedance-2.0",
+        "label": "HelloBabyGo Seedance 2.0",
         "capability": "video",
-        "adapter": "shengsuanyun_tasks_generation",
-        "base_url": "https://router.shengsuanyun.com/api/v1/tasks/generations",
-        "model_name": "bytedance/doubao-seedance-2-0",
+        "adapter": "hellobabygo_video_generation",
+        "base_url": HELLOBABYGO_VIDEO_URL,
+        "model_name": "seedance-2.0",
         "is_default": True,
         "is_fallback": False,
         "config": {
-            "resolution": "720p",
-            "allowed_resolutions": ["480p", "720p", "1080p"],
-            "duration": 15,
-            "timeout_seconds": 600,
-            "poll_interval_seconds": 5,
-            "generate_audio": True,
-            "image_role": "reference_image",
-            "return_last_frame": False,
-            "draft": False,
-            "tools": [],
-            "watermark": False,
+            "timeout_seconds": 900,
+            "poll_interval_seconds": 20,
             "route_roles": {"video": "primary"},
         },
     },
@@ -221,26 +205,30 @@ def seed_database(session: Session) -> None:
             existing.model_name = preset["model_name"]
             existing.is_default = preset["is_default"]
             existing.is_fallback = preset["is_fallback"]
-            if preset["capability"] == "image":
-                config = json.loads(existing.config_json)
-                config.pop("aspect_ratio", None)
-                existing.config_json = json.dumps(config, ensure_ascii=False)
-            if preset["code"] == "yunwu-nano" and existing.model_name == "gemini-3.1-flash-image-preview":
-                existing.model_name = preset["model_name"]
-                existing.base_url = preset["base_url"]
-            if preset["code"] == "yunwu-image-2":
-                config = json.loads(existing.config_json)
-                if config.get("size") == "1024x1024" and "allowed_sizes" not in config:
-                    config["size"] = "follow_ratio"
-                config["allowed_sizes"] = preset["config"]["allowed_sizes"]
-                existing.config_json = json.dumps(config, ensure_ascii=False)
-            if preset["code"] == VIDEO_PROVIDER_CODE:
-                config = json.loads(existing.config_json)
-                for key, value in preset["config"].items():
-                    config.setdefault(key, value)
-                config["allowed_resolutions"] = preset["config"]["allowed_resolutions"]
-                if config.get("image_role") not in {"reference_image", "first_frame"}:
-                    config["image_role"] = preset["config"]["image_role"]
+            if preset["capability"] in {"image", "video"}:
+                existing_config = json.loads(existing.config_json or "{}")
+                existing_roles = normalize_route_roles(existing_config.get("route_roles"))
+                config = {**existing_config, **preset["config"]}
+                if existing_roles:
+                    config["route_roles"] = existing_roles
+                if preset["capability"] == "image":
+                    for key in ("aspect_ratio", "format", "compression", "quality", "style", "response_format"):
+                        config.pop(key, None)
+                if preset["capability"] == "video":
+                    for key in (
+                        "image_role",
+                        "return_last_frame",
+                        "draft",
+                        "tools",
+                        "duration",
+                        "allowed_durations",
+                        "resolution",
+                        "allowed_resolutions",
+                        "generate_audio",
+                        "camera_fixed",
+                        "watermark",
+                    ):
+                        config.pop(key, None)
                 existing.config_json = json.dumps(config, ensure_ascii=False)
             continue
         session.add(
@@ -285,7 +273,7 @@ def seed_database(session: Session) -> None:
     nano_pro = session.scalar(select(Provider).where(Provider.code == "yunwu-nano-pro"))
     nano2 = session.scalar(select(Provider).where(Provider.code == "yunwu-nano"))
     if nano_pro and nano2 and not nano_pro.encrypted_api_key and nano2.encrypted_api_key:
-        # Yunwu 的同一 API Key 可调用模型目录中的不同图片模型。
+        # 同一中转站 API Key 可调用模型目录中的不同图片模型。
         nano_pro.encrypted_api_key = nano2.encrypted_api_key
         nano_pro.enabled = nano2.enabled
     image2 = session.scalar(select(Provider).where(Provider.code == "yunwu-image-2"))

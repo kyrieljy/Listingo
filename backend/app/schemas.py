@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 ALLOWED_RATIOS = {"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9", "970:600", "1464:600", "600:450"}
+VIDEO_ALLOWED_SIZES = {"1:1", "3:4", "4:3", "9:16", "16:9", "21:9", "landscape", "portrait"}
+VIDEO_ALLOWED_RESOLUTIONS = {"720p", "1080p"}
 A_PLUS_DETAIL_RATIOS = {"1:1", "3:4", "9:16", "16:9"}
 A_PLUS_AMAZON_STANDARD_RATIO = "970:600"
 A_PLUS_AMAZON_ADVANCED_WEB_RATIO = "1464:600"
@@ -150,17 +152,22 @@ class VideoJobCreate(BaseModel):
     video_types: list[str] = Field(min_length=1, max_length=8)
     duration: int = Field(default=15, ge=5, le=15)
     resolution: str = Field(default="1080p", max_length=40)
-    generate_audio: bool = True
-    camera_fixed: bool = False
-    watermark: bool = False
     dry_run: bool = True
 
     @field_validator("aspect_ratio")
     @classmethod
     def validate_video_ratio(cls, value: str) -> str:
-        if value not in ALLOWED_RATIOS:
-            raise ValueError(f"非法比例：{value}")
+        if value not in VIDEO_ALLOWED_SIZES:
+            raise ValueError(f"非法视频画面 size：{value}")
         return value
+
+    @field_validator("resolution")
+    @classmethod
+    def validate_video_resolution(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in VIDEO_ALLOWED_RESOLUTIONS:
+            raise ValueError(f"非法视频清晰度：{value}")
+        return normalized
 
     @field_validator("asset_ids")
     @classmethod
@@ -426,6 +433,7 @@ class GenerationItemOut(BaseModel):
     index: int
     route_symbol: str
     image_type: str
+    prompt_text: str
     status: str
     provider_id: str | None
     error: str | None
@@ -463,9 +471,12 @@ class ProviderUpdate(BaseModel):
     resolution: str | None = None
     size: str | None = None
     quality: str | None = None
+    style: str | None = None
     format: str | None = None
+    response_format: str | None = None
     compression: int | None = Field(default=None, ge=0, le=100)
-    timeout_seconds: int | None = Field(default=None, ge=5, le=600)
+    timeout_seconds: int | None = Field(default=None, ge=5, le=1800)
+    poll_interval_seconds: int | None = Field(default=None, ge=0, le=120)
 
 
 class ProviderOut(BaseModel):

@@ -53,6 +53,10 @@
   cursor: text;
 }
 
+.main-copy-preview {
+  cursor: pointer;
+}
+
 .markdown-preview:hover,
 .markdown-preview:focus-visible {
   border-color: var(--purple);
@@ -662,6 +666,21 @@
   gap: 6px;
 }
 
+.panel-footer .cancel-action {
+  width: 100%;
+  margin-bottom: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.cancel-action {
+  border-color: #ffd8bf;
+  color: #d4380d;
+  background: #fff7f0;
+}
+
 .aplus-workspace {
   padding: 24px;
   max-width: 1280px;
@@ -684,8 +703,8 @@
   margin-bottom: 12px;
 }
 
-.aplus-plan-board header div,
-.aplus-results header div {
+.aplus-plan-board > header > div:first-child,
+.aplus-results > header > div:first-child {
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -785,8 +804,16 @@
 .aplus-result-card img,
 .aplus-result-card .pending-image {
   width: 100%;
-  aspect-ratio: 970 / 600;
-  object-fit: cover;
+  aspect-ratio: 1 / 1;
+  background: #f3f4f6;
+}
+
+.aplus-result-card img {
+  object-fit: contain;
+  display: block;
+}
+
+.aplus-result-card .pending-image {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -844,6 +871,38 @@
   color: #b7bdc7;
   cursor: not-allowed;
   background: #f6f7f9;
+}
+
+.aplus-result-card .select-dot:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+.aplus-result-actions,
+.aplus-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.aplus-result-actions {
+  flex: 0 0 auto;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.aplus-card-actions {
+  flex-wrap: wrap;
+  max-width: 190px;
+}
+
+.aplus-modal-preview {
+  width: 100%;
+  max-height: 68vh;
+  object-fit: contain;
+  background: #f3f4f6;
 }
 
 .aplus-script-preview {

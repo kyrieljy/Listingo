@@ -15,8 +15,14 @@
 
 .prompt-upload input { display: none; }
 .version-panel article { padding: 9px 0; border-bottom: 1px solid #eee; }
-.version-panel article.active { margin: 0 -8px; padding: 9px 8px; border-radius: 8px; background: #f1f8f2; }
+.version-panel article.active,
+.version-panel article.selected { margin: 0 -8px; padding: 9px 8px; border-radius: 8px; }
+.version-panel article.active { background: #f1f8f2; }
+.version-panel article.selected { padding-left: 13px; background: #f6f4ff; box-shadow: inset 3px 0 0 #6c5ce7; }
+.version-panel article.active.selected { background: linear-gradient(90deg, #f3efff 0, #f1f8f2 44px); }
 .version-panel article > button:first-child { width: 100%; padding: 0; display: flex; flex-direction: column; text-align: left; }
+.version-panel article > button:first-child:focus-visible { outline: 2px solid rgba(108, 92, 231, 0.35); outline-offset: 2px; border-radius: 6px; }
+.version-panel article.selected > button:first-child b { color: #3527bd; }
 .version-panel article b { display: flex; align-items: center; gap: 6px; }
 .version-panel article i { padding: 2px 5px; border-radius: 4px; background: #ddf3e2; color: #3d9652; font-size: 9px; font-style: normal; }
 .version-panel .activate-version { margin-top: 7px; padding: 5px 8px; border: 1px solid #d8d2f2; border-radius: 6px; color: #6556da; background: #fff; font-size: 10px; }

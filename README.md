@@ -82,11 +82,11 @@ seed 当前创建 8 个 Provider。Provider 默认都不启用且不含 API Key�
 | `doubao-seed-2-0-mini` | LLM | `llm` primary |
 | `qwen-3-6` | LLM | `llm` fallback |
 | `gpt-5-4-mini` | LLM | 预置待启用 |
-| `yunwu-nano-pro` | image | `suite_fidelity` primary |
-| `yunwu-nano` | image | `suite_fidelity` fallback |
-| `yunwu-image-2` | image | `suite_layout` primary、`aplus_detail` primary |
-| `aplus-mobile-edit-low-cost` | image | `aplus_mobile` primary |
-| `shengsuanyun-doubao-seedance-2-0` | video | `video` primary，模型 `bytedance/doubao-seedance-2-0` |
+| `yunwu-nano-pro` | image | `suite_fidelity` primary，斑点蛙模型 `nano_banana_pro` |
+| `yunwu-nano` | image | `suite_fidelity` fallback，斑点蛙模型 `nano_banana_2` |
+| `yunwu-image-2` | image | `suite_layout` primary、`aplus_detail` primary，斑点蛙模型 `gpt-image-2` |
+| `aplus-mobile-edit-low-cost` | image | `aplus_mobile` primary，斑点蛙模型 `gpt-image-2` |
+| `shengsuanyun-doubao-seedance-2-0` | video | `video` primary，斑点蛙模型 `seedance-2.0` |
 
 后台 Provider 页按业务链路展示 route role：LLM、套图保真、套图排版、A+ 详情、A+ 移动端、视频生成。保存 Provider 配置不会自动发起外部请求；连通测试必须由运营人员显式点击。
 
@@ -102,9 +102,9 @@ A+ 详情页：
 
 视频：
 
-`商品图与卖点 → 输入安全审查 → ecommerce-video-meta-15s → 分镜安全审查 → shengsuanyun_tasks_generation submit → 每 5 秒轮询，最多 180 次 → 下载 mp4 落盘 → 聚合、重试、下载`
+`商品图与卖点 → 输入安全审查 → ecommerce-video-meta-15s → 分镜安全审查 → hellobabygo_video_generation submit → 按 Provider 配置轮询 → 下载 mp4 落盘 → 聚合、重试、下载`
 
-Live 视频必须配置 `LISTINGO_PUBLIC_ASSET_BASE_URL`，且不能是 `localhost` 或 `127.0.0.1`，否则 Seedance 无法拉取商品参考图。
+Live 图生图、二次编辑、A+ 移动端派生图和 Live 视频都必须配置 `LISTINGO_PUBLIC_ASSET_BASE_URL`，且不能是 `localhost` 或 `127.0.0.1`，否则斑点蛙接口无法拉取商品参考图。
 
 ## 运营后台
 

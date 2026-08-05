@@ -48,13 +48,18 @@ async def run_image_with_fallback(
 async def run_image_route(
     provider_codes: list[str],
     generate_callback: ImageCallback,
+    provider_display_names: dict[str, str] | None = None,
 ) -> tuple[bytes, str]:
     errors: list[str] = []
     for provider_code in provider_codes:
         try:
             return await generate_callback(provider_code), provider_code
         except Exception as exc:
-            errors.append(f"{provider_code}: {exc}")
+            display_name = (provider_display_names or {}).get(provider_code) or provider_code
+            message = str(exc)
+            if display_name != provider_code:
+                message = message.replace(provider_code, display_name)
+            errors.append(f"{display_name}: {message}")
     raise RuntimeError("图片模型调用失败：" + "；".join(errors))
 
 

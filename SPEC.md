@@ -8,7 +8,7 @@ Listingo 提供四期统一入口：
 
 - 一期商品套图：支持 Dryrun 和 Live。Live 链路包含商品视觉事实、核心 Meta Prompt 规划、JSON 契约、语义校验、内容安全、并发生图、二次编辑、失败重试、版本、ZIP/长图下载。
 - 二期 A+ 详情页：支持 Dryrun 和 Live。使用 `aplus-meta` 0729 资产规划模块，按 `module_selections` 和 `output_targets` 生成详情页、普通 A+、高级 A+ Web、600:450 移动端图。
-- 三期视频与爆款复刻：支持 Dryrun 和 Live。Live 使用 `shengsuanyun-doubao-seedance-2-0` Provider、`bytedance/doubao-seedance-2-0` 模型和 `shengsuanyun_tasks_generation` 适配器。
+- 三期视频与爆款复刻：支持 Dryrun 和 Live。Live 保留 `shengsuanyun-doubao-seedance-2-0` Provider code，实际使用斑点蛙 `seedance-2.0` 模型和 `hellobabygo_video_generation` 适配器。
 - 四期 Agent 与画布：当前为交互演示，不具备生产 Agent 执行链路。
 
 全局默认 Dryrun。Live 模式必须由本机后台配置 Provider、API Key、Prompt 和必要运行时设置。
@@ -93,10 +93,10 @@ flowchart LR
   E --> F["下载 mp4 并落盘"]
 ```
 
-- 视频 Provider code 为 `shengsuanyun-doubao-seedance-2-0`，模型为 `bytedance/doubao-seedance-2-0`。
-- payload 使用任务式接口：`model`、`content`、`ratio`、`resolution`、`duration`、`generate_audio`、`camera_fixed`、`watermark`、`return_last_frame`、`draft`、`tools`。
-- 默认分辨率为 720p，可选 480p、720p、1080p。
-- 每 5 秒轮询一次，最多 180 次；超时或 Provider 返回失败时单项失败并可重试。
+- 视频 Provider code 保持 `shengsuanyun-doubao-seedance-2-0`，模型改为斑点蛙 `seedance-2.0`。
+- payload 使用斑点蛙任务式接口：`model`、`prompt`、`seconds`、`size`、`resolution`、`images`。
+- 默认分辨率为 720p，可选 720p、1080p。
+- 按 Provider `poll_interval_seconds` 配置轮询；超时或 Provider 返回失败时单项失败并可重试。
 - Live 视频要求 `LISTINGO_PUBLIC_ASSET_BASE_URL` 是外部可访问地址，不能是 `localhost` 或 `127.0.0.1`。
 - `GET /video-jobs` 只返回非后台测试任务。
 

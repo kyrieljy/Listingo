@@ -13,6 +13,7 @@ import {
 } from '@ant-design/icons-vue'
 import {
   assistVideoCopywriting,
+  cancelVideoJob,
   createVideoJob,
   getVideoJob,
   listVideoJobs,
@@ -40,6 +41,8 @@ const form = ref(createDefaultVideoForm())
 const uploading = ref(false)
 const helping = ref(false)
 const generating = ref(false)
+const cancelling = ref(false)
+const cancelRequested = ref(false)
 const job = ref<VideoJob | null>(null)
 const history = ref<VideoJob[]>([])
 const selected = ref<string[]>([])
@@ -51,6 +54,8 @@ const sellingPointsEditing = ref(false)
 const aiSuggestionEditing = ref(false)
 const sellingPointsInput = ref<HTMLTextAreaElement | null>(null)
 const aiSuggestionInput = ref<HTMLTextAreaElement | null>(null)
+const VIDEO_JOB_POLL_INTERVAL_MS = 1000
+const FINAL_VIDEO_JOB_STATUSES = new Set(['succeeded', 'partial_failed', 'failed', 'cancelled', 'partial_cancelled'])
 
 const videoSellingPointsPlaceholder = `建议包含以下信息：
 1. 商品名称
@@ -65,11 +70,8 @@ const selectedRatioOptions = computed(() => {
 })
 const uploadLimitReached = computed(() => assets.value.length >= 3)
 const canGenerate = computed(() => assets.value.length > 0 && form.value.videoTypes.length > 0)
-const currentPreviewUrl = computed(() => {
-  const item = previewItem.value
-  return item?.versions.find((version) => version.id === item.current_version_id)?.url || item?.versions.at(-1)?.url || ''
-})
-
+const videoJobActive = computed(() => Boolean(job.value && !FINAL_VIDEO_JOB_STATUSES.has(job.value.status)))
+const dryRun = computed(() => form.value.dryRun)
 onMounted(async () => {
   try { history.value = await listVideoJobs() } catch { history.value = [] }
 })
@@ -90,15 +92,27 @@ function handleRequestError(error: any, fallback: string) {
 function isVideoUrl(url: string) {
   return /\.(mp4|webm|mov)(\?|$)/i.test(url)
 }
-async function editSellingPoints() {
+async function showSellingPointsEditor() {
   sellingPointsEditing.value = true
   await nextTick()
   sellingPointsInput.value?.focus()
 }
+
 async function editAiSuggestion() {
   aiSuggestionEditing.value = true
   await nextTick()
   aiSuggestionInput.value?.focus()
+}
+function clearCopywritingState() {
+  aiSuggestion.value = ''
+  aiWriteOpen.value = false
+  aiSuggestionEditing.value = false
+  sellingPointsEditing.value = false
+  form.value.sellingPoints = ''
+}
+function removeAsset(id: string) {
+  assets.value = assets.value.filter((asset) => asset.id !== id)
+  clearCopywritingState()
 }
 function createOptimisticVideoJob(payload: Record<string, unknown>): VideoJob {
   const types = Array.isArray(payload.video_types) ? payload.video_types as string[] : form.value.videoTypes
@@ -139,6 +153,7 @@ async function filesSelected(event: Event) {
   const files = selectedFiles.slice(0, remaining)
   if (selectedFiles.length > remaining) message.warning(`最多上传 3 张商品图，本次只添加 ${remaining} 张`)
   if (!files.length) return
+  clearCopywritingState()
   uploading.value = true
   try {
     for (const file of files) assets.value.push(await uploadAsset(file))
@@ -154,7 +169,9 @@ async function useSample() {
   uploading.value = true
   try {
     const blob = await (await fetch('/demo/video-skincare-source.png')).blob()
-    assets.value = [await uploadAsset(new File([blob], 'listingo-demo-skincare-device.png', { type: 'image/png' }))]
+    const demoAsset = await uploadAsset(new File([blob], 'listingo-demo-skincare-device.png', { type: 'image/png' }))
+    clearCopywritingState()
+    assets.value = [demoAsset]
     message.success('已载入演示商品')
   } catch (error: any) {
     handleRequestError(error, '载入演示商品失败')
@@ -203,8 +220,8 @@ async function waitForVideoJob(jobId: string): Promise<VideoJob> {
   for (let attempt = 0; attempt < 1200; attempt += 1) {
     const latest = await getVideoJob(jobId)
     job.value = latest
-    if (['succeeded', 'partial_failed', 'failed'].includes(latest.status)) return latest
-    await new Promise((resolve) => window.setTimeout(resolve, 1500))
+    if (FINAL_VIDEO_JOB_STATUSES.has(latest.status)) return latest
+    await new Promise((resolve) => window.setTimeout(resolve, VIDEO_JOB_POLL_INTERVAL_MS))
   }
   throw new Error('视频任务等待超时')
 }
@@ -212,23 +229,54 @@ async function generate() {
   if (!assets.value.length) return message.warning('请先上传商品图')
   if (!form.value.videoTypes.length) return message.warning('请至少选择一种视频类型')
   generating.value = true
+  cancelling.value = false
+  cancelRequested.value = false
   try {
     const payload = buildVideoPayload(assets.value.map((asset) => asset.id), form.value)
     job.value = createOptimisticVideoJob(payload)
     selected.value = []
     const created = await createVideoJob(payload)
     job.value = created
+    if (cancelRequested.value) job.value = await cancelVideoJob(created.id)
     const finished = await waitForVideoJob(created.id)
     selected.value = finished.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
     history.value = await listVideoJobs()
-    message[finished.status === 'failed' ? 'error' : finished.status === 'partial_failed' ? 'warning' : 'success'](
-      finished.status === 'succeeded' ? '视频已生成' : '部分视频生成失败，可查看原因或重试',
+    message[finished.status === 'failed' ? 'error' : ['partial_failed', 'partial_cancelled'].includes(finished.status) ? 'warning' : 'success'](
+      finished.status === 'succeeded'
+        ? '视频已生成'
+        : finished.status === 'cancelled'
+          ? '视频任务已取消'
+          : finished.status === 'partial_cancelled'
+            ? '视频任务已部分取消，已完成结果仍可使用'
+            : '部分视频生成失败，可查看原因或重试',
     )
   } catch (error: any) {
     if (job.value?.id.startsWith('optimistic-video-')) job.value = null
     handleRequestError(error, '视频任务创建失败')
   } finally {
     generating.value = false
+    cancelling.value = false
+  }
+}
+async function cancelGeneration() {
+  if (!job.value || cancelling.value || FINAL_VIDEO_JOB_STATUSES.has(job.value.status)) return
+  cancelRequested.value = true
+  cancelling.value = true
+  if (job.value.id.startsWith('optimistic-video-')) {
+    job.value = {
+      ...job.value,
+      status: 'cancelling',
+      items: job.value.items.map((item) => item.status === 'succeeded' ? item : { ...item, status: 'cancelling' }),
+    }
+    return
+  }
+  try {
+    job.value = await cancelVideoJob(job.value.id)
+    message.success('已提交取消请求')
+  } catch (error: any) {
+    handleRequestError(error, '取消视频任务失败')
+  } finally {
+    if (!generating.value) cancelling.value = false
   }
 }
 async function retryFailed() {
@@ -249,15 +297,38 @@ async function openHistoryJob(entry: VideoJob) {
   selected.value = job.value.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
 }
 function downloadSelected() {
-  if (!job.value || !selected.value.length) return message.warning('请先选择视频')
+  if (!job.value || !selected.value.length) return message.warning('请先选择成功视频')
   if (job.value.id.startsWith('optimistic-video-')) return message.warning('视频还在生成中')
-  window.open(videoDownloadUrl(job.value.id, selected.value), '_blank')
+  const successfulIds = new Set(job.value.items.filter((item) => item.status === 'succeeded').map((item) => item.id))
+  const itemIds = selected.value.filter((id) => successfulIds.has(id))
+  if (!itemIds.length) return message.warning('请先选择成功视频')
+  window.open(videoDownloadUrl(job.value.id, itemIds), '_blank')
 }
 function toggleSelected(id: string) {
+  const item = job.value?.items.find((entry) => entry.id === id)
+  if (!item || item.status !== 'succeeded') return
   selected.value = selected.value.includes(id) ? selected.value.filter((item) => item !== id) : [...selected.value, id]
 }
 
-defineExpose({ openHistoryJob })
+function startNewTask() {
+  assets.value = []
+  form.value = createDefaultVideoForm()
+  uploading.value = false
+  helping.value = false
+  generating.value = false
+  cancelling.value = false
+  cancelRequested.value = false
+  job.value = null
+  selected.value = []
+  previewItem.value = null
+  advancedOpen.value = false
+  aiSuggestion.value = ''
+  aiWriteOpen.value = false
+  sellingPointsEditing.value = false
+  aiSuggestionEditing.value = false
+}
+
+defineExpose({ openHistoryJob, startNewTask, dryRun })
 </script>
 
 <template>
@@ -274,7 +345,7 @@ defineExpose({ openHistoryJob })
         <div v-if="assets.length" class="uploaded-row">
           <div v-for="asset in assets" :key="asset.id">
             <img :src="asset.url" :alt="asset.original_name" />
-            <button class="remove-uploaded-asset" type="button" aria-label="删除已上传商品图" @click="assets = assets.filter((item) => item.id !== asset.id)"><CloseOutlined /></button>
+            <button class="remove-uploaded-asset" type="button" aria-label="删除已上传商品图" @click="removeAsset(asset.id)"><CloseOutlined /></button>
           </div>
         </div>
         <button v-else class="sample-button" @click="useSample">使用 Listingo 演示商品</button>
@@ -294,8 +365,8 @@ defineExpose({ openHistoryJob })
       <section class="video-section">
         <div class="section-title"><span>3</span><strong>商品卖点</strong><button :disabled="helping" @click="aiWrite"><ThunderboltOutlined />{{ helping ? '转写中...' : 'AI 转写' }}</button></div>
         <div class="markdown-input-frame video-selling-points-markdown-frame">
-          <button v-if="form.sellingPoints.trim() && !sellingPointsEditing" class="markdown-preview" type="button" aria-label="编辑商品卖点" @click="editSellingPoints" v-html="renderMarkdown(form.sellingPoints)"></button>
-          <textarea v-else ref="sellingPointsInput" v-model="form.sellingPoints" class="selling-points-input video-selling-points-input" rows="6" :placeholder="videoSellingPointsPlaceholder" @blur="sellingPointsEditing = false" />
+          <div v-if="form.sellingPoints.trim() && !sellingPointsEditing" class="markdown-preview main-copy-preview" role="button" tabindex="0" aria-label="编辑商品卖点" @click="showSellingPointsEditor" @keydown.enter.prevent="showSellingPointsEditor" @keydown.space.prevent="showSellingPointsEditor" v-html="renderMarkdown(form.sellingPoints)"></div>
+          <textarea v-else ref="sellingPointsInput" v-model="form.sellingPoints" class="selling-points-input video-selling-points-input" rows="6" :placeholder="videoSellingPointsPlaceholder" @focus="sellingPointsEditing = true" @blur="sellingPointsEditing = false" />
         </div>
         <Teleport to="body">
           <div v-if="aiWriteOpen" class="ai-write-popover" role="dialog" aria-label="AI 转写建议">
@@ -325,15 +396,14 @@ defineExpose({ openHistoryJob })
       <section class="video-section">
         <button class="advanced-trigger" @click="advancedOpen = !advancedOpen">高级设置</button>
         <div v-if="advancedOpen" class="video-advanced">
+          <label>时长<select v-model.number="form.duration"><option :value="5">5 秒</option><option :value="10">10 秒</option><option :value="15">15 秒</option></select></label>
           <label>清晰度<select v-model="form.resolution"><option>1080p</option><option>720p</option></select></label>
-          <label class="video-check"><input v-model="form.generateAudio" type="checkbox" />生成音频</label>
-          <label class="video-check"><input v-model="form.cameraFixed" type="checkbox" />固定镜头</label>
-          <label class="video-check"><input v-model="form.watermark" type="checkbox" />添加水印</label>
         </div>
         <label class="video-switch"><span><b>安全演示模式</b><small>本地模拟，不调用视频模型</small></span><input v-model="form.dryRun" type="checkbox" /></label>
       </section>
 
       <footer class="video-footer">
+        <button v-if="videoJobActive" class="secondary-action cancel-action" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined />{{ cancelling ? '取消中' : '取消任务' }}</button>
         <button :disabled="generating || !canGenerate" @click="generate"><RocketOutlined />{{ generating ? `正在生成 ${job?.progress || 0}%` : `生成 ${form.videoTypes.length} 条 15s 爆款视频` }}</button>
       </footer>
     </aside>
@@ -341,8 +411,9 @@ defineExpose({ openHistoryJob })
     <main class="video-main">
       <template v-if="job?.items.length">
         <div class="video-toolbar">
-          <div><i :class="{ failed: job.status === 'failed', warning: job.status === 'partial_failed' }" /><span><b>{{ job.status === 'succeeded' ? '生成爆款结果' : job.status === 'running' ? '正在生成视频' : '视频任务完成' }}</b><small>{{ job.count }} 条 · {{ job.dry_run ? 'Dryrun' : 'Live' }}</small></span></div>
+          <div><i :class="{ failed: ['failed', 'cancelled'].includes(job.status), warning: ['partial_failed', 'partial_cancelled', 'cancelling'].includes(job.status) }" /><span><b>{{ job.status === 'succeeded' ? '生成爆款结果' : job.status === 'cancelled' ? '视频任务已取消' : job.status === 'partial_cancelled' ? '视频任务已部分取消' : job.status === 'running' ? '正在生成视频' : '视频任务完成' }}</b><small>{{ job.count }} 条 · {{ job.dry_run ? 'Dryrun' : 'Live' }}</small></span></div>
           <div>
+            <button v-if="videoJobActive" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined />{{ cancelling ? '取消中' : '取消任务' }}</button>
             <button v-if="job.items.some((item) => item.status === 'failed')" @click="retryFailed"><ReloadOutlined />重试失败</button>
             <button @click="selected = job.items.filter((item) => item.status === 'succeeded').map((item) => item.id)">全选成功项</button>
             <button class="video-download" @click="downloadSelected"><DownloadOutlined />下载选中 ({{ selected.length }})</button>

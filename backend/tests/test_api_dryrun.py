@@ -6,7 +6,17 @@ from PIL import Image
 from sqlalchemy import select
 
 from backend.app.api.public import build_copywriting_user_prompt
-from backend.app.models import Provider
+from backend.app.models import (
+    AplusItem,
+    AplusJob,
+    GenerationItem,
+    GenerationJob,
+    Provider,
+    Prompt,
+    VideoItem,
+    VideoJob,
+    Workflow,
+)
 from backend.app.schemas import CopywritingAssistCreate
 from backend.app.services.aplus_jobs import DEMO_ASSETS
 
@@ -24,6 +34,20 @@ def upload_asset(client) -> str:
     )
     assert response.status_code == 201, response.text
     return response.json()["id"]
+
+
+def active_prompt_version_id(client, code: str) -> str:
+    with client.app.state.session_factory() as session:
+        prompt = session.scalar(select(Prompt).where(Prompt.code == code))
+        assert prompt is not None and prompt.active_version_id
+        return prompt.active_version_id
+
+
+def active_workflow_version_id(client, code: str) -> str:
+    with client.app.state.session_factory() as session:
+        workflow = session.scalar(select(Workflow).where(Workflow.code == code))
+        assert workflow is not None and workflow.active_version_id
+        return workflow.active_version_id
 
 
 def test_dryrun_job_completes_without_external_calls_and_exports_zip(client) -> None:
@@ -50,6 +74,8 @@ def test_dryrun_job_completes_without_external_calls_and_exports_zip(client) -> 
     assert detail["progress"] == 100
     assert len(detail["items"]) == 7
     assert all(item["status"] == "succeeded" for item in detail["items"])
+    assert all(item["prompt_text"] for item in detail["items"])
+    assert json.loads(detail["items"][0]["prompt_text"])["image_type"]
     assert all(item["versions"][0]["url"].startswith("/files/results/") for item in detail["items"])
 
     item_ids = ",".join(item["id"] for item in detail["items"][:3])
@@ -70,6 +96,119 @@ def test_dryrun_job_completes_without_external_calls_and_exports_zip(client) -> 
     assert long_image.headers["content-type"] == "image/png"
     with Image.open(BytesIO(long_image.content)) as image:
         assert image.height > image.width
+
+
+def test_generation_cancel_marks_unstarted_items_and_is_idempotent(client) -> None:
+    prompt_version_id = active_prompt_version_id(client, "ecommerce-meta")
+    workflow_version_id = active_workflow_version_id(client, "product-suite-v1")
+    with client.app.state.session_factory() as session:
+        job = GenerationJob(
+            status="running",
+            dry_run=True,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=3,
+            progress=30,
+            prompt_version_id=prompt_version_id,
+            workflow_version_id=workflow_version_id,
+        )
+        session.add(job)
+        session.flush()
+        session.add_all(
+            [
+                GenerationItem(job_id=job.id, index=0, image_type="hero", prompt_text="{}", status="succeeded"),
+                GenerationItem(job_id=job.id, index=1, image_type="queued", prompt_text="{}", status="queued"),
+                GenerationItem(job_id=job.id, index=2, image_type="running", prompt_text="{}", status="running"),
+            ]
+        )
+        session.commit()
+        job_id = job.id
+
+    response = client.post(f"/api/v1/generation-jobs/{job_id}/cancel")
+    assert response.status_code == 200, response.text
+    cancelled = response.json()
+    assert cancelled["status"] == "cancelling"
+    assert [item["status"] for item in cancelled["items"]] == ["succeeded", "cancelled", "running"]
+
+    repeated = client.post(f"/api/v1/generation-jobs/{job_id}/cancel")
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["status"] == "cancelling"
+
+
+def test_aplus_cancel_endpoints_are_idempotent_and_preserve_successes(client) -> None:
+    prompt_version_id = active_prompt_version_id(client, "aplus-meta")
+    with client.app.state.session_factory() as session:
+        plan_job = AplusJob(
+            job_type="plan",
+            status="queued",
+            dry_run=True,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=1,
+            prompt_version_id=prompt_version_id,
+        )
+        generation_job = AplusJob(
+            job_type="generation",
+            status="running",
+            dry_run=True,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=2,
+            prompt_version_id=prompt_version_id,
+        )
+        session.add_all([plan_job, generation_job])
+        session.flush()
+        session.add(AplusItem(job_id=plan_job.id, index=0, module_index=1, module_name="hero", prompt_text="{}", status="queued"))
+        session.add_all(
+            [
+                AplusItem(job_id=generation_job.id, index=0, module_index=1, module_name="hero", prompt_text="{}", status="succeeded"),
+                AplusItem(job_id=generation_job.id, index=1, module_index=2, module_name="detail", prompt_text="{}", status="queued"),
+            ]
+        )
+        session.commit()
+        plan_job_id = plan_job.id
+        generation_job_id = generation_job.id
+
+    plan_cancel = client.post(f"/api/v1/aplus-plan-jobs/{plan_job_id}/cancel")
+    assert plan_cancel.status_code == 200, plan_cancel.text
+    assert plan_cancel.json()["status"] == "cancelled"
+    assert client.post(f"/api/v1/aplus-plan-jobs/{plan_job_id}/cancel").json()["status"] == "cancelled"
+
+    generation_cancel = client.post(f"/api/v1/aplus-generation-jobs/{generation_job_id}/cancel")
+    assert generation_cancel.status_code == 200, generation_cancel.text
+    generation_payload = generation_cancel.json()
+    assert generation_payload["status"] == "partial_cancelled"
+    assert [item["status"] for item in generation_payload["items"]] == ["succeeded", "cancelled"]
+
+
+def test_video_cancel_endpoint_cancels_queued_items_idempotently(client) -> None:
+    prompt_version_id = active_prompt_version_id(client, "ecommerce-video-meta-15s")
+    with client.app.state.session_factory() as session:
+        job = VideoJob(
+            status="queued",
+            dry_run=True,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=2,
+            prompt_version_id=prompt_version_id,
+        )
+        session.add(job)
+        session.flush()
+        session.add_all(
+            [
+                VideoItem(job_id=job.id, index=0, video_type="ugc", status="queued"),
+                VideoItem(job_id=job.id, index=1, video_type="product", status="queued"),
+            ]
+        )
+        session.commit()
+        job_id = job.id
+
+    response = client.post(f"/api/v1/video-jobs/{job_id}/cancel")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["status"] == "cancelled"
+    assert [item["status"] for item in payload["items"]] == ["cancelled", "cancelled"]
+    assert client.post(f"/api/v1/video-jobs/{job_id}/cancel").json()["status"] == "cancelled"
 
 
 def test_aplus_dryrun_plan_and_generation_respect_amazon_a_plus_ratios(client) -> None:
@@ -134,6 +273,20 @@ def test_aplus_dryrun_plan_and_generation_respect_amazon_a_plus_ratios(client) -
     )
     assert archive.status_code == 200
     assert archive.headers["content-type"] == "application/zip"
+
+    original_item = generation["items"][0]
+    original_version_id = original_item["current_version_id"]
+    edited = client.post(
+        f"/api/v1/aplus-items/{original_item['id']}/versions",
+        json={"instruction": "Use a cleaner studio background"},
+    )
+    assert edited.status_code == 201, edited.text
+    edited_version = edited.json()
+    assert edited_version["parent_version_id"] == original_version_id
+    updated = client.get(f"/api/v1/aplus-generation-jobs/{generation['id']}").json()
+    updated_item = next(item for item in updated["items"] if item["id"] == original_item["id"])
+    assert updated_item["current_version_id"] == edited_version["id"]
+    assert len(updated_item["versions"]) == 2
 
 
 def test_aplus_advanced_mobile_only_uses_direct_generation_path(client) -> None:

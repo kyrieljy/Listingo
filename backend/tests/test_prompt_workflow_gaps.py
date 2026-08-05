@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -19,7 +20,7 @@ from backend.app.services.prompt_contract import (
 )
 from backend.app.services.execution import validate_plan_with_one_replan
 from backend.app.services.providers import ProviderClient
-from backend.app.services.video_jobs import extract_progress
+from backend.app.services.video_jobs import REMOTE_FAILED_STATUSES, extract_error_message, extract_progress, extract_status
 from backend.app.services.workflow_registry import default_workflow_json, validate_workflow_graph, workflow_preset_dicts
 
 
@@ -149,19 +150,19 @@ def test_seedance_2_provider_payload_uses_documented_task_schema() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
         seen.update(json.loads(request.content.decode()))
-        return httpx.Response(200, json={"code": "success", "data": {"request_id": "task-123"}})
+        return httpx.Response(200, json={"task_id": "task-123", "status": "queued"})
 
     provider = Provider(
         code="shengsuanyun-doubao-seedance-2-0",
         label="胜算云 Doubao-Seedance-2.0",
         capability="video",
-        adapter="shengsuanyun_tasks_generation",
-        base_url="https://router.shengsuanyun.com/api/v1/tasks/generations",
-        model_name="bytedance/doubao-seedance-2-0",
+        adapter="hellobabygo_video_generation",
+        base_url="https://api.hellobabygo.com/v1/videos",
+        model_name="seedance-2.0",
         enabled=True,
         is_default=True,
         is_fallback=False,
-        config_json=json.dumps({"timeout_seconds": 30, "return_last_frame": False, "draft": False, "tools": []}),
+        config_json=json.dumps({"timeout_seconds": 30}),
     )
 
     async def run() -> dict[str, object]:
@@ -170,37 +171,77 @@ def test_seedance_2_provider_payload_uses_documented_task_schema() -> None:
                 provider,
                 "sk-test",
                 "生成 15 秒商品视频",
-                "https://assets.example.test/product.png",
+                ["https://assets.example.test/product.png", "https://assets.example.test/detail.png"],
                 aspect_ratio="9:16",
                 duration=15,
                 resolution="720p",
-                generate_audio=True,
-                camera_fixed=True,
-                watermark=False,
             )
 
-    assert asyncio.run(run())["data"]["request_id"] == "task-123"
-    assert seen["url"] == "https://router.shengsuanyun.com/api/v1/tasks/generations"
-    assert seen["model"] == "bytedance/doubao-seedance-2-0"
-    assert seen["content"] == [
-        {"type": "text", "text": "生成 15 秒商品视频"},
-        {"type": "image_url", "role": "reference_image", "image_url": {"url": "https://assets.example.test/product.png"}},
-    ]
-    assert seen["ratio"] == "9:16"
+    assert asyncio.run(run())["task_id"] == "task-123"
+    assert seen["url"] == "https://api.hellobabygo.com/v1/videos"
+    assert seen["model"] == "seedance-2.0"
+    assert seen["images"] == ["https://assets.example.test/product.png", "https://assets.example.test/detail.png"]
+    assert seen["size"] == "9:16"
     assert seen["resolution"] == "720p"
-    assert seen["duration"] == 15
-    assert seen["generate_audio"] is True
-    assert seen["camera_fixed"] is True
-    assert seen["watermark"] is False
-    assert seen["return_last_frame"] is False
-    assert seen["draft"] is False
-    assert seen["tools"] == []
+    assert seen["seconds"] == 15
+    assert "content" not in seen
+    assert "ratio" not in seen
+    assert "duration" not in seen
+    assert "generate_audio" not in seen
+    assert "camera_fixed" not in seen
+    assert "watermark" not in seen
+    assert "return_last_frame" not in seen
+    assert "draft" not in seen
+    assert "tools" not in seen
+
+
+def test_seedance_2_rejects_invalid_resolution_before_submit() -> None:
+    provider = Provider(
+        code="shengsuanyun-doubao-seedance-2-0",
+        label="HelloBabyGo Seedance 2.0",
+        capability="video",
+        adapter="hellobabygo_video_generation",
+        base_url="https://api.hellobabygo.com/v1/videos",
+        model_name="seedance-2.0",
+        enabled=True,
+        is_default=True,
+        is_fallback=False,
+        config_json=json.dumps({"timeout_seconds": 30}),
+    )
+
+    async def run() -> dict[str, object]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: httpx.Response(500))) as http_client:
+            return await ProviderClient(http_client).submit_video_task(
+                provider,
+                "sk-test",
+                "生成商品视频",
+                ["https://assets.example.test/product.png"],
+                aspect_ratio="9:16",
+                duration=15,
+                resolution="4K",
+            )
+
+    with pytest.raises(RuntimeError, match="resolution=4k 不合法"):
+        asyncio.run(run())
 
 
 def test_seedance_progress_accepts_percent_strings() -> None:
     assert extract_progress({"progress": "80%"}) == 80
     assert extract_progress({"data": {"progress": "99.8%"}}) == 99
     assert extract_progress({"progress": "not-ready"}) is None
+
+
+def test_seedance_failed_status_from_http_200_is_failure_state() -> None:
+    assert extract_status({"status": "failed", "error": {"message": "provider failed"}}) == "FAILED"
+    assert extract_error_message({"status": "failed", "error": {"message": "provider failed"}}) == "provider failed"
+    assert "FAILED" in REMOTE_FAILED_STATUSES
+
+
+def test_aplus_generation_runs_items_through_configured_concurrency_guard() -> None:
+    source = Path("backend/app/services/aplus_jobs.py").read_text(encoding="utf-8")
+
+    assert "async def guarded(item_id: str) -> None:" in source
+    assert "await asyncio.gather(*(guarded(item_id) for item_id in item_ids))" in source
 
 
 def test_seed_exposes_all_prompt_engineering_assets(client) -> None:

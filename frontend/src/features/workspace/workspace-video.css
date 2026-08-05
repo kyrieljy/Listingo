@@ -37,9 +37,11 @@
 .video-switch input:checked { background: #6c5ce7; }
 .video-switch input:after { content: ""; width: 17px; height: 17px; border-radius: 50%; background: #fff; position: absolute; top: 2px; left: 2px; transition: .2s; }
 .video-switch input:checked:after { left: 19px; }
-.video-footer { margin-top: auto; padding: 16px 22px; position: sticky; bottom: 0; background: #fff; border-top: 1px solid #e8e9ef; }
+.video-footer { margin-top: auto; padding: 16px 22px; position: sticky; bottom: 0; background: #fff; border-top: 1px solid #e8e9ef; display: grid; gap: 9px; }
 .video-footer button { width: 100%; height: 40px; border-radius: 9px; display: flex; align-items: center; justify-content: center; gap: 8px; color: #fff; background: #1f2329; font-weight: 750; }
+.video-footer button.cancel-action { color: #d4380d; background: #fff7f0; border: 1px solid #ffd8bf; }
 .video-footer button:disabled { background: #cfd3da; cursor: not-allowed; }
+.video-footer button.cancel-action:disabled { color: #d48806; background: #fff7e6; }
 .video-main { overflow: auto; padding: 26px; }
 .video-empty { min-height: 100%; display: grid; place-items: center; align-content: center; padding: 32px; }
 .video-empty-stage {

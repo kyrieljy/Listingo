@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { CheckCircleFilled, EditOutlined, EyeOutlined, LoadingOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import { CheckCircleFilled, EditOutlined, EyeOutlined, LoadingOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons-vue'
 import type { JobItem } from '../../api/client'
 
 const props = defineProps<{ items: JobItem[]; selected: string[] }>()
-const emit = defineEmits<{ toggle: [id: string]; edit: [item: JobItem]; preview: [item: JobItem]; retry: [item: JobItem] }>()
+const emit = defineEmits<{ toggle: [id: string]; edit: [item: JobItem]; preview: [item: JobItem]; retry: [item: JobItem]; script: [item: JobItem] }>()
 const selectedSet = computed(() => new Set(props.selected))
 const currentUrl = (item: JobItem) => item.versions.find((version) => version.id === item.current_version_id)?.url ?? item.versions.at(-1)?.url
 </script>
@@ -12,7 +12,7 @@ const currentUrl = (item: JobItem) => item.versions.find((version) => version.id
 <template>
   <div class="result-grid">
     <article v-for="item in items" :key="item.id" class="result-card" :class="{ selected: selectedSet.has(item.id) }">
-      <button class="select-dot" type="button" :aria-label="`选择第 ${item.index + 1} 张`" @click="emit('toggle', item.id)">
+      <button class="select-dot" type="button" :disabled="item.status !== 'succeeded'" :aria-label="`选择第 ${item.index + 1} 张`" @click="emit('toggle', item.id)">
         <CheckCircleFilled v-if="selectedSet.has(item.id)" />
       </button>
       <img v-if="currentUrl(item)" :src="currentUrl(item)" :alt="`第 ${item.index + 1} 张生成结果`" />
@@ -21,7 +21,8 @@ const currentUrl = (item: JobItem) => item.versions.find((version) => version.id
         <div><span>第 {{ item.index + 1 }} 张 · {{ item.status }}</span></div>
         <div class="card-actions">
           <button title="预览" @click="emit('preview', item)"><EyeOutlined /></button>
-          <button title="二次编辑" @click="emit('edit', item)"><EditOutlined /></button>
+          <button title="二次编辑" :disabled="item.status !== 'succeeded'" @click="emit('edit', item)"><EditOutlined /></button>
+          <button title="脚本" :disabled="!item.prompt_text && !item.error" @click="emit('script', item)"><PlayCircleOutlined /></button>
           <button v-if="item.status === 'failed'" title="重试" @click="emit('retry', item)"><ReloadOutlined /></button>
         </div>
       </div>
@@ -35,5 +36,11 @@ const currentUrl = (item: JobItem) => item.versions.find((version) => version.id
   place-items: center;
   padding: 0;
   line-height: 0;
+}
+
+.select-dot:disabled,
+.card-actions button:disabled {
+  opacity: .45;
+  cursor: not-allowed;
 }
 </style>

@@ -87,7 +87,7 @@ def test_seedance_provider_test_does_not_require_openai_model_directory_membersh
     provider = next(item for item in providers if item["code"] == "shengsuanyun-doubao-seedance-2-0")
     update = client.patch(
         f"/api/v1/admin/providers/{provider['id']}",
-        json={"api_key": "shengsuanyun-secret-key", "enabled": True, "timeout_seconds": 60},
+        json={"api_key": "hellobabygo-secret-key", "enabled": True, "timeout_seconds": 60},
     )
     assert update.status_code == 200, update.text
     seen: dict[str, str] = {}
@@ -111,9 +111,9 @@ def test_seedance_provider_test_does_not_require_openai_model_directory_membersh
     assert response.status_code == 200, response.text
     result = response.json()
     assert result["ok"] is True
-    assert seen["url"] == "https://router.shengsuanyun.com/api/v1/models"
+    assert seen["url"] == "https://api.hellobabygo.com/v1/models"
     assert seen["authorization"].startswith("Bearer ")
-    assert result["message"] == "连接可用，未发起计费视频任务"
+    assert result["message"] == "连接可用，未发起计费生成任务"
 
 
 def test_prompt_version_can_be_saved_compared_and_activated(client) -> None:

@@ -6,6 +6,8 @@ import {
   CloseOutlined,
   CloudUploadOutlined,
   DownloadOutlined,
+  EditOutlined,
+  EyeOutlined,
   LoadingOutlined,
   MinusOutlined,
   PlayCircleOutlined,
@@ -16,8 +18,11 @@ import {
 import {
   assistCopywriting,
   aplusDownloadUrl,
+  cancelAplusGenerationJob,
+  cancelAplusPlanJob,
   createAplusGenerationJob,
   createAplusPlanJob,
+  editAplusItem,
   getAplusGenerationJob,
   getAplusPlanJob,
   uploadAsset,
@@ -48,18 +53,25 @@ const uploading = ref(false)
 const helping = ref(false)
 const planning = ref(false)
 const generating = ref(false)
+const cancelling = ref(false)
+const cancelRequested = ref(false)
 const form = ref(createDefaultAplusForm())
 const planJob = ref<AplusJob | null>(null)
 const generationJob = ref<AplusJob | null>(null)
 const selectedPlanItemIds = ref<string[]>([])
 const selectedResultIds = ref<string[]>([])
 const previewItem = ref<AplusItem | null>(null)
+const scriptItem = ref<AplusItem | null>(null)
+const editItemState = ref<AplusItem | null>(null)
+const editInstruction = ref('请保持商品主体一致，优化画面质感和版式')
 const aiSuggestion = ref('')
 const aiWriteOpen = ref(false)
 const productInfoEditing = ref(false)
 const aiSuggestionEditing = ref(false)
 const productInfoInput = ref<HTMLTextAreaElement | null>(null)
 const aiSuggestionInput = ref<HTMLTextAreaElement | null>(null)
+const APLUS_JOB_POLL_INTERVAL_MS = 500
+const FINAL_APLUS_JOB_STATUSES = new Set(['succeeded', 'partial_failed', 'failed', 'cancelled', 'partial_cancelled'])
 
 const productInfoPlaceholder = `可选：填写商品事实、参数、卖点。
 建议包含商品名称、核心卖点、适用人群、场景和必须遵循的事实。`
@@ -104,6 +116,28 @@ const outputTargets = computed(() => buildAplusOutputTargets(form.value))
 const selectedModuleTotal = computed(() => aplusModuleTotal(form.value.selectedModules))
 const plannedResultCount = computed(() => selectedModuleTotal.value * outputTargets.value.length)
 const canPlan = computed(() => assets.value.length > 0 && selectedModuleTotal.value > 0 && outputTargets.value.length > 0)
+const aplusTaskActive = computed(() => Boolean((planJob.value && !FINAL_APLUS_JOB_STATUSES.has(planJob.value.status)) || (generationJob.value && !FINAL_APLUS_JOB_STATUSES.has(generationJob.value.status))))
+const previewUrl = computed(() => previewItem.value ? currentUrl(previewItem.value) : '')
+const editPreviewUrl = computed(() => editItemState.value ? currentUrl(editItemState.value) : '')
+const dryRun = computed(() => form.value.dryRun)
+const generationOutputSummary = computed(() => {
+  const job = generationJob.value
+  if (!job) return ''
+  const targetRows = Array.isArray(job.params.output_targets) ? job.params.output_targets : []
+  const fromParams = targetRows
+    .map((target) => {
+      if (!target || typeof target !== 'object') return ''
+      const mode = String((target as Record<string, unknown>).mode || '')
+      const aspectRatio = String((target as Record<string, unknown>).aspect_ratio || '')
+      return mode && aspectRatio ? aplusTargetLabel(mode, aspectRatio) : ''
+    })
+    .filter(Boolean)
+  if (fromParams.length) return [...new Set(fromParams)].join(' / ')
+  const fromItems = job.items
+    .map((item) => aplusTargetLabel(item.output_mode || 'detail', item.aspect_ratio))
+    .filter(Boolean)
+  return [...new Set(fromItems)].join(' / ')
+})
 
 watch(() => form.value.platform, (platform) => {
   if (!isAplusAmazon(platform) && form.value.outputSpec.startsWith('amazon_aplus')) {
@@ -118,7 +152,7 @@ function requestDetail(error: any): string {
   return detail || error?.message || ''
 }
 
-async function editProductInfo() {
+async function showProductInfoEditor() {
   productInfoEditing.value = true
   await nextTick()
   productInfoInput.value?.focus()
@@ -128,6 +162,19 @@ async function editAiSuggestion() {
   aiSuggestionEditing.value = true
   await nextTick()
   aiSuggestionInput.value?.focus()
+}
+
+function clearCopywritingState() {
+  aiSuggestion.value = ''
+  aiWriteOpen.value = false
+  aiSuggestionEditing.value = false
+  productInfoEditing.value = false
+  form.value.productInfo = ''
+}
+
+function removeAsset(id: string) {
+  assets.value = assets.value.filter((asset) => asset.id !== id)
+  clearCopywritingState()
 }
 
 async function filesSelected(event: Event) {
@@ -140,6 +187,7 @@ async function filesSelected(event: Event) {
   const selectedFiles = Array.from(input.files ?? [])
   const files = selectedFiles.slice(0, 3 - assets.value.length)
   if (!files.length) return
+  clearCopywritingState()
   uploading.value = true
   try {
     for (const file of files) assets.value.push(await uploadAsset(file))
@@ -156,7 +204,9 @@ async function useSample() {
   uploading.value = true
   try {
     const blob = await (await fetch('/demo/aplus-outdoor-source.png')).blob()
-    assets.value = [await uploadAsset(new File([blob], 'listingo-demo-outdoor-pack.png', { type: 'image/png' }))]
+    const demoAsset = await uploadAsset(new File([blob], 'listingo-demo-outdoor-pack.png', { type: 'image/png' }))
+    clearCopywritingState()
+    assets.value = [demoAsset]
     message.success('已载入演示商品')
   } catch {
     message.error('载入演示商品失败，请确认后端已启动')
@@ -348,8 +398,8 @@ async function waitForPlan(jobId: string): Promise<AplusJob> {
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const latest = preservePendingAplusItems(await getAplusPlanJob(jobId), planJob.value)
     planJob.value = latest
-    if (['succeeded', 'failed'].includes(latest.status)) return latest
-    await new Promise((resolve) => window.setTimeout(resolve, 1000))
+    if (FINAL_APLUS_JOB_STATUSES.has(latest.status)) return latest
+    await new Promise((resolve) => window.setTimeout(resolve, APLUS_JOB_POLL_INTERVAL_MS))
   }
   throw new Error('A+ 方案等待超时')
 }
@@ -358,8 +408,8 @@ async function waitForGeneration(jobId: string): Promise<AplusJob> {
   for (let attempt = 0; attempt < 900; attempt += 1) {
     const latest = preservePendingAplusItems(await getAplusGenerationJob(jobId), generationJob.value)
     generationJob.value = latest
-    if (['succeeded', 'partial_failed', 'failed'].includes(latest.status)) return latest
-    await new Promise((resolve) => window.setTimeout(resolve, 1000))
+    if (FINAL_APLUS_JOB_STATUSES.has(latest.status)) return latest
+    await new Promise((resolve) => window.setTimeout(resolve, APLUS_JOB_POLL_INTERVAL_MS))
   }
   throw new Error('A+ 图片生成等待超时')
 }
@@ -380,21 +430,25 @@ async function generateImages() {
   selectedResultIds.value = []
   planning.value = true
   generating.value = true
+  cancelling.value = false
+  cancelRequested.value = false
   try {
     const createdPlan = preservePendingAplusItems(await createAplusPlanJob(planPayload), planJob.value)
     planJob.value = createdPlan
+    if (cancelRequested.value) planJob.value = preservePendingAplusItems(await cancelAplusPlanJob(createdPlan.id), planJob.value)
     const finishedPlan = await waitForPlan(createdPlan.id)
-    if (finishedPlan.status === 'failed') {
+    if (finishedPlan.status !== 'succeeded') {
       if (generationJob.value) {
-        const error = finishedPlan.error || 'A+ 方案生成失败'
+        const cancelled = finishedPlan.status === 'cancelled' || finishedPlan.status === 'partial_cancelled'
+        const error = cancelled ? 'A+ 方案任务已取消' : finishedPlan.error || 'A+ 方案生成失败'
         generationJob.value = {
           ...generationJob.value,
-          status: 'failed',
+          status: cancelled ? finishedPlan.status : 'failed',
           error,
-          items: generationJob.value.items.map((item) => ({ ...item, status: 'failed', error: item.error || error })),
+          items: generationJob.value.items.map((item) => ({ ...item, status: cancelled ? 'cancelled' : 'failed', error: item.error || error })),
         }
       }
-      message.error(finishedPlan.error || 'A+ 方案生成失败')
+      message[finishedPlan.status === 'cancelled' || finishedPlan.status === 'partial_cancelled' ? 'success' : 'error'](finishedPlan.status === 'cancelled' || finishedPlan.status === 'partial_cancelled' ? 'A+ 方案任务已取消' : finishedPlan.error || 'A+ 方案生成失败')
       return
     }
     selectedPlanItemIds.value = finishedPlan.items.map((item) => item.id)
@@ -407,10 +461,17 @@ async function generateImages() {
     }
     const createdGeneration = preservePendingAplusItems(await createAplusGenerationJob(generationPayload), generationJob.value)
     generationJob.value = createdGeneration
+    if (cancelRequested.value) generationJob.value = preservePendingAplusItems(await cancelAplusGenerationJob(createdGeneration.id), generationJob.value)
     const finished = await waitForGeneration(createdGeneration.id)
     selectedResultIds.value = finished.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
-    message[finished.status === 'succeeded' ? 'success' : finished.status === 'partial_failed' ? 'warning' : 'error'](
-      finished.status === 'succeeded' ? 'A+ 图片生成完成' : finished.error || 'A+ 图片生成存在失败项',
+    message[finished.status === 'failed' ? 'error' : ['partial_failed', 'partial_cancelled'].includes(finished.status) ? 'warning' : 'success'](
+      finished.status === 'succeeded'
+        ? 'A+ 图片生成完成'
+        : finished.status === 'cancelled'
+          ? 'A+ 图片任务已取消'
+          : finished.status === 'partial_cancelled'
+            ? 'A+ 图片任务已部分取消，已完成结果仍可使用'
+            : finished.error || 'A+ 图片生成存在失败项',
     )
   } catch (error: any) {
     if (generationJob.value?.id.startsWith('optimistic-aplus-generation-')) {
@@ -426,6 +487,41 @@ async function generateImages() {
   } finally {
     planning.value = false
     generating.value = false
+    cancelling.value = false
+  }
+}
+
+function markAplusJobCancelling(current: AplusJob | null): AplusJob | null {
+  if (!current) return current
+  return {
+    ...current,
+    status: 'cancelling',
+    items: current.items.map((item) => item.status === 'succeeded' ? item : { ...item, status: 'cancelling' }),
+  }
+}
+
+async function cancelGeneration() {
+  if (cancelling.value || !aplusTaskActive.value) return
+  cancelRequested.value = true
+  cancelling.value = true
+  const activeGeneration = generationJob.value && !FINAL_APLUS_JOB_STATUSES.has(generationJob.value.status) ? generationJob.value : null
+  const activePlan = planJob.value && !FINAL_APLUS_JOB_STATUSES.has(planJob.value.status) ? planJob.value : null
+  if (activeGeneration?.id.startsWith('optimistic-aplus-generation-') || activePlan?.id.startsWith('optimistic-aplus-plan-')) {
+    generationJob.value = markAplusJobCancelling(generationJob.value)
+    planJob.value = markAplusJobCancelling(planJob.value)
+    return
+  }
+  try {
+    if (activeGeneration) {
+      generationJob.value = preservePendingAplusItems(await cancelAplusGenerationJob(activeGeneration.id), generationJob.value)
+    } else if (activePlan) {
+      planJob.value = preservePendingAplusItems(await cancelAplusPlanJob(activePlan.id), planJob.value)
+    }
+    message.success('已提交取消请求')
+  } catch (error: any) {
+    message.error(requestDetail(error) || '取消任务失败')
+  } finally {
+    if (!planning.value && !generating.value) cancelling.value = false
   }
 }
 
@@ -467,7 +563,34 @@ function hasScript(item: AplusItem): boolean {
   return Boolean(item.image_prompt.trim() || item.copy_requirements.trim() || item.prompt_text.trim() || item.error?.trim())
 }
 
+function openPreview(item: AplusItem) {
+  if (!currentUrl(item)) return
+  previewItem.value = item
+}
+
+function openEdit(item: AplusItem) {
+  if (item.status !== 'succeeded' || !currentUrl(item)) return
+  editItemState.value = item
+}
+
+async function submitEdit() {
+  if (!editItemState.value || !generationJob.value) return
+  try {
+    const version = await editAplusItem(editItemState.value.id, editInstruction.value)
+    generationJob.value = await getAplusGenerationJob(generationJob.value.id)
+    editItemState.value = generationJob.value.items.find((item) => item.id === editItemState.value?.id) ?? null
+    if (editItemState.value && !editItemState.value.current_version_id) editItemState.value.current_version_id = version.id
+    message.success('已创建新的 A+ 子版本')
+  } catch (error: any) {
+    message.error(requestDetail(error) || 'A+ 二次编辑失败')
+  } finally {
+    editItemState.value = null
+  }
+}
+
 function toggleResult(id: string) {
+  const item = generationJob.value?.items.find((entry) => entry.id === id)
+  if (!item || item.status !== 'succeeded') return
   selectedResultIds.value = selectedResultIds.value.includes(id)
     ? selectedResultIds.value.filter((item) => item !== id)
     : [...selectedResultIds.value, id]
@@ -475,13 +598,38 @@ function toggleResult(id: string) {
 
 function downloadResults() {
   if (!generationJob.value || !selectedResultIds.value.length) {
-    message.warning('请至少选择一张 A+ 结果')
+    message.warning('请至少选择一张成功的 A+ 结果')
     return
   }
-  window.open(aplusDownloadUrl(generationJob.value.id, selectedResultIds.value), '_blank')
+  const successfulIds = new Set(generationJob.value.items.filter((item) => item.status === 'succeeded').map((item) => item.id))
+  const itemIds = selectedResultIds.value.filter((id) => successfulIds.has(id))
+  if (!itemIds.length) return message.warning('请至少选择一张成功的 A+ 结果')
+  window.open(aplusDownloadUrl(generationJob.value.id, itemIds), '_blank')
 }
 
-defineExpose({ openHistoryJob })
+function startNewTask() {
+  assets.value = []
+  uploading.value = false
+  helping.value = false
+  planning.value = false
+  generating.value = false
+  cancelling.value = false
+  cancelRequested.value = false
+  form.value = createDefaultAplusForm()
+  planJob.value = null
+  generationJob.value = null
+  selectedPlanItemIds.value = []
+  selectedResultIds.value = []
+  previewItem.value = null
+  scriptItem.value = null
+  editItemState.value = null
+  aiSuggestion.value = ''
+  aiWriteOpen.value = false
+  productInfoEditing.value = false
+  aiSuggestionEditing.value = false
+}
+
+defineExpose({ openHistoryJob, startNewTask, dryRun })
 </script>
 
 <template>
@@ -497,7 +645,7 @@ defineExpose({ openHistoryJob })
       <div v-if="assets.length" class="uploaded-row">
         <div v-for="asset in assets" :key="asset.id">
           <img :src="asset.url" :alt="asset.original_name" />
-          <button class="remove-uploaded-asset" type="button" @click="assets = assets.filter((item) => item.id !== asset.id)"><CloseOutlined /></button>
+          <button class="remove-uploaded-asset" type="button" @click="removeAsset(asset.id)"><CloseOutlined /></button>
         </div>
       </div>
       <button v-else class="sample-button" type="button" @click="useSample">使用 Listingo 演示商品</button>
@@ -515,8 +663,8 @@ defineExpose({ openHistoryJob })
     <section class="form-section">
       <div class="section-title"><span>3</span><strong>商品卖点与要求</strong><button :disabled="helping" @click="aiWrite"><ThunderboltOutlined />{{ helping ? '转写中...' : 'AI 转写' }}</button></div>
       <div class="markdown-input-frame aplus-product-info-markdown-frame">
-        <button v-if="form.productInfo.trim() && !productInfoEditing" class="markdown-preview" type="button" aria-label="编辑商品卖点与要求" @click="editProductInfo" v-html="renderMarkdown(form.productInfo)"></button>
-        <textarea v-else ref="productInfoInput" v-model="form.productInfo" class="aplus-product-info selling-points-input" rows="6" :placeholder="productInfoPlaceholder" @blur="productInfoEditing = false" />
+        <div v-if="form.productInfo.trim() && !productInfoEditing" class="markdown-preview main-copy-preview" role="button" tabindex="0" aria-label="编辑商品卖点与要求" @click="showProductInfoEditor" @keydown.enter.prevent="showProductInfoEditor" @keydown.space.prevent="showProductInfoEditor" v-html="renderMarkdown(form.productInfo)"></div>
+        <textarea v-else ref="productInfoInput" v-model="form.productInfo" class="aplus-product-info selling-points-input" rows="6" :placeholder="productInfoPlaceholder" @focus="productInfoEditing = true" @blur="productInfoEditing = false" />
       </div>
       <Teleport to="body">
         <div v-if="aiWriteOpen" class="ai-write-popover" role="dialog" aria-label="AI 转写建议">
@@ -565,6 +713,7 @@ defineExpose({ openHistoryJob })
     </section>
 
     <div class="panel-footer aplus-actions">
+      <button v-if="aplusTaskActive" class="secondary-action cancel-action" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined />{{ cancelling ? '取消中' : '取消任务' }}</button>
       <button class="generate-button" :disabled="planning || generating || !canPlan" @click="generateImages"><RocketOutlined />{{ planning ? `生成方案 ${planJob?.progress || 0}%` : generating ? `生成图片 ${generationJob?.progress || 0}%` : `生成图片 ${plannedResultCount} 张` }}</button>
     </div>
   </aside>
@@ -573,12 +722,16 @@ defineExpose({ openHistoryJob })
     <div v-if="generationJob?.items.length" class="aplus-workspace">
       <section class="aplus-results">
         <header>
-          <div><strong>{{ generationJob.status === 'succeeded' ? 'A+ 已生成' : generationJob.status === 'running' ? 'A+ 正在生成' : 'A+ 生成结果' }}</strong><small>{{ generationJob.items.length }} 张 · {{ generationJob.dry_run ? 'Dryrun' : 'Live' }} · {{ outputTargets.map((target) => aplusTargetLabel(target.mode, target.aspect_ratio)).join(' / ') }}</small></div>
-          <button class="download-button" :disabled="!selectedResultIds.length" @click="downloadResults"><DownloadOutlined />下载选中 ({{ selectedResultIds.length }})</button>
+          <div><strong>{{ generationJob.status === 'succeeded' ? 'A+ 已生成' : generationJob.status === 'running' ? 'A+ 正在生成' : 'A+ 生成结果' }}</strong><small>{{ generationJob.items.length }} 张 · {{ generationJob.dry_run ? 'Dryrun' : 'Live' }}<template v-if="generationOutputSummary"> · {{ generationOutputSummary }}</template></small></div>
+          <div class="aplus-result-actions">
+            <button v-if="aplusTaskActive" class="secondary-action cancel-action" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined />{{ cancelling ? '取消中' : '取消任务' }}</button>
+            <button class="secondary-action" @click="selectedResultIds = generationJob.items.filter((item) => item.status === 'succeeded').map((item) => item.id)">全选成功项</button>
+            <button class="download-button" :disabled="!selectedResultIds.length" @click="downloadResults"><DownloadOutlined />下载选中 ({{ selectedResultIds.length }})</button>
+          </div>
         </header>
         <div class="aplus-result-grid">
-          <article v-for="item in generationJob.items" :key="item.id" class="aplus-result-card" :class="{ selected: selectedResultIds.includes(item.id), failed: item.status === 'failed' }">
-            <button class="select-dot" type="button" @click="toggleResult(item.id)"><CheckOutlined v-if="selectedResultIds.includes(item.id)" /></button>
+          <article v-for="item in generationJob.items" :key="item.id" class="aplus-result-card" :class="{ selected: selectedResultIds.includes(item.id), failed: ['failed', 'cancelled'].includes(item.status) }">
+            <button class="select-dot" type="button" :disabled="item.status !== 'succeeded'" @click="toggleResult(item.id)"><CheckOutlined v-if="selectedResultIds.includes(item.id)" /></button>
             <img v-if="currentUrl(item)" :src="currentUrl(item)" :alt="item.module_name" />
             <div v-else class="pending-image"><LoadingOutlined spin /><span>{{ item.status === 'failed' ? '生成失败' : '生成中' }}</span></div>
             <footer>
@@ -587,7 +740,11 @@ defineExpose({ openHistoryJob })
                 <span>第 {{ item.index + 1 }} 张 · {{ aplusTargetLabel(item.output_mode, item.aspect_ratio) }}</span>
                 <small v-if="item.error">{{ item.error }}</small>
               </div>
-              <button type="button" :disabled="!hasScript(item)" @click="previewItem = item"><PlayCircleOutlined />脚本</button>
+              <div class="aplus-card-actions">
+                <button type="button" :disabled="!currentUrl(item)" @click="openPreview(item)"><EyeOutlined />预览</button>
+                <button type="button" :disabled="item.status !== 'succeeded'" @click="openEdit(item)"><EditOutlined />编辑</button>
+                <button type="button" :disabled="!hasScript(item)" @click="scriptItem = item"><PlayCircleOutlined />脚本</button>
+              </div>
             </footer>
           </article>
         </div>
@@ -614,7 +771,21 @@ defineExpose({ openHistoryJob })
     </div>
   </main>
 
-  <a-modal :open="!!previewItem" title="A+ 图片脚本" :footer="null" width="760" @update:open="(open) => { if (!open) previewItem = null }">
-    <div v-if="previewItem" class="aplus-script-preview" v-html="renderMarkdown(scriptMarkdown(previewItem))" />
+  <a-modal :open="!!previewItem" title="A+ 图片预览" :footer="null" width="760" @update:open="(open) => { if (!open) previewItem = null }">
+    <img v-if="previewUrl" class="modal-preview aplus-modal-preview" :src="previewUrl" alt="A+ 图片预览" />
+    <div v-if="previewItem?.versions.length" class="version-strip">
+      <button v-for="version in previewItem.versions" :key="version.id" @click="previewItem && (previewItem.current_version_id = version.id)">V{{ version.version_no }} · {{ version.instruction }}</button>
+    </div>
+  </a-modal>
+
+  <a-modal :open="!!editItemState" title="A+ 二次编辑" ok-text="生成新版本" cancel-text="取消" @ok="submitEdit" @update:open="(open) => { if (!open) editItemState = null }">
+    <div class="edit-dialog">
+      <img v-if="editPreviewUrl" :src="editPreviewUrl" alt="当前 A+ 版本" />
+      <label>修改要求<textarea v-model="editInstruction" rows="5" /></label>
+    </div>
+  </a-modal>
+
+  <a-modal :open="!!scriptItem" title="A+ 图片脚本" :footer="null" width="760" @update:open="(open) => { if (!open) scriptItem = null }">
+    <div v-if="scriptItem" class="aplus-script-preview" v-html="renderMarkdown(scriptMarkdown(scriptItem))" />
   </a-modal>
 </template>

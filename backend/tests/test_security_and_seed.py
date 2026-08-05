@@ -77,6 +77,10 @@ def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(clien
         assert json.loads(qwen.config_json)["route_roles"] == {"llm": "fallback"}
         assert json.loads(nano_pro.config_json)["route_roles"] == {"suite_fidelity": "primary"}
         assert json.loads(nano.config_json)["route_roles"] == {"suite_fidelity": "fallback"}
+        assert "quality" not in json.loads(nano_pro.config_json)
+        assert "format" not in json.loads(nano_pro.config_json)
+        assert "quality" not in json.loads(nano.config_json)
+        assert "format" not in json.loads(nano.config_json)
         assert doubao.base_url.endswith("/api/v1/chat/completions")
         assert doubao.model_name == "bytedance/doubao-seed-2-0-mini"
         assert nano_pro.adapter == "hellobabygo_image_generation"

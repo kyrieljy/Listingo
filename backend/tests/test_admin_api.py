@@ -1,3 +1,4 @@
+import json
 from io import BytesIO
 
 import httpx
@@ -80,6 +81,42 @@ def test_provider_api_updates_business_route_roles_and_clears_peer_role(client) 
         json={"route_roles": {"llm": "primary"}},
     )
     assert rejected.status_code == 422
+
+
+def test_hellobabygo_image_provider_drops_unused_quality_and_format_fields(client) -> None:
+    with client.app.state.session_factory() as session:
+        provider = session.scalar(select(Provider).where(Provider.code == "yunwu-nano-pro"))
+        assert provider is not None
+        config = json.loads(provider.config_json)
+        config.update({"quality": "medium", "format": "png", "style": "vivid", "response_format": "url"})
+        provider.config_json = json.dumps(config)
+        provider_id = provider.id
+        session.commit()
+
+    providers = client.get("/api/v1/admin/providers").json()
+    listed = next(item for item in providers if item["code"] == "yunwu-nano-pro")
+    assert "quality" not in listed["config"]
+    assert "format" not in listed["config"]
+    assert "style" not in listed["config"]
+    assert "response_format" not in listed["config"]
+
+    response = client.patch(
+        f"/api/v1/admin/providers/{provider_id}",
+        json={"quality": "high", "format": "webp", "style": "natural", "enabled": True},
+    )
+
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert "quality" not in updated["config"]
+    assert "format" not in updated["config"]
+    assert "style" not in updated["config"]
+    with client.app.state.session_factory() as session:
+        persisted = session.get(Provider, provider_id)
+        assert persisted is not None
+        persisted_config = json.loads(persisted.config_json)
+        assert "quality" not in persisted_config
+        assert "format" not in persisted_config
+        assert "style" not in persisted_config
 
 
 def test_seedance_provider_test_does_not_require_openai_model_directory_membership(client, monkeypatch) -> None:

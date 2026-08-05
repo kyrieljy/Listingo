@@ -50,6 +50,24 @@ from backend.app.services.workflow_registry import validate_workflow_graph
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
 
+HELLOBABYGO_UNUSED_IMAGE_CONFIG_KEYS = (
+    "aspect_ratio",
+    "compression",
+    "format",
+    "quality",
+    "response_format",
+    "style",
+)
+
+
+def provider_admin_config(provider: Provider, config: dict | None = None) -> dict:
+    normalized = dict(config if config is not None else provider_config(provider))
+    if provider.adapter == HELLOBABYGO_IMAGE_ADAPTER:
+        for key in HELLOBABYGO_UNUSED_IMAGE_CONFIG_KEYS:
+            normalized.pop(key, None)
+    return normalized
+
+
 def provider_dict(provider: Provider, request: Request) -> dict:
     plain = request.app.state.cipher.decrypt(provider.encrypted_api_key) if provider.encrypted_api_key else None
     return {
@@ -66,7 +84,7 @@ def provider_dict(provider: Provider, request: Request) -> dict:
         "route_roles": provider_route_roles(provider),
         "has_api_key": bool(plain),
         "api_key_masked": mask_api_key(plain),
-        "config": json.loads(provider.config_json),
+        "config": provider_admin_config(provider),
         "updated_at": provider.updated_at,
     }
 
@@ -185,7 +203,7 @@ def update_provider(
                     write_provider_config(peer, peer_config)
             roles[route_key] = normalized_role
         config["route_roles"] = roles
-    provider.config_json = json.dumps(config, ensure_ascii=False)
+    provider.config_json = json.dumps(provider_admin_config(provider, config), ensure_ascii=False)
     session.commit()
     session.refresh(provider)
     return provider_dict(provider, request)

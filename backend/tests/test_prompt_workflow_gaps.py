@@ -10,7 +10,13 @@ import pytest
 from sqlalchemy import select
 
 from backend.app.models import Prompt, Provider
-from backend.app.services.aplus_jobs import _module_text, _parse_aplus_plan, _planning_canvas, _replace_prompt_variables
+from backend.app.services.aplus_jobs import (
+    _module_text,
+    _parse_aplus_plan,
+    _parse_aplus_plan_with_one_repair,
+    _planning_canvas,
+    _replace_prompt_variables,
+)
 from backend.app.services.prompt_contract import (
     ImagePromptItem,
     MetaPromptPlan,
@@ -327,6 +333,68 @@ def test_aplus_json_plan_parser_routes_multiple_instances_by_module_name_and_ind
         ("卖点拆解", 2, 3),
     ]
     assert modules[2]["image_prompt"].startswith("#@ 卖点拆解: 防漏设计")
+
+
+def test_aplus_json_plan_repairs_missing_comma_once() -> None:
+    selections = [{"name": "商品主视觉", "count": 1}, {"name": "卖点拆解", "count": 1}]
+    invalid = (
+        '{"global_plan":"两张详情页模块","modules":['
+        '{"module_name":"商品主视觉","instance_index":1,"image_prompt":"#@ 商品主视觉\\n产品居中","copy_requirements":"英文标题"}'
+        '{"module_name":"卖点拆解","instance_index":1,"image_prompt":"#@ 卖点拆解\\n展示结构","copy_requirements":"结构标注"}'
+        ']}'
+    )
+    repaired = json.dumps(
+        {
+            "global_plan": "两张详情页模块",
+            "modules": [
+                {
+                    "module_name": "商品主视觉",
+                    "instance_index": 1,
+                    "image_prompt": "#@ 商品主视觉\n产品居中",
+                    "copy_requirements": "英文标题",
+                },
+                {
+                    "module_name": "卖点拆解",
+                    "instance_index": 1,
+                    "image_prompt": "#@ 卖点拆解\n展示结构",
+                    "copy_requirements": "结构标注",
+                },
+            ],
+        },
+        ensure_ascii=False,
+    )
+    calls: list[str] = []
+
+    async def repair(_raw: str, error: str) -> str:
+        calls.append(error)
+        return repaired
+
+    global_plan, modules = asyncio.run(_parse_aplus_plan_with_one_repair(invalid, selections, repair))
+
+    assert global_plan == "两张详情页模块"
+    assert [item["module_name"] for item in modules] == ["商品主视觉", "卖点拆解"]
+    assert len(calls) == 1
+
+
+def test_aplus_json_plan_repair_failure_reports_readable_error() -> None:
+    selections = [{"name": "商品主视觉", "count": 1}]
+    still_invalid = (
+        '{"global_plan":"一张详情页模块","modules":['
+        '{"module_name":"商品主视觉","instance_index":1}'
+        '{"module_name":"商品主视觉","instance_index":1}'
+        ']}'
+    )
+
+    async def repair(_raw: str, _error: str) -> str:
+        return still_invalid
+
+    with pytest.raises(ValueError) as exc_info:
+        asyncio.run(_parse_aplus_plan_with_one_repair(still_invalid, selections, repair))
+
+    message = str(exc_info.value)
+    assert "A+ 方案 JSON 修复后仍不合法" in message
+    assert "JSON 结构不完整或缺少分隔符" in message
+    assert "Expecting" not in message
 
 
 def test_aplus_text_block_fallback_parses_route_symbols_in_order() -> None:

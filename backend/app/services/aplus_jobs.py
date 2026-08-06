@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import json
 import re
 import shutil
@@ -25,6 +26,8 @@ from backend.app.services.providers import HELLOBABYGO_IMAGE_ADAPTER, ProviderCl
 from backend.app.services.redaction import safe_json
 from backend.app.services.storage import public_file_url
 
+
+AplusPlanRepairCallback = Callable[[str, str], Awaitable[str]]
 
 DEMO_ASSET_DIR = Path(__file__).resolve().parents[1] / "static" / "demo"
 DEMO_ASSETS = [DEMO_ASSET_DIR / f"aplus-outdoor-module-{index:02d}.png" for index in range(1, 11)]
@@ -408,6 +411,27 @@ def _parse_aplus_plan(raw: str, module_selections: list[dict[str, Any]]) -> tupl
             raise json_error
 
 
+def _format_aplus_parse_error(error: Exception) -> str:
+    if isinstance(error, json.JSONDecodeError):
+        return f"JSON 结构不完整或缺少分隔符（第 {error.lineno} 行，第 {error.colno} 列）"
+    return str(error)
+
+
+async def _parse_aplus_plan_with_one_repair(
+    raw: str,
+    module_selections: list[dict[str, Any]],
+    repair_callback: AplusPlanRepairCallback,
+) -> tuple[str, list[dict[str, Any]]]:
+    try:
+        return _parse_aplus_plan(raw, module_selections)
+    except Exception as first_error:
+        repaired = await repair_callback(raw, str(first_error))
+        try:
+            return _parse_aplus_plan(repaired, module_selections)
+        except Exception as repaired_error:
+            raise ValueError(f"A+ 方案 JSON 修复后仍不合法：{_format_aplus_parse_error(repaired_error)}") from repaired_error
+
+
 def _dryrun_modules(params: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     selections = _normalize_module_selections(params)
     expected = _expand_module_selections(selections)
@@ -726,7 +750,32 @@ async def run_aplus_plan_job(
             )
             if aplus_cancel_requested(session_factory, job_id):
                 return
-            global_plan, modules = _parse_aplus_plan(raw_plan, module_selections)
+
+            async def repair(raw: str, error: str) -> str:
+                repair_system = (
+                    "你是 JSON 修复器。只修复结构与字段，不改变 A+ 详情页策划含义。"
+                    "最终只输出一个合法 JSON 对象。"
+                    + _aplus_json_execution_contract(module_selections)
+                )
+                repaired, _ = await _call_llm_with_fallback(
+                    client,
+                    llm_default,
+                    llm_fallback,
+                    cipher,
+                    repair_system,
+                    json.dumps(
+                        {
+                            "invalid_output": raw,
+                            "validation_error": error,
+                            "module_selections": module_selections,
+                            "expected_modules": _expected_module_items(module_selections),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+                return repaired
+
+            global_plan, modules = await _parse_aplus_plan_with_one_repair(raw_plan, module_selections, repair)
 
         with session_factory() as session:
             job = session.get(AplusJob, job_id)

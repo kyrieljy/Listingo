@@ -262,6 +262,24 @@ def test_image2_generate_uses_json_without_reference_image() -> None:
     assert "images" not in seen["body"]
 
 
+def test_provider_invalid_json_response_reports_upstream_context() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text='{"task_id":"task-bad" "status":"queued"}')
+
+    async def run() -> bytes:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            return await ProviderClient(http_client).generate_image(
+                image2_provider(), "key", "prompt", [], "1:1"
+            )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(run())
+
+    message = str(exc_info.value)
+    assert "yunwu-image-2 上游返回无效 JSON（HTTP 200 OK）" in message
+    assert "Expecting ',' delimiter" not in message
+
+
 def test_image2_rejects_invalid_configured_size_before_submit() -> None:
     provider = image2_provider()
     provider.config_json = json.dumps({"size": "512x512"})

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import httpx
@@ -205,6 +206,29 @@ def _normalize_video_resolution(value: str) -> str:
     return normalized
 
 
+def _response_text_snippet(text: str, limit: int = 240) -> str:
+    collapsed = " ".join(text.strip().split())
+    collapsed = re.sub(r"[A-Za-z0-9+/=]{120,}", "[LONG_TOKEN]", collapsed)
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[:limit] + "..."
+
+
+def _parse_response_json(provider: Provider, response: httpx.Response) -> dict[str, Any]:
+    try:
+        data = response.json()
+    except json.JSONDecodeError as exc:
+        status = f"HTTP {response.status_code} {response.reason_phrase}".strip()
+        snippet = _response_text_snippet(response.text)
+        message = f"{provider.code} 上游返回无效 JSON（{status}）"
+        if snippet:
+            message += f": {snippet}"
+        raise RuntimeError(message) from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{provider.code} 上游返回 JSON {type(data).__name__}，预期为对象")
+    return data
+
+
 def build_async_http_client(timeout: int) -> httpx.AsyncClient:
     """Use IPv4 explicitly to avoid Windows async DNS/IPv6 connection failures."""
     transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
@@ -368,11 +392,11 @@ class ProviderClient:
         if self._external_client:
             response = await self._external_client.get(url, headers=headers)
             response.raise_for_status()
-            return response.json()
+            return _parse_response_json(provider, response)
         async with build_async_http_client(int(config.get("timeout_seconds", 600))) as client:
             response = await client.get(url, headers=headers)
             response.raise_for_status()
-            return response.json()
+            return _parse_response_json(provider, response)
 
     async def _generate_hellobabygo_image(
         self,
@@ -552,7 +576,7 @@ class ProviderClient:
                     config,
                     lambda: client.post(edit_url, headers=headers, data=form, files=files),
                 )
-        response_data = response.json()
+        response_data = _parse_response_json(provider, response)
         result_data = response_data.get("data")
         result = result_data[0] if isinstance(result_data, list) and result_data else result_data
         if not isinstance(result, dict):
@@ -572,14 +596,14 @@ class ProviderClient:
                 config,
                 lambda: self._external_client.post(provider.base_url, headers=headers, json=payload),
             )
-            return response.json()
+            return _parse_response_json(provider, response)
         async with build_async_http_client(int(config.get("timeout_seconds", 180))) as client:
             response = await self._request_with_retries(
                 provider,
                 config,
                 lambda: client.post(provider.base_url, headers=headers, json=payload),
             )
-            return response.json()
+            return _parse_response_json(provider, response)
 
     async def _get_json(
         self,
@@ -595,14 +619,14 @@ class ProviderClient:
                 config,
                 lambda: self._external_client.get(url, headers=headers),
             )
-            return response.json()
+            return _parse_response_json(provider, response)
         async with build_async_http_client(int(config.get("timeout_seconds", 180))) as client:
             response = await self._request_with_retries(
                 provider,
                 config,
                 lambda: client.get(url, headers=headers),
             )
-            return response.json()
+            return _parse_response_json(provider, response)
 
     async def _request_with_retries(
         self,

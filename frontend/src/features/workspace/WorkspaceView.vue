@@ -23,7 +23,9 @@ import {
 } from './workspace-model'
 
 const route = useRoute(); const router = useRouter()
-const phase = computed<PhaseKey>(() => phaseDefinitions.some((item) => item.key === route.params.phase) ? route.params.phase as PhaseKey : 'suite')
+const disabledPhaseKeys = new Set<PhaseKey>(['agent'])
+function isPhaseDisabled(key: PhaseKey): boolean { return disabledPhaseKeys.has(key) }
+const phase = computed<PhaseKey>(() => phaseDefinitions.some((item) => item.key === route.params.phase && !isPhaseDisabled(item.key)) ? route.params.phase as PhaseKey : 'suite')
 const mobileOpen = ref(false); const uploading = ref(false); const generating = ref(false); const helping = ref(false); const cancelling = ref(false); const cancelRequested = ref(false)
 type HistoryEntry = Job | AplusJob | VideoJob
 type HistoryPanelRef<T> = { openHistoryJob: (entry: T) => Promise<void>; startNewTask: () => void; dryRun?: boolean }
@@ -155,7 +157,10 @@ async function resumeSuiteJobRefresh(jobId: string) {
   }
 }
 
-function navigate(key: PhaseKey) { router.push(`/app/${key}`) }
+function navigate(key: PhaseKey) {
+  if (isPhaseDisabled(key)) return
+  router.push(`/app/${key}`)
+}
 async function loadPhaseHistory() {
   try {
     if (phase.value === 'video') history.value = await listVideoJobs()
@@ -401,9 +406,10 @@ async function openHistoryJob(entry: HistoryEntry) {
       <button class="header-link" @click="router.push('/admin/providers')"><SettingOutlined />运营后台</button>
     </header>
     <nav class="phase-rail">
-      <button v-for="(item,index) in phaseDefinitions" :key="item.key" :class="{ active: phase === item.key }" @click="navigate(item.key)">
+      <button v-for="(item,index) in phaseDefinitions" :key="item.key" :class="{ active: phase === item.key, disabled: isPhaseDisabled(item.key) }" :disabled="isPhaseDisabled(item.key)" :aria-disabled="isPhaseDisabled(item.key)" @click="navigate(item.key)">
         <AppstoreOutlined v-if="index===0"/><BgColorsOutlined v-else-if="index===1"/><VideoCameraOutlined v-else-if="index===2"/><ThunderboltOutlined v-else/>
         <span>{{ item.short }}</span>
+        <small v-if="isPhaseDisabled(item.key)" class="phase-soon-badge">即将上线</small>
       </button>
     </nav>
     <KeepAlive>

@@ -23,7 +23,9 @@ const placeholderSpinning = (item: JobItem) => ['queued', 'running', 'succeeded'
       <button class="select-dot" type="button" :disabled="item.status !== 'succeeded'" :aria-label="`选择第 ${item.index + 1} 张`" @click="emit('toggle', item.id)">
         <CheckCircleFilled v-if="selectedSet.has(item.id)" />
       </button>
-      <img v-if="currentUrl(item)" :src="currentUrl(item)" :alt="`第 ${item.index + 1} 张生成结果`" />
+      <div v-if="currentUrl(item)" class="result-image-frame">
+        <img :src="currentUrl(item)" :alt="`第 ${item.index + 1} 张生成结果`" />
+      </div>
       <div v-else class="pending-image" :class="{ terminal: !placeholderSpinning(item) }">
         <LoadingOutlined v-if="placeholderSpinning(item)" spin />
         <span>{{ placeholderLabel(item) }}</span>

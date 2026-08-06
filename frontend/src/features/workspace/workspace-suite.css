@@ -9,6 +9,31 @@
   cursor: not-allowed;
 }
 
+.phase-rail button.disabled {
+  color: #a9b0bb;
+  background: #f6f7f9;
+  cursor: not-allowed;
+  opacity: .68;
+}
+
+.phase-rail button.disabled .anticon,
+.phase-rail button.disabled span {
+  color: #a9b0bb;
+}
+
+.phase-rail .phase-soon-badge {
+  height: 16px;
+  padding: 0 5px;
+  border: 1px solid #dfe3ea;
+  border-radius: 99px;
+  background: #f1f2f5;
+  color: #8a929f;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
 .uploaded-row .remove-uploaded-asset {
   position: absolute;
   right: 3px;
@@ -225,6 +250,32 @@
   color: #d4380d;
   line-height: 1.45;
   white-space: normal;
+}
+
+.result-card .result-image-frame,
+.result-card .pending-image {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: #f3f4f6;
+}
+
+.result-card .result-image-frame {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.result-card .result-image-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.result-card .pending-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .download-menu {

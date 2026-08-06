@@ -43,6 +43,25 @@ describe('workspace model', () => {
     ])
   })
 
+  it('closes the Agent phase entry as a disabled coming soon nav item', () => {
+    const disabledRule = workspaceSuiteCss.match(/\.phase-rail button\.disabled\s*\{([^}]*)\}/)?.[1] ?? ''
+    const badgeRule = workspaceSuiteCss.match(/\.phase-rail \.phase-soon-badge\s*\{([^}]*)\}/)?.[1] ?? ''
+    const normalizedDisabledRule = disabledRule.replace(/\s+/g, '')
+    const normalizedBadgeRule = badgeRule.replace(/\s+/g, '')
+
+    expect(workspaceSource).toContain("const disabledPhaseKeys = new Set<PhaseKey>(['agent'])")
+    expect(workspaceSource).toContain('!isPhaseDisabled(item.key)')
+    expect(workspaceSource).toContain('if (isPhaseDisabled(key)) return')
+    expect(workspaceSource).toContain(':class="{ active: phase === item.key, disabled: isPhaseDisabled(item.key) }"')
+    expect(workspaceSource).toContain(':disabled="isPhaseDisabled(item.key)"')
+    expect(workspaceSource).toContain(':aria-disabled="isPhaseDisabled(item.key)"')
+    expect(workspaceSource).toContain('class="phase-soon-badge">即将上线</small>')
+    expect(normalizedDisabledRule).toContain('cursor:not-allowed')
+    expect(normalizedDisabledRule).toContain('opacity:.68')
+    expect(normalizedBadgeRule).toContain('border-radius:99px')
+    expect(normalizedBadgeRule).toContain('white-space:nowrap')
+  })
+
   it('builds a valid default dryrun payload', () => {
     const payload = buildGenerationPayload(['asset-1'], '通勤保温，防滑握持')
     expect(payload.dry_run).toBe(true)
@@ -525,6 +544,15 @@ describe('workspace model', () => {
     expect(workspaceSuiteCss).toContain('flex-wrap: nowrap;')
     expect(workspaceSuiteCss).toContain('white-space: nowrap;')
     expect(workspaceSuiteCss).toContain('.aplus-script-preview')
+  })
+
+  it('renders suite result images inside a contain preview frame', () => {
+    expect(resultGridSource).toContain('class="result-image-frame"')
+    expect(resultGridSource).toContain('<img :src="currentUrl(item)"')
+    expect(workspaceSuiteCss).toContain('.result-card .result-image-frame')
+    expect(workspaceSuiteCss).toContain('.result-card .result-image-frame img')
+    expect(workspaceSuiteCss).toContain('object-fit: contain;')
+    expect(workspaceSuiteCss).not.toContain('.result-card .result-image-frame img {\n  width: 100%;\n  height: 100%;\n  object-fit: cover;')
   })
 
   it('uses user-facing A+ upload guidance instead of implementation wording', () => {

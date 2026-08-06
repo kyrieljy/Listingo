@@ -335,7 +335,7 @@ def test_aplus_json_plan_parser_routes_multiple_instances_by_module_name_and_ind
     assert modules[2]["image_prompt"].startswith("#@ 卖点拆解: 防漏设计")
 
 
-def test_aplus_json_plan_repairs_missing_comma_once() -> None:
+def test_aplus_json_plan_parser_repairs_missing_object_comma_locally() -> None:
     selections = [{"name": "商品主视觉", "count": 1}, {"name": "卖点拆解", "count": 1}]
     invalid = (
         '{"global_plan":"两张详情页模块","modules":['
@@ -343,6 +343,32 @@ def test_aplus_json_plan_repairs_missing_comma_once() -> None:
         '{"module_name":"卖点拆解","instance_index":1,"image_prompt":"#@ 卖点拆解\\n展示结构","copy_requirements":"结构标注"}'
         ']}'
     )
+
+    global_plan, modules = _parse_aplus_plan(invalid, selections)
+
+    assert global_plan == "两张详情页模块"
+    assert [item["module_name"] for item in modules] == ["商品主视觉", "卖点拆解"]
+
+
+def test_aplus_json_plan_parser_repairs_missing_property_comma_locally() -> None:
+    selections = [{"name": "商品主视觉", "count": 1}]
+    invalid = (
+        '{"global_plan":"一张详情页模块","modules":['
+        '{"module_name":"商品主视觉","instance_index":1,'
+        '"image_prompt":"#@ 商品主视觉\\n产品居中"'
+        '"copy_requirements":"英文标题"}'
+        ']}'
+    )
+
+    _global_plan, modules = _parse_aplus_plan(invalid, selections)
+
+    assert modules[0]["module_name"] == "商品主视觉"
+    assert modules[0]["copy_requirements"] == "英文标题"
+
+
+def test_aplus_json_plan_uses_llm_repair_after_unfixable_validation_error() -> None:
+    selections = [{"name": "商品主视觉", "count": 1}, {"name": "卖点拆解", "count": 1}]
+    invalid = '{"global_plan":"一张详情页模块","modules":[{"module_name":"商品主视觉","instance_index":1}]}'
     repaired = json.dumps(
         {
             "global_plan": "两张详情页模块",
@@ -378,18 +404,12 @@ def test_aplus_json_plan_repairs_missing_comma_once() -> None:
 
 def test_aplus_json_plan_repair_failure_reports_readable_error() -> None:
     selections = [{"name": "商品主视觉", "count": 1}]
-    still_invalid = (
-        '{"global_plan":"一张详情页模块","modules":['
-        '{"module_name":"商品主视觉","instance_index":1}'
-        '{"module_name":"商品主视觉","instance_index":1}'
-        ']}'
-    )
 
     async def repair(_raw: str, _error: str) -> str:
-        return still_invalid
+        return '{"global_plan":"仍然缺少结尾","modules":[{"module_name":"商品主视觉","instance_index":1}'
 
     with pytest.raises(ValueError) as exc_info:
-        asyncio.run(_parse_aplus_plan_with_one_repair(still_invalid, selections, repair))
+        asyncio.run(_parse_aplus_plan_with_one_repair("not-json", selections, repair))
 
     message = str(exc_info.value)
     assert "A+ 方案 JSON 修复后仍不合法" in message

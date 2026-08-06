@@ -308,17 +308,69 @@ def _ordered_modules_from_map(
     return [by_key[(str(item["module_name"]), int(item["instance_index"]))] for item in expected]
 
 
+def _next_non_whitespace_index(source: str, start: int) -> int:
+    index = start
+    while index < len(source) and source[index].isspace():
+        index += 1
+    return index
+
+
+def _insert_missing_json_value_commas(source: str) -> str:
+    output: list[str] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(source):
+        output.append(char)
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+                next_index = _next_non_whitespace_index(source, index + 1)
+                if next_index < len(source) and source[next_index] in '"{[':
+                    output.append(",")
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "}]":
+            next_index = _next_non_whitespace_index(source, index + 1)
+            if next_index < len(source) and source[next_index] in '"{[':
+                output.append(",")
+    return "".join(output)
+
+
+def _load_aplus_json_object(raw: str) -> dict[str, Any]:
+    stripped = raw.strip()
+    candidates = [stripped]
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start >= 0 and end > start:
+        extracted = stripped[start : end + 1]
+        if extracted != stripped:
+            candidates.append(extracted)
+    elif not stripped.startswith("{"):
+        raise ValueError("A+ 方案返回不是 JSON")
+
+    last_json_error: json.JSONDecodeError | None = None
+    for candidate in candidates:
+        for source in (candidate, _insert_missing_json_value_commas(candidate)):
+            try:
+                parsed = json.loads(source)
+            except json.JSONDecodeError as exc:
+                last_json_error = exc
+                continue
+            if not isinstance(parsed, dict):
+                raise ValueError("A+ 方案 JSON 顶层必须是对象")
+            return parsed
+    if last_json_error:
+        raise last_json_error
+    raise ValueError("A+ 方案返回不是 JSON")
+
+
 def _parse_aplus_json_plan(raw: str, expected: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start < 0 or end <= start:
-            raise ValueError("A+ 方案返回不是 JSON")
-        parsed = json.loads(raw[start : end + 1])
-    if not isinstance(parsed, dict):
-        raise ValueError("A+ 方案 JSON 顶层必须是对象")
+    parsed = _load_aplus_json_object(raw)
     modules = parsed.get("modules")
     if not isinstance(modules, list):
         raise ValueError("A+ 方案缺少 modules 数组")

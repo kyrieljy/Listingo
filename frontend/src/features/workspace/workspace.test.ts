@@ -317,6 +317,60 @@ describe('workspace model', () => {
     expect(videoPanelSource).toContain('window.setTimeout(resolve, VIDEO_JOB_POLL_INTERVAL_MS)')
   })
 
+  it('keeps polling when terminal jobs still lack renderable result URLs', () => {
+    expect(workspaceSource).toContain('function suiteJobNeedsRefresh')
+    expect(workspaceSource).toContain("item.status === 'succeeded' && !itemResultUrl(item)")
+    expect(workspaceSource).toContain('if (!suiteJobNeedsRefresh(latest)) return latest')
+
+    expect(aplusPanelSource).toContain('function aplusJobNeedsRefresh')
+    expect(aplusPanelSource).toContain("item.status === 'succeeded' && !currentUrl(item)")
+    expect(aplusPanelSource).toContain('if (!aplusJobNeedsRefresh(latest)) return latest')
+
+    expect(videoPanelSource).toContain('function videoJobNeedsRefresh')
+    expect(videoPanelSource).toContain("item.status === 'succeeded' && !currentVideoUrl(item)")
+    expect(videoPanelSource).toContain('if (!videoJobNeedsRefresh(latest)) return latest')
+  })
+
+  it('resumes job polling from history and kept-alive module returns', () => {
+    expect(workspaceSource).toContain('void resumeSuiteJobRefresh(job.value.id)')
+    expect(workspaceSource).toContain("if (phase.value === 'suite') void resumeCurrentSuiteJobRefresh()")
+
+    expect(aplusPanelSource).toContain('onActivated(() => { void resumeCurrentAplusJobRefresh() })')
+    expect(aplusPanelSource).toContain('void resumeAplusGenerationRefresh(generationJob.value.id)')
+    expect(aplusPanelSource).toContain('void resumeAplusPlanRefresh(planJob.value.id)')
+
+    expect(videoPanelSource).toContain('onActivated(() => { void resumeCurrentVideoJobRefresh() })')
+    expect(videoPanelSource).toContain('void resumeVideoJobRefresh(job.value.id)')
+  })
+
+  it('shows terminal card placeholders without spinning as generating', () => {
+    expect(resultGridSource).toContain("if (item.status === 'failed') return '生成失败'")
+    expect(resultGridSource).toContain("if (item.status === 'cancelled') return '已取消'")
+    expect(resultGridSource).toContain("if (item.status === 'succeeded') return '结果同步中'")
+    expect(resultGridSource).toContain("['queued', 'running', 'succeeded'].includes(item.status)")
+    expect(resultGridSource).toContain('v-if="placeholderSpinning(item)"')
+
+    expect(aplusPanelSource).toContain("if (item.status === 'failed') return '生成失败'")
+    expect(aplusPanelSource).toContain("if (item.status === 'cancelled') return '已取消'")
+    expect(aplusPanelSource).toContain("if (item.status === 'succeeded') return '结果同步中'")
+    expect(aplusPanelSource).toContain('v-if="aplusPlaceholderSpinning(item)"')
+
+    expect(videoPanelSource).toContain("if (item.status === 'failed') return '生成失败'")
+    expect(videoPanelSource).toContain("if (item.status === 'cancelled') return '已取消'")
+    expect(videoPanelSource).toContain("if (item.status === 'succeeded') return '结果同步中'")
+    expect(videoPanelSource).toContain('v-else-if="!videoPlaceholderSpinning(item)"')
+  })
+
+  it('removes user-facing progress percentages from active generation buttons', () => {
+    expect(workspaceSource).toContain("generating ? '正在处理'")
+    expect(workspaceSource).not.toContain('正在处理 ${job?.progress')
+    expect(aplusPanelSource).toContain("planning ? '生成方案中' : generating ? '生成图片中'")
+    expect(aplusPanelSource).not.toContain('生成方案 ${planJob?.progress')
+    expect(aplusPanelSource).not.toContain('生成图片 ${generationJob?.progress')
+    expect(videoPanelSource).toContain("generating ? '正在生成视频'")
+    expect(videoPanelSource).not.toContain('正在生成 ${job?.progress')
+  })
+
   it('uses a modal for content safety interception errors', () => {
     expect(workspaceSource).toContain("Modal.error({ title: '内容安全拦截'")
     expect(workspaceSource).toContain("detail.includes('安全拦截')")

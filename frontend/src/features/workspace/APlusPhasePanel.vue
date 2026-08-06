@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   CheckOutlined,
@@ -72,6 +72,7 @@ const productInfoInput = ref<HTMLTextAreaElement | null>(null)
 const aiSuggestionInput = ref<HTMLTextAreaElement | null>(null)
 const APLUS_JOB_POLL_INTERVAL_MS = 500
 const FINAL_APLUS_JOB_STATUSES = new Set(['succeeded', 'partial_failed', 'failed', 'cancelled', 'partial_cancelled'])
+const refreshingAplusJobId = ref<string | null>(null)
 
 const productInfoPlaceholder = `可选：填写商品事实、参数、卖点。
 建议包含商品名称、核心卖点、适用人群、场景和必须遵循的事实。`
@@ -145,6 +146,7 @@ watch(() => form.value.platform, (platform) => {
     form.value.advancedTargets = ['web']
   }
 })
+onActivated(() => { void resumeCurrentAplusJobRefresh() })
 
 function requestDetail(error: any): string {
   const detail = error?.response?.data?.detail
@@ -388,17 +390,73 @@ function createOptimisticGenerationJob(planItems: AplusItem[], payload: Record<s
 
 function preservePendingAplusItems(latest: AplusJob, current: AplusJob | null): AplusJob {
   if (latest.items.length || !current?.items.length) return latest
-  const items = latest.status === 'failed'
-    ? current.items.map((item) => ({ ...item, status: 'failed', error: item.error || latest.error }))
-    : current.items
+  const items = current.items.map((item) => {
+    if (item.status === 'succeeded') return item
+    if (latest.status === 'failed' || latest.status === 'partial_failed') {
+      return { ...item, status: 'failed', error: item.error || latest.error }
+    }
+    if (latest.status === 'cancelled' || latest.status === 'partial_cancelled') {
+      return { ...item, status: 'cancelled', error: item.error || latest.error }
+    }
+    return item
+  })
   return { ...latest, items, count: latest.count || current.count }
+}
+
+function aplusJobNeedsRefresh(latest: AplusJob): boolean {
+  if (!FINAL_APLUS_JOB_STATUSES.has(latest.status)) return true
+  if (latest.job_type !== 'generation') return false
+  if (!['succeeded', 'partial_failed', 'partial_cancelled'].includes(latest.status)) return false
+  if (latest.items.length < latest.count) return true
+  return latest.items.some((item) => item.status === 'succeeded' && !currentUrl(item))
+}
+
+async function resumeCurrentAplusJobRefresh() {
+  if (planning.value || generating.value) return
+  if (generationJob.value && aplusJobNeedsRefresh(generationJob.value)) {
+    await resumeAplusGenerationRefresh(generationJob.value.id)
+    return
+  }
+  if (planJob.value && aplusJobNeedsRefresh(planJob.value)) {
+    await resumeAplusPlanRefresh(planJob.value.id)
+  }
+}
+
+async function resumeAplusPlanRefresh(jobId: string) {
+  if (refreshingAplusJobId.value === jobId || planning.value || generating.value) return
+  refreshingAplusJobId.value = jobId
+  planning.value = true
+  try {
+    const latest = await waitForPlan(jobId)
+    selectedPlanItemIds.value = latest.items.map((item) => item.id)
+  } catch {
+    // Keep the last visible state; route activation can retry later.
+  } finally {
+    if (refreshingAplusJobId.value === jobId) refreshingAplusJobId.value = null
+    planning.value = false
+  }
+}
+
+async function resumeAplusGenerationRefresh(jobId: string) {
+  if (refreshingAplusJobId.value === jobId || planning.value || generating.value) return
+  refreshingAplusJobId.value = jobId
+  generating.value = true
+  try {
+    const latest = await waitForGeneration(jobId)
+    selectedResultIds.value = latest.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
+  } catch {
+    // Keep the last visible state; route activation can retry later.
+  } finally {
+    if (refreshingAplusJobId.value === jobId) refreshingAplusJobId.value = null
+    generating.value = false
+  }
 }
 
 async function waitForPlan(jobId: string): Promise<AplusJob> {
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const latest = preservePendingAplusItems(await getAplusPlanJob(jobId), planJob.value)
     planJob.value = latest
-    if (FINAL_APLUS_JOB_STATUSES.has(latest.status)) return latest
+    if (!aplusJobNeedsRefresh(latest)) return latest
     await new Promise((resolve) => window.setTimeout(resolve, APLUS_JOB_POLL_INTERVAL_MS))
   }
   throw new Error('A+ 方案等待超时')
@@ -408,7 +466,7 @@ async function waitForGeneration(jobId: string): Promise<AplusJob> {
   for (let attempt = 0; attempt < 900; attempt += 1) {
     const latest = preservePendingAplusItems(await getAplusGenerationJob(jobId), generationJob.value)
     generationJob.value = latest
-    if (FINAL_APLUS_JOB_STATUSES.has(latest.status)) return latest
+    if (!aplusJobNeedsRefresh(latest)) return latest
     await new Promise((resolve) => window.setTimeout(resolve, APLUS_JOB_POLL_INTERVAL_MS))
   }
   throw new Error('A+ 图片生成等待超时')
@@ -541,10 +599,24 @@ async function openHistoryJob(entry: AplusJob) {
     planJob.value = latest
     selectedPlanItemIds.value = latest.items.map((item) => item.id)
   }
+  if (generationJob.value && aplusJobNeedsRefresh(generationJob.value)) void resumeAplusGenerationRefresh(generationJob.value.id)
+  else if (planJob.value && aplusJobNeedsRefresh(planJob.value)) void resumeAplusPlanRefresh(planJob.value.id)
 }
 
 function currentUrl(item: AplusItem): string | undefined {
   return item.versions.find((version) => version.id === item.current_version_id)?.url ?? item.versions.at(-1)?.url
+}
+
+function aplusPlaceholderLabel(item: AplusItem): string {
+  if (item.status === 'failed') return '生成失败'
+  if (item.status === 'cancelled') return '已取消'
+  if (item.status === 'cancelling') return '取消中'
+  if (item.status === 'succeeded') return '结果同步中'
+  return '生成中'
+}
+
+function aplusPlaceholderSpinning(item: AplusItem): boolean {
+  return ['queued', 'running', 'succeeded'].includes(item.status)
 }
 
 function scriptMarkdown(item: AplusItem): string {
@@ -714,7 +786,7 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
 
     <div class="panel-footer aplus-actions">
       <button v-if="aplusTaskActive" class="secondary-action cancel-action" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined />{{ cancelling ? '取消中' : '取消任务' }}</button>
-      <button class="generate-button" :disabled="planning || generating || !canPlan" @click="generateImages"><RocketOutlined />{{ planning ? `生成方案 ${planJob?.progress || 0}%` : generating ? `生成图片 ${generationJob?.progress || 0}%` : `生成图片 ${plannedResultCount} 张` }}</button>
+      <button class="generate-button" :disabled="planning || generating || !canPlan" @click="generateImages"><RocketOutlined />{{ planning ? '生成方案中' : generating ? '生成图片中' : `生成图片 ${plannedResultCount} 张` }}</button>
     </div>
   </aside>
 
@@ -733,7 +805,10 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
           <article v-for="item in generationJob.items" :key="item.id" class="aplus-result-card" :class="{ selected: selectedResultIds.includes(item.id), failed: ['failed', 'cancelled'].includes(item.status) }">
             <button class="select-dot" type="button" :disabled="item.status !== 'succeeded'" @click="toggleResult(item.id)"><CheckOutlined v-if="selectedResultIds.includes(item.id)" /></button>
             <img v-if="currentUrl(item)" :src="currentUrl(item)" :alt="item.module_name" />
-            <div v-else class="pending-image"><LoadingOutlined spin /><span>{{ item.status === 'failed' ? '生成失败' : '生成中' }}</span></div>
+            <div v-else class="pending-image" :class="{ terminal: !aplusPlaceholderSpinning(item) }">
+              <LoadingOutlined v-if="aplusPlaceholderSpinning(item)" spin />
+              <span>{{ aplusPlaceholderLabel(item) }}</span>
+            </div>
             <footer>
               <div class="aplus-result-meta">
                 <b>{{ item.module_name }}</b>

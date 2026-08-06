@@ -38,6 +38,7 @@ const sellingPointsInput = ref<HTMLTextAreaElement | null>(null); const aiSugges
 const form = ref(createDefaultWorkspaceForm())
 const IMAGE_JOB_POLL_INTERVAL_MS = 500
 const FINAL_JOB_STATUSES = new Set(['succeeded', 'partial_failed', 'failed', 'cancelled', 'partial_cancelled'])
+const refreshingSuiteJobId = ref<string | null>(null)
 const sellingPointsPlaceholder = `建议包含以下信息，帮助生成更精准：
 1. 商品名称
 2. 核心卖点
@@ -63,7 +64,11 @@ const currentDryRun = computed(() => phase.value === 'aplus' ? (aplusPanel.value
 const historyTitle = computed(() => phase.value === 'video' ? '视频历史' : phase.value === 'aplus' ? 'A+ 详情历史' : '套图历史')
 const historyEmptyText = computed(() => phase.value === 'video' ? '暂无视频历史任务' : phase.value === 'aplus' ? '暂无 A+ 详情历史任务' : '暂无套图历史任务')
 
-watch(phase, () => { mobileOpen.value = false; preferenceOpen.value = false })
+watch(phase, () => {
+  mobileOpen.value = false
+  preferenceOpen.value = false
+  if (phase.value === 'suite') void resumeCurrentSuiteJobRefresh()
+})
 onMounted(async () => { await loadPhaseHistory() })
 
 function requestDetail(error: any): string {
@@ -105,10 +110,49 @@ function createOptimisticJob(payload: Record<string, unknown>): Job {
 
 function preservePendingJobItems(latest: Job): Job {
   if (latest.items.length || !job.value?.items.length) return latest
-  const items = latest.status === 'failed'
-    ? job.value.items.map((item) => ({ ...item, status: 'failed', error: item.error || latest.error }))
-    : job.value.items
+  const items = job.value.items.map((item) => {
+    if (item.status === 'succeeded') return item
+    if (latest.status === 'failed' || latest.status === 'partial_failed') {
+      return { ...item, status: 'failed', error: item.error || latest.error }
+    }
+    if (latest.status === 'cancelled' || latest.status === 'partial_cancelled') {
+      return { ...item, status: 'cancelled', error: item.error || latest.error }
+    }
+    return item
+  })
   return { ...latest, items, count: latest.count || job.value.count }
+}
+
+function itemResultUrl(item: JobItem): string | undefined {
+  return item.versions.find((version) => version.id === item.current_version_id)?.url ?? item.versions.at(-1)?.url
+}
+
+function suiteJobNeedsRefresh(latest: Job): boolean {
+  if (!FINAL_JOB_STATUSES.has(latest.status)) return true
+  if (!['succeeded', 'partial_failed', 'partial_cancelled'].includes(latest.status)) return false
+  if (latest.items.length < latest.count) return true
+  return latest.items.some((item) => item.status === 'succeeded' && !itemResultUrl(item))
+}
+
+async function resumeCurrentSuiteJobRefresh() {
+  if (!job.value || !suiteJobNeedsRefresh(job.value) || generating.value) return
+  await resumeSuiteJobRefresh(job.value.id)
+}
+
+async function resumeSuiteJobRefresh(jobId: string) {
+  if (refreshingSuiteJobId.value === jobId || generating.value) return
+  refreshingSuiteJobId.value = jobId
+  generating.value = true
+  try {
+    const latest = await waitForJob(jobId)
+    selected.value = latest.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
+    if (FINAL_JOB_STATUSES.has(latest.status)) history.value = await listJobs()
+  } catch {
+    // Keep the last visible state; the next history open or route activation can retry.
+  } finally {
+    if (refreshingSuiteJobId.value === jobId) refreshingSuiteJobId.value = null
+    generating.value = false
+  }
 }
 
 function navigate(key: PhaseKey) { router.push(`/app/${key}`) }
@@ -209,7 +253,7 @@ function adjustCustomCount(key: CustomCountKey, delta: number) {
 async function waitForJob(jobId: string): Promise<Job> {
   for (let attempt = 0; attempt < 900; attempt += 1) {
     const latest = preservePendingJobItems(await getJob(jobId)); job.value = latest
-    if (FINAL_JOB_STATUSES.has(latest.status)) return latest
+    if (!suiteJobNeedsRefresh(latest)) return latest
     await new Promise((resolve) => window.setTimeout(resolve, IMAGE_JOB_POLL_INTERVAL_MS))
   }
   throw new Error('任务等待超时')
@@ -338,8 +382,9 @@ async function openHistoryJob(entry: HistoryEntry) {
   if (phase.value === 'video') await videoPanel.value?.openHistoryJob(entry as VideoJob)
   else if (phase.value === 'aplus') await aplusPanel.value?.openHistoryJob(entry as AplusJob)
   else {
-    job.value = await getJob(entry.id)
+    job.value = preservePendingJobItems(await getJob(entry.id))
     selected.value = job.value.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
+    if (suiteJobNeedsRefresh(job.value)) void resumeSuiteJobRefresh(job.value.id)
   }
   historyOpen.value = false
 }
@@ -432,7 +477,7 @@ async function openHistoryJob(entry: HistoryEntry) {
         </section>
         <div class="panel-footer">
           <button v-if="suiteJobActive" class="secondary-action cancel-action" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined/>{{ cancelling ? '取消中' : '取消任务' }}</button>
-          <button class="generate-button" :disabled="generating || !assets.length || !inputValid || !customValid" @click="generate"><RocketOutlined/>{{ generating ? `正在处理 ${job?.progress || 0}%` : `开始生成 ${count} 张套图` }}</button>
+          <button class="generate-button" :disabled="generating || !assets.length || !inputValid || !customValid" @click="generate"><RocketOutlined/>{{ generating ? '正在处理' : `开始生成 ${count} 张套图` }}</button>
         </div>
       </template>
       <template v-else><section class="form-section demo-config"><div class="section-title"><span>1</span><strong>输入素材</strong></div><label class="upload-zone compact"><CloudUploadOutlined/><b>上传商品或参考素材</b><small>演示入口，不会上传到模型</small></label></section><section class="form-section"><div class="section-title"><span>2</span><strong>演示配置</strong></div><div class="field-grid"><label>目标平台<select><option>亚马逊</option><option>抖音海外商城</option></select></label><label>输出语言<select><option>简体中文</option><option>英语</option></select></label></div><textarea rows="5" value="突出通勤场景、简洁质感与易用性，生成可继续编辑的结果。"/></section><div class="demo-notice"><ThunderboltOutlined/><div><b>功能演示</b><p>表单、节点与状态可交互，二至四期不会调用模型。</p></div></div></template>

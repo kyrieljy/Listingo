@@ -7,6 +7,14 @@ const props = defineProps<{ items: JobItem[]; selected: string[] }>()
 const emit = defineEmits<{ toggle: [id: string]; edit: [item: JobItem]; preview: [item: JobItem]; retry: [item: JobItem]; script: [item: JobItem] }>()
 const selectedSet = computed(() => new Set(props.selected))
 const currentUrl = (item: JobItem) => item.versions.find((version) => version.id === item.current_version_id)?.url ?? item.versions.at(-1)?.url
+const placeholderLabel = (item: JobItem) => {
+  if (item.status === 'failed') return '生成失败'
+  if (item.status === 'cancelled') return '已取消'
+  if (item.status === 'cancelling') return '取消中'
+  if (item.status === 'succeeded') return '结果同步中'
+  return '生成中'
+}
+const placeholderSpinning = (item: JobItem) => ['queued', 'running', 'succeeded'].includes(item.status)
 </script>
 
 <template>
@@ -16,7 +24,10 @@ const currentUrl = (item: JobItem) => item.versions.find((version) => version.id
         <CheckCircleFilled v-if="selectedSet.has(item.id)" />
       </button>
       <img v-if="currentUrl(item)" :src="currentUrl(item)" :alt="`第 ${item.index + 1} 张生成结果`" />
-      <div v-else class="pending-image"><LoadingOutlined spin /><span>生成中</span></div>
+      <div v-else class="pending-image" :class="{ terminal: !placeholderSpinning(item) }">
+        <LoadingOutlined v-if="placeholderSpinning(item)" spin />
+        <span>{{ placeholderLabel(item) }}</span>
+      </div>
       <div class="result-meta">
         <div><span>第 {{ item.index + 1 }} 张 · {{ item.status }}</span></div>
         <div class="card-actions">

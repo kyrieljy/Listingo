@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onMounted, ref } from 'vue'
 import { Modal, message } from 'ant-design-vue'
 import {
   CheckOutlined,
@@ -56,6 +56,7 @@ const sellingPointsInput = ref<HTMLTextAreaElement | null>(null)
 const aiSuggestionInput = ref<HTMLTextAreaElement | null>(null)
 const VIDEO_JOB_POLL_INTERVAL_MS = 1000
 const FINAL_VIDEO_JOB_STATUSES = new Set(['succeeded', 'partial_failed', 'failed', 'cancelled', 'partial_cancelled'])
+const refreshingVideoJobId = ref<string | null>(null)
 
 const videoSellingPointsPlaceholder = `建议包含以下信息：
 1. 商品名称
@@ -75,6 +76,7 @@ const dryRun = computed(() => form.value.dryRun)
 onMounted(async () => {
   try { history.value = await listVideoJobs() } catch { history.value = [] }
 })
+onActivated(() => { void resumeCurrentVideoJobRefresh() })
 
 function requestDetail(error: any): string {
   const detail = error?.response?.data?.detail
@@ -91,6 +93,44 @@ function handleRequestError(error: any, fallback: string) {
 }
 function isVideoUrl(url: string) {
   return /\.(mp4|webm|mov)(\?|$)/i.test(url)
+}
+function currentVideoUrl(item: VideoItem): string | undefined {
+  return item.versions.find((version) => version.id === item.current_version_id)?.url ?? item.versions.at(-1)?.url
+}
+function videoJobNeedsRefresh(latest: VideoJob): boolean {
+  if (!FINAL_VIDEO_JOB_STATUSES.has(latest.status)) return true
+  if (!['succeeded', 'partial_failed', 'partial_cancelled'].includes(latest.status)) return false
+  if (latest.items.length < latest.count) return true
+  return latest.items.some((item) => item.status === 'succeeded' && !currentVideoUrl(item))
+}
+function videoPlaceholderLabel(item: VideoItem): string {
+  if (item.status === 'failed') return '生成失败'
+  if (item.status === 'cancelled') return '已取消'
+  if (item.status === 'cancelling') return '取消中'
+  if (item.status === 'succeeded') return '结果同步中'
+  return '正在生成视频...'
+}
+function videoPlaceholderSpinning(item: VideoItem): boolean {
+  return ['queued', 'running', 'succeeded'].includes(item.status)
+}
+async function resumeCurrentVideoJobRefresh() {
+  if (!job.value || !videoJobNeedsRefresh(job.value) || generating.value) return
+  await resumeVideoJobRefresh(job.value.id)
+}
+async function resumeVideoJobRefresh(jobId: string) {
+  if (refreshingVideoJobId.value === jobId || generating.value) return
+  refreshingVideoJobId.value = jobId
+  generating.value = true
+  try {
+    const latest = await waitForVideoJob(jobId)
+    selected.value = latest.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
+    if (FINAL_VIDEO_JOB_STATUSES.has(latest.status)) history.value = await listVideoJobs()
+  } catch {
+    // Keep the last visible state; history open or route activation can retry.
+  } finally {
+    if (refreshingVideoJobId.value === jobId) refreshingVideoJobId.value = null
+    generating.value = false
+  }
 }
 async function showSellingPointsEditor() {
   sellingPointsEditing.value = true
@@ -220,7 +260,7 @@ async function waitForVideoJob(jobId: string): Promise<VideoJob> {
   for (let attempt = 0; attempt < 1200; attempt += 1) {
     const latest = await getVideoJob(jobId)
     job.value = latest
-    if (FINAL_VIDEO_JOB_STATUSES.has(latest.status)) return latest
+    if (!videoJobNeedsRefresh(latest)) return latest
     await new Promise((resolve) => window.setTimeout(resolve, VIDEO_JOB_POLL_INTERVAL_MS))
   }
   throw new Error('视频任务等待超时')
@@ -295,6 +335,7 @@ async function retryFailed() {
 async function openHistoryJob(entry: VideoJob) {
   job.value = await getVideoJob(entry.id)
   selected.value = job.value.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
+  if (videoJobNeedsRefresh(job.value)) void resumeVideoJobRefresh(job.value.id)
 }
 function downloadSelected() {
   if (!job.value || !selected.value.length) return message.warning('请先选择成功视频')
@@ -404,14 +445,14 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
 
       <footer class="video-footer">
         <button v-if="videoJobActive" class="secondary-action cancel-action" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined />{{ cancelling ? '取消中' : '取消任务' }}</button>
-        <button :disabled="generating || !canGenerate" @click="generate"><RocketOutlined />{{ generating ? `正在生成 ${job?.progress || 0}%` : `生成 ${form.videoTypes.length} 条 15s 爆款视频` }}</button>
+        <button :disabled="generating || !canGenerate" @click="generate"><RocketOutlined />{{ generating ? '正在生成视频' : `生成 ${form.videoTypes.length} 条 15s 爆款视频` }}</button>
       </footer>
     </aside>
 
     <main class="video-main">
       <template v-if="job?.items.length">
         <div class="video-toolbar">
-          <div><i :class="{ failed: ['failed', 'cancelled'].includes(job.status), warning: ['partial_failed', 'partial_cancelled', 'cancelling'].includes(job.status) }" /><span><b>{{ job.status === 'succeeded' ? '生成爆款结果' : job.status === 'cancelled' ? '视频任务已取消' : job.status === 'partial_cancelled' ? '视频任务已部分取消' : job.status === 'running' ? '正在生成视频' : '视频任务完成' }}</b><small>{{ job.count }} 条 · {{ job.dry_run ? 'Dryrun' : 'Live' }}</small></span></div>
+          <div><i :class="{ failed: ['failed', 'cancelled'].includes(job.status), warning: ['partial_failed', 'partial_cancelled', 'cancelling'].includes(job.status) }" /><span><b>{{ job.status === 'succeeded' ? '生成爆款结果' : job.status === 'failed' ? '视频生成失败' : job.status === 'partial_failed' ? '部分视频生成失败' : job.status === 'cancelled' ? '视频任务已取消' : job.status === 'partial_cancelled' ? '视频任务已部分取消' : job.status === 'running' ? '正在生成视频' : '视频任务完成' }}</b><small>{{ job.count }} 条 · {{ job.dry_run ? 'Dryrun' : 'Live' }}</small></span></div>
           <div>
             <button v-if="videoJobActive" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined />{{ cancelling ? '取消中' : '取消任务' }}</button>
             <button v-if="job.items.some((item) => item.status === 'failed')" @click="retryFailed"><ReloadOutlined />重试失败</button>
@@ -420,15 +461,15 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
           </div>
         </div>
         <div class="video-result-grid">
-          <article v-for="item in job.items" :key="item.id" class="video-card" :class="{ selected: selected.includes(item.id), failed: item.status === 'failed' }">
+          <article v-for="item in job.items" :key="item.id" class="video-card" :class="{ selected: selected.includes(item.id), failed: ['failed', 'cancelled'].includes(item.status) }">
             <button class="video-select" :disabled="item.status !== 'succeeded'" @click="toggleSelected(item.id)"><CheckOutlined v-if="selected.includes(item.id)" /></button>
             <div class="video-frame">
-              <template v-if="item.status === 'succeeded' && item.versions.length">
-                <video v-if="isVideoUrl(item.versions.at(-1)?.url || '')" :src="item.versions.at(-1)?.url" muted loop playsinline controls />
-                <img v-else :src="item.versions.at(-1)?.url" alt="视频占位预览" />
+              <template v-if="item.status === 'succeeded' && currentVideoUrl(item)">
+                <video v-if="isVideoUrl(currentVideoUrl(item) || '')" :src="currentVideoUrl(item)" muted loop playsinline controls />
+                <img v-else :src="currentVideoUrl(item)" alt="视频占位预览" />
               </template>
-              <div v-else-if="item.status === 'failed'" class="video-failed"><b>生成失败</b><small>{{ item.error }}</small></div>
-              <div v-else class="video-loading"><span />正在生成视频...</div>
+              <div v-else-if="!videoPlaceholderSpinning(item)" class="video-failed"><b>{{ videoPlaceholderLabel(item) }}</b><small>{{ item.error }}</small></div>
+              <div v-else class="video-loading"><span />{{ videoPlaceholderLabel(item) }}</div>
             </div>
             <footer>
               <div>

@@ -9,7 +9,6 @@ import {
   LockOutlined,
   MobileOutlined,
   QqOutlined,
-  SafetyCertificateOutlined,
   UserOutlined,
   WechatOutlined,
 } from '@ant-design/icons-vue'
@@ -494,7 +493,6 @@ onBeforeUnmount(() => {
           <button type="button" disabled title="后续接入支付宝登录"><AlipayCircleOutlined /></button>
           <button type="button" disabled title="后续接入 QQ 登录"><QqOutlined /></button>
           <button type="button" disabled title="后续接入 Gmail 登录"><GoogleOutlined /></button>
-          <small><SafetyCertificateOutlined />手机号统一绑定</small>
         </div>
       </section>
     </div>

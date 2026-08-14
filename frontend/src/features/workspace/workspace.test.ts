@@ -14,9 +14,13 @@ import {
   createDefaultWorkspaceForm,
   generationFailureMessage,
   generationCount,
+  isActiveWorkspaceJob,
   languageOptions,
+  latestActiveWorkspaceJob,
   marketOptions,
   platformOptions,
+  previewAspectStyle,
+  PRODUCT_IMAGE_UPLOAD_LIMIT,
   phaseDefinitions,
   renderMarkdown,
   ratioOptions,
@@ -24,14 +28,31 @@ import {
   videoPlatformOptions,
   videoTypeOptions,
 } from './workspace-model'
+import {
+  BATCH_UPLOAD_CONCURRENCY,
+  batchValidationSummary,
+  buildBatchPayload,
+  createBatchGlobalParams,
+  createDefaultBatchTasks,
+  createBatchTaskDraft,
+  estimateBatchOutputs,
+  estimateTaskOutputs,
+  extractBatchProductName,
+} from './batch-model'
 import resultGridSource from './ResultGrid.vue?raw'
 import aplusPanelSource from './APlusPhasePanel.vue?raw'
+import batchHistorySource from './BatchHistoryDrawer.vue?raw'
+import batchModalSource from './BatchHostingModal.vue?raw'
+import batchTaskCardSource from './BatchTaskCard.vue?raw'
+import imageTextEditPanelSource from './ImageTextEditPanel.vue?raw'
+import watermarkMenuSource from './WatermarkDownloadMenu.vue?raw'
 import videoPanelSource from './VideoPhasePanel.vue?raw'
 import workspaceSource from './WorkspaceView.vue?raw'
 import apiClientSource from '../../api/client.ts?raw'
 
 const workspaceSuiteCss = readFileSync(new URL('./workspace-suite.css', import.meta.url), 'utf8')
 const workspaceVideoCss = readFileSync(new URL('./workspace-video.css', import.meta.url), 'utf8')
+const frontendNginxConf = readFileSync(new URL('../../../nginx.conf', import.meta.url), 'utf8')
 
 describe('workspace model', () => {
   it('keeps the four planned phase entries in order', () => {
@@ -62,12 +83,251 @@ describe('workspace model', () => {
     expect(normalizedBadgeRule).toContain('white-space:nowrap')
   })
 
+  it('selects the newest unfinished workspace job across history payloads', () => {
+    const jobs = [
+      { id: 'done-latest', status: 'succeeded', created_at: '2026-08-11T10:00:00.000Z' },
+      { id: 'running-old', status: 'running', created_at: '2026-08-11T08:00:00.000Z' },
+      { id: 'queued-new', status: 'queued', created_at: '2026-08-11T09:00:00.000Z' },
+      { id: 'cancelling-newer', status: 'cancelling', created_at: '2026-08-11T12:00:00.000Z' },
+      { id: 'failed-newer', status: 'failed', created_at: '2026-08-11T11:00:00.000Z' },
+    ]
+
+    expect(isActiveWorkspaceJob(jobs[0])).toBe(false)
+    expect(isActiveWorkspaceJob(jobs[1])).toBe(true)
+    expect(isActiveWorkspaceJob(jobs[3])).toBe(false)
+    expect(latestActiveWorkspaceJob(jobs)?.id).toBe('queued-new')
+  })
+
   it('builds a valid default dryrun payload', () => {
     const payload = buildGenerationPayload(['asset-1'], '通勤保温，防滑握持')
     expect(payload.dry_run).toBe(true)
     expect(payload.count).toBe(7)
     expect(payload.aspect_ratio).toBe('1:1')
     expect(payload.asset_ids).toEqual(['asset-1'])
+  })
+
+  it('parses result preview aspect ratios for contained watermark placement', () => {
+    expect(previewAspectStyle('970:600')).toEqual({
+      '--preview-aspect-ratio': '970 / 600',
+      '--preview-aspect-number': String(970 / 600),
+    })
+    expect(previewAspectStyle('16/9')).toEqual({
+      '--preview-aspect-ratio': '16 / 9',
+      '--preview-aspect-number': String(16 / 9),
+    })
+    expect(previewAspectStyle('bad')).toEqual({
+      '--preview-aspect-ratio': '1 / 1',
+      '--preview-aspect-number': '1',
+    })
+  })
+
+  it('builds batch payloads with inherited globals and item overrides only', () => {
+    const suiteForm = createDefaultWorkspaceForm()
+    suiteForm.mode = 'custom'
+    suiteForm.customCounts = { white_background: 4, scene: 4, selling_point: 2, other: 2 }
+    const globalParams = { ...createBatchGlobalParams('suite', suiteForm), platform: 'Amazon' }
+    const task = createBatchTaskDraft(1)
+    task.sellingPoints = '### 1. 商品定位\n- 品名： 防滑随行保温杯\n- 核心卖点：Waterproof'
+    task.assets = [{ id: 'asset-1', original_name: 'a.png', url: '/a.png', width: 100, height: 100 }]
+    task.overrides = { market: 'Canada' }
+
+    const payload = buildBatchPayload('suite', globalParams, [task])
+
+    expect(payload.business_type).toBe('suite')
+    expect(payload.global_params).toMatchObject({ platform: 'Amazon', count: 7, mode: 'smart' })
+    expect(payload.global_params).not.toHaveProperty('custom_counts')
+    expect(payload.items[0]).toMatchObject({
+      asset_ids: ['asset-1'],
+      name: '防滑随行保温杯',
+      selling_points: '### 1. 商品定位\n- 品名： 防滑随行保温杯\n- 核心卖点：Waterproof',
+      overrides: { market: 'Canada' },
+    })
+  })
+
+  it('extracts batch product names only from explicit product-name labels', () => {
+    expect(extractBatchProductName('### 1. 商品定位\n- 品名： 突出产品用途、材质体验与使用场景')).toBe('突出产品用途、材质体验与使用场景')
+    expect(extractBatchProductName('1、商品名称: 米色硅胶防滑不锈钢随行 tumbler')).toBe('米色硅胶防滑不锈钢随行 tumbler')
+    expect(extractBatchProductName('### 1. 商品定位\n- 核心卖点：防滑保温')).toBe('')
+    expect(extractBatchProductName('- 品名： ---')).toBe('')
+  })
+
+  it('validates batch limits from workspace config and estimates outputs', () => {
+    const config = { max_upload_bytes: 1, max_batch_tasks: 2, max_batch_item_assets: 2, max_active_batch_items: 1, max_provider_concurrency: 4 }
+    const complete = createBatchTaskDraft(1)
+    complete.assets = [{ id: 'asset-1', original_name: 'a.png', url: '/a.png', width: 100, height: 100 }]
+    complete.sellingPoints = 'Durable'
+    const incomplete = createBatchTaskDraft(2)
+    incomplete.uploadError = 'failed'
+
+    const summary = batchValidationSummary('suite', [complete, incomplete], { count: 8 }, config)
+
+    expect(summary.taskCount).toBe(2)
+    expect(summary.estimatedImages).toBe(14)
+    expect(summary.uploadFailedCount).toBe(1)
+    expect(summary.incompleteCount).toBe(1)
+    expect(estimateBatchOutputs('aplus', { module_selections: [{ count: 2 }], output_targets: [{}, {}] })).toBe(4)
+    expect(estimateTaskOutputs('aplus', { module_selections: [{ count: 2 }], output_targets: [{}] }, { module_selections: [{ count: 4 }] })).toBe(4)
+    expect(batchValidationSummary('aplus', [complete], { module_selections: [], output_targets: [] }, config).incompleteCount).toBe(1)
+  })
+
+  it('wires batch hosting modal, config endpoint, upload concurrency and history actions', () => {
+    expect(BATCH_UPLOAD_CONCURRENCY).toBe(3)
+    expect(createDefaultBatchTasks()).toHaveLength(2)
+    expect(apiClientSource).toContain("api.get('/workspace-config')")
+    expect(apiClientSource).toContain('const GENERATION_REQUEST_TIMEOUT_MS = 900_000')
+    expect(apiClientSource).toContain("api.post('/batch-jobs', payload, { timeout: GENERATION_REQUEST_TIMEOUT_MS })")
+    expect(apiClientSource).toContain("api.post('/batch-jobs/validation-fixtures', { business_type: businessType }, { timeout: GENERATION_REQUEST_TIMEOUT_MS })")
+    expect(apiClientSource).toContain('/api/v1/batch-jobs/selection-download')
+    expect(workspaceSource).toContain("import BatchHostingModal from './BatchHostingModal.vue'")
+    expect(workspaceSource).toContain('批量生成托管')
+    expect(aplusPanelSource).toContain('批量生成托管')
+    expect(workspaceSource).toContain('business-type="suite"')
+    expect(aplusPanelSource).toContain('business-type="aplus"')
+    expect(batchModalSource).toContain('getWorkspaceConfig')
+    expect(batchModalSource).toContain('BATCH_UPLOAD_CONCURRENCY')
+    expect(batchModalSource).toContain('aiWriteRuns')
+    expect(batchModalSource).toContain('nextAiWriteRun')
+    expect(batchModalSource).toContain('invalidateAiWriteRun')
+    expect(batchModalSource).toContain('submitButtonDisabled')
+    expect(batchModalSource).toContain('function clearBatchDraft()')
+    expect(batchModalSource).toContain("trackBatchEvent('batch_clear_click', 'click')")
+    expect(batchModalSource).toContain('aiWriteRuns.clear()')
+    expect(batchModalSource).toContain(':disabled="submitting" @click="clearBatchDraft"')
+    expect(batchModalSource).toContain('if (!latest || latest.id !== taskId) return')
+    expect(batchModalSource).toContain('showSubmitValidation')
+    expect(batchModalSource).toContain('缺少商品图')
+    expect(batchModalSource).toContain(':disabled="submitButtonDisabled"')
+    expect(batchModalSource).toContain('extractBatchProductName(task.sellingPoints)')
+    expect(batchModalSource).toContain('createDefaultBatchTasks')
+    expect(batchModalSource).toContain(':can-delete="tasks.length > 1"')
+    expect(batchTaskCardSource).toContain('config.max_batch_item_assets')
+    expect(batchTaskCardSource).toContain('batch-task-summary-card')
+    expect(batchTaskCardSource).toContain('validationMessages')
+    expect(batchTaskCardSource).toContain(':class="{ invalid: highlighted }"')
+    expect(batchTaskCardSource).toContain('CopyOutlined')
+    expect(batchTaskCardSource).toContain('跟随全局-平台')
+    expect(batchTaskCardSource).toContain('跟随全局-生成偏好')
+    expect(batchHistorySource).toContain('createBatchValidationFixtures')
+    expect(batchHistorySource).toContain('selectTasks')
+    expect(batchHistorySource).toContain('completed_image_count')
+    expect(batchHistorySource).toContain('thumbnail_url')
+    expect(batchHistorySource).toContain('width="600"')
+    expect(batchHistorySource).toContain('batch-history-batch-main')
+    expect(batchHistorySource).toContain(':class="{ checked: taskChecked(item.id) }"')
+    expect(batchHistorySource).toContain('if (selectedCount.value > 0)')
+    expect(batchHistorySource).toContain('toggleTask(item)')
+    expect(batchHistorySource).not.toContain('batch-progress-track')
+    expect(workspaceSuiteCss).not.toContain('.batch-progress-track')
+    expect(batchHistorySource).not.toContain('retryFailedBatchJob')
+    expect(batchHistorySource).not.toContain('batchDownloadUrl')
+    expect(batchHistorySource).not.toContain('cancelBatchJob')
+    expect(batchModalSource).toContain('selectHistory: [BatchSelectionPayload]')
+    expect(workspaceSource).toContain('openSuiteBatchSelection')
+    expect(aplusPanelSource).toContain('openBatchSelection')
+    expect(workspaceSource).toContain('batch-suite-workspace')
+    expect(aplusPanelSource).toContain('batch-aplus-workspace')
+    expect(workspaceSource).toContain('downloadSuiteBatchGroup')
+    expect(aplusPanelSource).toContain('downloadAplusBatchGroup')
+    expect(workspaceSource).toContain('toggleSelectionScope')
+    expect(aplusPanelSource).toContain('toggleSelectionScope')
+    expect(workspaceSource).toContain('toggleSuiteBatchSuccess')
+    expect(aplusPanelSource).toContain('toggleAplusBatchSuccess')
+    expect(workspaceSource).toContain('toggleSuiteGroupSuccess')
+    expect(aplusPanelSource).toContain('toggleAplusGroupSuccess')
+    expect(workspaceSource).toContain('toggleSuiteJobSuccess')
+    expect(aplusPanelSource).toContain('toggleGenerationSuccess')
+    expect(workspaceSource).toContain("{{ batchSuiteAllSelected ? '取消全选' : '全选成功项' }}")
+    expect(aplusPanelSource).toContain("{{ batchAplusAllSelected ? '取消全选' : '全选成功项' }}")
+    expect(workspaceSource).toContain('selected.value = []')
+    expect(aplusPanelSource).toContain('selectedResultIds.value = []')
+    expect(workspaceSource).not.toContain('selected.value = batchSuiteSuccessfulIds.value')
+    expect(aplusPanelSource).not.toContain('selectedResultIds.value = batchAplusSuccessfulIds.value')
+    expect(resultGridSource).toContain('@click.stop="emit(\'toggle\', item.id)"')
+    expect(aplusPanelSource).toContain('@click.stop="toggleResult(item.id)"')
+    expect(workspaceSource).toContain('button-label="下载"')
+    expect(aplusPanelSource).toContain('button-label="下载"')
+    expect(workspaceSource).toContain("batchSelectionDownloadUrl('suite'")
+    expect(aplusPanelSource).toContain("batchSelectionDownloadUrl('aplus'")
+    expect(workspaceSuiteCss).toContain('.batch-result-group-actions')
+    expect(workspaceSuiteCss).toContain('.batch-group-download-menu .download-button')
+    expect(workspaceSuiteCss).toContain('min-width: 74px;')
+    expect(workspaceSource).toContain("{{ suiteGroupAllSelected(group) ? '取消全选' : '全选本任务' }}")
+    expect(aplusPanelSource).toContain("{{ aplusGroupAllSelected(group) ? '取消全选' : '全选本任务' }}")
+    expect(workspaceSource).not.toContain('取消本任务')
+    expect(aplusPanelSource).not.toContain('取消本任务')
+    expect(workspaceSuiteCss).toContain('grid-template-columns: 200px 330px;')
+    expect(workspaceSuiteCss).toContain('width: 542px;')
+    expect(workspaceSuiteCss).toContain('overflow-x: hidden;')
+    expect(workspaceSuiteCss).toContain('object-fit: contain;')
+    expect(batchModalSource).toContain('批量生成托管')
+    expect(batchModalSource).not.toContain('请选择托管业务类型')
+    expect(batchModalSource).not.toContain('生成张数')
+    expect(batchModalSource).not.toContain('模型偏好')
+    expect(batchModalSource).toContain('生成偏好')
+    expect(batchTaskCardSource).not.toContain('<input :value="task.name"')
+    expect(batchTaskCardSource).toContain('ref="copyInput"')
+    expect(batchTaskCardSource).toContain('@pointerdown.stop="openCopyEditor"')
+    expect(batchTaskCardSource).toContain('class="markdown-preview main-copy-preview"')
+    expect(batchTaskCardSource).toContain('task.sellingPoints.trim() && !task.copyEditing')
+    expect(batchTaskCardSource).toContain('v-html="renderMarkdown(task.sellingPoints)"')
+    expect(batchTaskCardSource).toContain('copyEditing: false')
+    expect(batchTaskCardSource).toContain('确认回填')
+    expect(batchTaskCardSource).toContain('extractBatchProductName(props.task.sellingPoints)')
+    expect(batchTaskCardSource).toContain('nextTask.aiWriteOpen = false')
+    expect(batchTaskCardSource).toContain('nextTask.aiSuggestion =')
+    expect(workspaceSuiteCss).toContain('.batch-global-grid.suite-global-grid')
+    expect(workspaceSuiteCss).toContain('.batch-summary-media')
+    expect(workspaceSuiteCss).toContain('.batch-submit-notice')
+    expect(workspaceSuiteCss).toContain('.batch-task-card.invalid')
+    expect(apiClientSource).toContain('/aplus-items/${id}/retry')
+    expect(apiClientSource).toContain("api.post('/aplus-plan-jobs', payload, { timeout: GENERATION_REQUEST_TIMEOUT_MS })")
+    expect(apiClientSource).toContain("api.post('/aplus-generation-jobs', payload, { timeout: GENERATION_REQUEST_TIMEOUT_MS })")
+    expect(apiClientSource).toContain('api.post(`/aplus-generation-jobs/${jobId}/retry-failed`, undefined, { timeout: GENERATION_REQUEST_TIMEOUT_MS })')
+    expect(apiClientSource).toContain('api.post(`/aplus-items/${id}/retry`, undefined, { timeout: GENERATION_REQUEST_TIMEOUT_MS })')
+    expect(aplusPanelSource).toContain('retryFailedAplusItems')
+    expect(aplusPanelSource).toContain('retryAplusItem')
+    expect(aplusPanelSource).toContain('重试失败项')
+    expect(aplusPanelSource).toContain('title="重新生成"')
+  })
+
+  it('shows selected output size and exits editing mode after AI backfill', () => {
+    expect(resultGridSource).toContain('selectedSizeLabel')
+    expect(resultGridSource).toContain('class="image-size-meta"')
+    expect(workspaceSuiteCss).toContain('.image-size-meta')
+    expect(resultGridSource).not.toContain('naturalImageSizes')
+    expect(resultGridSource).not.toContain('imageSizeLabel')
+    expect(aplusPanelSource).not.toContain('naturalImageSizes')
+    expect(aplusPanelSource).not.toContain('imageSizeLabel')
+    expect(aplusPanelSource).not.toContain('class="image-size-meta"')
+    expect(resultGridSource).not.toContain('class="image-size-badge"')
+    expect(aplusPanelSource).not.toContain('class="image-size-badge"')
+    expect(workspaceSuiteCss).not.toContain('.image-size-badge')
+    expect(workspaceSource).toContain('sellingPointsEditing.value = false')
+    expect(videoPanelSource).toContain('sellingPointsEditing.value = false')
+    expect(aplusPanelSource).toContain('productInfoEditing.value = false')
+  })
+
+  it('keeps batch A+ configuration aligned with the main A+ panel', () => {
+    expect(batchModalSource).toContain('aplusModules')
+    expect(batchModalSource).toContain('moduleCount(module.name)')
+    expect(batchModalSource).toContain('incrementModule(module.name)')
+    expect(batchModalSource).toContain('decrementModule(module.name)')
+    expect(batchModalSource).toContain('普通 A+ 和高级 A+ 仅亚马逊平台可用')
+    expect(batchModalSource).toContain('availableAplusOutputSpecs')
+    expect(batchModalSource).toContain('buildAplusOutputTargets')
+    expect(batchTaskCardSource).toContain('跟随全局-输出规格')
+    expect(batchTaskCardSource).toContain('itemOutputSpecChoices')
+    expect(batchTaskCardSource).toContain('applyAplusOutputOverride')
+    expect(batchTaskCardSource).toContain('batch-override-module-panel')
+    expect(batchTaskCardSource).toContain('setTaskModuleFollow')
+    expect(batchTaskCardSource).toContain(':aria-pressed="taskFollowsGlobalModules"')
+    expect(batchTaskCardSource).toContain('class="aplus-module-option batch-module-option batch-task-module-option"')
+    expect(batchTaskCardSource).toContain('module.description')
+    expect(batchTaskCardSource).toContain('batch-task-module-stepper')
+    expect(batchTaskCardSource).toContain('module_selections')
+    expect(batchTaskCardSource).not.toContain('checkedValue($event)')
+    expect(batchTaskCardSource).not.toContain("v-if=\"businessType === 'aplus'\">比例")
+    expect(createBatchGlobalParams('aplus').module_selections).toEqual(createDefaultAplusForm().selectedModules)
   })
 
   it('treats detail, standard A+ and advanced A+ as mutually exclusive output specs', () => {
@@ -157,16 +417,26 @@ describe('workspace model', () => {
     expect(workspaceSource).toContain('<CloseOutlined/>')
   })
 
-  it('disables the upload entry and shows a clear hint after three product images', () => {
+  it('disables the upload entry and shows a clear hint after six product images', () => {
     const disabledRule = workspaceSuiteCss.match(/\.upload-zone\.disabled\s*\{([^}]*)\}/)?.[1] ?? ''
     const normalizedDisabledRule = disabledRule.replace(/\s+/g, '')
 
-    expect(workspaceSource).toContain('const uploadLimitReached = computed(() => assets.value.length >= 3)')
+    expect(PRODUCT_IMAGE_UPLOAD_LIMIT).toBe(6)
+    expect(workspaceSource).toContain('const uploadLimitReached = computed(() => assets.value.length >= PRODUCT_IMAGE_UPLOAD_LIMIT)')
+    expect(aplusPanelSource).toContain('const uploadLimitReached = computed(() => assets.value.length >= PRODUCT_IMAGE_UPLOAD_LIMIT)')
+    expect(videoPanelSource).toContain('const uploadLimitReached = computed(() => assets.value.length >= PRODUCT_IMAGE_UPLOAD_LIMIT)')
+    expect(workspaceSource).toContain('const remaining = PRODUCT_IMAGE_UPLOAD_LIMIT - assets.value.length')
+    expect(aplusPanelSource).toContain('const remaining = PRODUCT_IMAGE_UPLOAD_LIMIT - assets.value.length')
+    expect(videoPanelSource).toContain('const remaining = PRODUCT_IMAGE_UPLOAD_LIMIT - assets.value.length')
     expect(workspaceSource).toContain(':disabled="uploadLimitReached || uploading"')
     expect(workspaceSource).toContain(':aria-disabled="uploadLimitReached || uploading"')
-    expect(workspaceSource).toContain("uploadLimitReached ? '最多上传 3 张'")
+    expect(workspaceSource).toContain("uploadLimitReached ? `最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张`")
+    expect(aplusPanelSource).toContain("uploadLimitReached ? `最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张`")
+    expect(videoPanelSource).toContain("uploadLimitReached ? `最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张`")
     expect(workspaceSource).toContain("uploadLimitReached ? '删除已有图片后可继续上传'")
-    expect(workspaceSource).toContain("message.warning('最多上传 3 张商品图，请先删除已有图片')")
+    expect(workspaceSource).toContain('最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张商品图，请先删除已有图片')
+    expect(aplusPanelSource).toContain('最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张商品图，本次只添加 ${remaining} 张')
+    expect(videoPanelSource).toContain('最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张商品图，本次只添加 ${remaining} 张')
     expect(normalizedDisabledRule).toContain('cursor:not-allowed')
     expect(normalizedDisabledRule).toContain('opacity:.68')
   })
@@ -270,6 +540,15 @@ describe('workspace model', () => {
     expect(ratioOptions).toHaveLength(4)
   })
 
+  it('removes product category from workspace inputs and upload analytics payloads', () => {
+    expect(workspaceSource).not.toContain('商品类目')
+    expect(aplusPanelSource).not.toContain('商品类目')
+    expect(videoPanelSource).not.toContain('商品类目')
+    expect(workspaceSource).not.toContain('product_category: form.value.category')
+    expect(aplusPanelSource).not.toContain('product_category: form.value.category')
+    expect(videoPanelSource).not.toContain('product_category: form.value.category')
+  })
+
   it('keeps smart matching on the meta prompt default seven images without a count selector', () => {
     const form = createDefaultWorkspaceForm()
     form.mode = 'smart'
@@ -287,6 +566,11 @@ describe('workspace model', () => {
     expect(workspaceSource).toContain('v-model:open="confirmOpen"')
     expect(workspaceSource).toContain('runConfirmedGeneration')
     expect(workspaceSource).toContain('retryFailedItems')
+    expect(workspaceSource).toContain('retryItem')
+    expect(workspaceSource).toContain('async function retrySingleItem(item: JobItem)')
+    expect(workspaceSource).toContain('@retry="retrySingleItem"')
+    expect(apiClientSource).toContain('api.post(`/generation-items/${id}/retry`, undefined, { timeout: GENERATION_REQUEST_TIMEOUT_MS })')
+    expect(apiClientSource).toContain('api.post(`/generation-jobs/${jobId}/retry-failed`, undefined, { timeout: GENERATION_REQUEST_TIMEOUT_MS })')
     expect(workspaceSource).not.toContain("@retry=\"message.info('仅失败项会进入重试')\"")
   })
 
@@ -312,11 +596,93 @@ describe('workspace model', () => {
 
   it('offers ZIP and long image download formats', () => {
     expect(workspaceSource).toContain('generationDownloadUrl')
-    expect(workspaceSource).toContain("download('zip')")
-    expect(workspaceSource).toContain("download('long_image')")
+    expect(workspaceSource).toContain('WatermarkDownloadMenu')
+    expect(workspaceSource).toContain("format: 'zip'")
+    expect(workspaceSource).toContain("format: 'long_image'")
     expect(workspaceSource).toContain('下载套图 ZIP')
     expect(workspaceSource).toContain('下载长拼图 PNG')
+    expect(aplusPanelSource).toContain('下载 A+ ZIP')
+    expect(aplusPanelSource).toContain('下载长拼图 PNG')
+    expect(watermarkMenuSource).toContain('buttonLabel?: string')
+    expect(watermarkMenuSource).toContain("buttonLabel: '下载选中'")
+    expect(watermarkMenuSource).toContain('{{ buttonLabel }}')
+    expect(watermarkMenuSource).toContain("openMenu === 'formats'")
     expect(workspaceSuiteCss).toContain('.download-menu-panel')
+    expect(workspaceSuiteCss).toContain('.download-format-panel')
+  })
+
+  it('routes image downloads through watermark preferences', () => {
+    expect(apiClientSource).toContain('include_watermark: String(includeWatermark)')
+    expect(workspaceSource).toContain('const includeWatermark = ref(true)')
+    expect(workspaceSource).toContain('const batchSuiteWatermarkByItemId = ref<Record<string, boolean>>({})')
+    expect(workspaceSource).toContain('function updateSuiteGroupIncludeWatermark')
+    expect(workspaceSource).toContain('function suiteGroupIncludeWatermark')
+    expect(workspaceSource).toContain("batchSelectionDownloadUrl('suite', [group.item.id], itemIds, format, suiteGroupIncludeWatermark(group))")
+    expect(workspaceSource).toContain(':include-watermark="suiteGroupIncludeWatermark(group)"')
+    expect(workspaceSource).toContain('@update:include-watermark="(value) => updateSuiteGroupIncludeWatermark(group, value)"')
+    expect(workspaceSource).toContain(':show-watermark="suiteGroupIncludeWatermark(group)"')
+    expect(workspaceSource).toContain('v-if="activeItemIncludeWatermark"')
+    expect(workspaceSource).toContain('generationDownloadUrl(job.value.id, itemIds, format, includeWatermark.value)')
+    expect(workspaceSource).toContain(':show-watermark="includeWatermark"')
+    expect(resultGridSource).toContain('/watermarks/ai-generated-badge-v2.svg')
+    expect(resultGridSource).toContain('image-watermark-box')
+    expect(aplusPanelSource).toContain('const batchAplusWatermarkByItemId = ref<Record<string, boolean>>({})')
+    expect(aplusPanelSource).toContain('function updateAplusGroupIncludeWatermark')
+    expect(aplusPanelSource).toContain('function aplusGroupIncludeWatermark')
+    expect(aplusPanelSource).toContain("batchSelectionDownloadUrl('aplus', [group.item.id], itemIds, format, aplusGroupIncludeWatermark(group))")
+    expect(aplusPanelSource).toContain(':include-watermark="aplusGroupIncludeWatermark(group)"')
+    expect(aplusPanelSource).toContain('@update:include-watermark="(value) => updateAplusGroupIncludeWatermark(group, value)"')
+    expect(aplusPanelSource).toContain('v-if="aplusGroupIncludeWatermark(group)"')
+    expect(aplusPanelSource).toContain('v-if="previewItemIncludeWatermark"')
+    expect(aplusPanelSource).toContain('aplusDownloadUrl(generationJob.value.id, itemIds, format, includeWatermark.value)')
+    expect(aplusPanelSource).toContain("@upgrade=\"emit('open-pricing')\"")
+    expect(workspaceSuiteCss).toContain('.ai-watermark-overlay')
+    expect(workspaceSuiteCss).toContain('.image-watermark-box')
+    expect(workspaceSuiteCss).toContain('.watermark-download-panel')
+    expect(watermarkMenuSource).toContain("openMenu === 'watermark'")
+    expect(watermarkMenuSource).toContain('watermark-upgrade-link')
+  })
+
+  it('tracks core workspace actions for business monitoring', () => {
+    expect(apiClientSource).toContain('/analytics/events')
+    expect(workspaceSource).toContain("import { trackWorkspaceEvent } from './analytics'")
+    expect(workspaceSource).toContain('suite_generate_submit')
+    expect(workspaceSource).toContain('suite_batch_click')
+    expect(workspaceSource).toContain('suite_download')
+    expect(aplusPanelSource).toContain('aplus_output_spec_click')
+    expect(aplusPanelSource).toContain('aplus_module_click')
+    expect(aplusPanelSource).toContain('aplus_generate_submit')
+    expect(videoPanelSource).toContain('video_type_click')
+    expect(videoPanelSource).toContain('video_generate_submit')
+    expect(batchModalSource).toContain('batch_submit')
+  })
+
+  it('requires login before home workspace model-backed actions', () => {
+    expect(workspaceSource).toContain('function requireAuthForModelAction(): boolean')
+    expect(workspaceSource).not.toContain("message.info('请先登录后再使用 AI 生成功能')")
+    expect(workspaceSource).toContain("function openSuiteBatch() {\n  trackSuiteEvent('suite_batch_click', 'click', 'batch_suite')\n  if (requireAuthForModelAction()) return")
+    expect(workspaceSource).toContain('@require-auth="requireAuthForModelAction"')
+    expect(workspaceSource).toContain('<APlusPhasePanel v-if="phase===\'aplus\'" ref="aplusPanel" @open-pricing="openPricing" @require-auth="requireAuthForModelAction" />')
+    expect(workspaceSource).toContain('<VideoPhasePanel v-if="phase===\'video\'" ref="videoPanel" @require-auth="requireAuthForModelAction" />')
+    expect(workspaceSource).toContain('<BatchHostingModal v-model:open="suiteBatchOpen" business-type="suite" :suite-form="form" @select-history="openSuiteBatchSelection" @require-auth="requireAuthForModelAction" />')
+
+    expect(aplusPanelSource).toContain("'require-auth': []")
+    expect(aplusPanelSource).toContain('function openBatchHosting()')
+    expect(aplusPanelSource).toContain("trackAplusEvent('aplus_batch_click', 'click', 'batch_aplus')")
+    expect(aplusPanelSource).toContain('@click="openBatchHosting"')
+    expect(aplusPanelSource).toContain('@require-auth="emit(\'require-auth\')"')
+    expect(videoPanelSource).toContain("const emit = defineEmits<{ 'require-auth': [] }>()")
+    expect(batchModalSource).toContain("'require-auth': []")
+    expect(batchModalSource).toContain("emit('update:open', false)\n  emit('require-auth')")
+
+    expect((workspaceSource.match(/if \(requireAuthForModelAction\(\)\) return/g) ?? []).length).toBeGreaterThanOrEqual(8)
+    expect((aplusPanelSource.match(/if \(requireAuthForModelAction\(\)\) return/g) ?? []).length).toBeGreaterThanOrEqual(7)
+    expect((videoPanelSource.match(/if \(requireAuthForModelAction\(\)\) return/g) ?? []).length).toBeGreaterThanOrEqual(4)
+    expect((batchModalSource.match(/if \(requireAuthForModelAction\(\)\) return/g) ?? []).length).toBeGreaterThanOrEqual(2)
+
+    expect(aplusPanelSource).toContain('async function regenerateCopywriting() {\n  await aiWrite()\n}')
+    expect(videoPanelSource).toContain('async function regenerateCopywriting() {\n  await aiWrite()\n}')
+    expect(batchModalSource).toContain('async function aiWriteTask(index: number) {\n  if (requireAuthForModelAction()) return')
   })
 
   it('shows optimistic running cards immediately after generation confirmation', () => {
@@ -325,6 +691,7 @@ describe('workspace model', () => {
     expect(workspaceSource).toContain("status: 'running'")
     expect(workspaceSource).toContain('job.value = createOptimisticJob(payload)')
     expect(workspaceSource).toContain('const created = preservePendingJobItems(await createJob(payload)); job.value = created')
+    expect(apiClientSource).toContain("api.post('/generation-jobs', payload, { timeout: GENERATION_REQUEST_TIMEOUT_MS })")
   })
 
   it('polls running jobs frequently so finished cards appear without a refresh', () => {
@@ -362,6 +729,19 @@ describe('workspace model', () => {
     expect(videoPanelSource).toContain('void resumeVideoJobRefresh(job.value.id)')
   })
 
+  it('restores the latest unfinished generation task after page refresh', () => {
+    expect(apiClientSource).toContain("api.get('/aplus-plan-jobs')")
+    expect(workspaceSource).toContain('latestActiveWorkspaceJob(entries)')
+    expect(workspaceSource).toContain('const [planJobs, generationJobs] = await Promise.all([listAplusPlanJobs(), listAplusGenerationJobs()])')
+    expect(workspaceSource).toContain("await router.replace(`/app/${candidate.phase}`)")
+    expect(workspaceSource).toContain("await aplusPanel.value?.openHistoryJob(candidate.entry as AplusJob, { continuePlan: true })")
+    expect(workspaceSource).toContain('suppressedAutoRestorePhases.value = copyPhaseSet(suppressedAutoRestorePhases.value, phase.value)')
+    expect(aplusPanelSource).toContain('function outputTargetsFromPlan')
+    expect(aplusPanelSource).toContain('function placeholderPlanItemsFromJob')
+    expect(aplusPanelSource).toContain('async function continueGenerationFromPlan')
+    expect(aplusPanelSource).toContain("options.continuePlan && planJob.value?.status === 'succeeded'")
+  })
+
   it('shows terminal card placeholders without spinning as generating', () => {
     expect(resultGridSource).toContain("if (item.status === 'failed') return '生成失败'")
     expect(resultGridSource).toContain("if (item.status === 'cancelled') return '已取消'")
@@ -381,7 +761,8 @@ describe('workspace model', () => {
   })
 
   it('removes user-facing progress percentages from active generation buttons', () => {
-    expect(workspaceSource).toContain("generating ? '正在处理'")
+    expect(workspaceSource).toContain("submittingGeneration ? '正在提交'")
+    expect(workspaceSource).toContain('followSubmittedSuiteJob')
     expect(workspaceSource).not.toContain('正在处理 ${job?.progress')
     expect(aplusPanelSource).toContain("planning ? '生成方案中' : generating ? '生成图片中'")
     expect(aplusPanelSource).not.toContain('生成方案 ${planJob?.progress')
@@ -403,6 +784,10 @@ describe('workspace model', () => {
     expect(workspaceSource).toContain('重新帮写')
     expect(workspaceSource).toContain('确认回填')
     expect(workspaceSource).toContain('<Teleport to="body">')
+    expect(workspaceSource).toContain("aiSuggestion.value = ''")
+    expect(workspaceSource).toContain('sellingPointsEditing.value = true')
+    expect(aplusPanelSource).toContain('productInfoEditing.value = true')
+    expect(videoPanelSource).toContain('sellingPointsEditing.value = true')
     expect(workspaceSource).not.toContain('form.value.sellingPoints = result.selling_points')
   })
 
@@ -424,6 +809,12 @@ describe('workspace model', () => {
     expect(workspaceSource).toContain('showSellingPointsEditor')
     expect(aplusPanelSource).toContain('showProductInfoEditor')
     expect(workspaceSuiteCss).not.toContain('.markdown-editor-toggle')
+    expect(workspaceSuiteCss).toContain('.selling-points-markdown-frame .markdown-preview')
+    expect(workspaceSuiteCss).toContain('height: 190px')
+    expect(workspaceSuiteCss).toContain('resize: vertical')
+    expect(workspaceSuiteCss).toContain('.batch-hosting-modal-wrap .ant-modal')
+    expect(workspaceSuiteCss).toContain('top: 28px')
+    expect(workspaceSuiteCss).toContain('height: 240px')
     expect(workspaceSource).toContain('class="markdown-input-frame ai-suggestion-markdown-frame"')
     expect(workspaceSource).toContain('v-html="renderMarkdown(aiSuggestion)"')
   })
@@ -443,7 +834,7 @@ describe('workspace model', () => {
   it('wires the video phase to the real video workspace instead of the demo panel', () => {
     expect(workspaceSource).toContain("import VideoPhasePanel from './VideoPhasePanel.vue'")
     expect(workspaceSource).toContain('<KeepAlive>')
-    expect(workspaceSource).toContain('<VideoPhasePanel v-if="phase===\'video\'" ref="videoPanel" />')
+    expect(workspaceSource).toContain('<VideoPhasePanel v-if="phase===\'video\'" ref="videoPanel" @require-auth="requireAuthForModelAction" />')
     expect(workspaceSource).toContain('APlusPhasePanel v-if="phase===\'aplus\'" ref="aplusPanel"')
   })
 
@@ -470,7 +861,7 @@ describe('workspace model', () => {
     expect(workspaceSource).toContain('videoPanel.value?.startNewTask()')
     expect(workspaceSource).toContain('function resetSuiteTask')
     expect(workspaceSource).toContain('currentDryRun')
-    expect(aplusPanelSource).toContain('defineExpose({ openHistoryJob, startNewTask, dryRun })')
+    expect(aplusPanelSource).toContain('defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })')
     expect(videoPanelSource).toContain('defineExpose({ openHistoryJob, startNewTask, dryRun })')
   })
 
@@ -531,26 +922,138 @@ describe('workspace model', () => {
     expect(aplusPanelSource).not.toContain('outputTargets.map((target) => aplusTargetLabel(target.mode, target.aspect_ratio)).join')
     expect(aplusPanelSource).toContain('function scriptMarkdown')
     expect(aplusPanelSource).toContain('A+ 图片脚本')
-    expect(aplusPanelSource).toContain('<PlayCircleOutlined />脚本')
+    expect(aplusPanelSource).toContain('title="预览" aria-label="预览"')
+    expect(aplusPanelSource).toContain('function canPreviewAplusItem')
+    expect(aplusPanelSource).toContain("return item.status === 'succeeded' && Boolean(currentUrl(item))")
+    expect(aplusPanelSource).toContain(':disabled="!canPreviewAplusItem(item)"')
+    expect(aplusPanelSource).toContain('title="二次编辑" aria-label="二次编辑"')
+    expect(aplusPanelSource).toContain('title="编辑文字" aria-label="编辑文字"')
+    expect(aplusPanelSource).toContain('title="脚本" aria-label="脚本"')
+    expect(aplusPanelSource).not.toContain('<EyeOutlined />预览')
+    expect(aplusPanelSource).not.toContain('<EditOutlined />编辑')
+    expect(aplusPanelSource).not.toContain('<FileTextOutlined />文字')
+    expect(aplusPanelSource).not.toContain('<PlayCircleOutlined />脚本')
     expect(apiClientSource).toContain('api.post(`/aplus-items/${id}/versions`')
+    expect(apiClientSource).toContain('api.post(`/aplus-items/${id}/text-ocr`')
+    expect(apiClientSource).toContain('api.post(`/aplus-items/${id}/text-versions`')
     expect(resultGridSource).toContain('script: [item: JobItem]')
-    expect(resultGridSource).toContain('PlayCircleOutlined')
+    expect(resultGridSource).toContain('textEdit: [item: JobItem]')
+    expect(resultGridSource).toContain('title="预览" aria-label="预览"')
+    expect(resultGridSource).toContain("const canUseResult = (item: JobItem) => item.status === 'succeeded' && Boolean(currentUrl(item))")
+    expect(resultGridSource).toContain(':disabled="!canUseResult(item)"')
+    expect(resultGridSource).toContain('function previewItem(item: JobItem)')
+    expect(resultGridSource).toContain('title="二次编辑" aria-label="二次编辑"')
+    expect(resultGridSource).toContain('title="编辑文字" aria-label="编辑文字"')
+    expect(resultGridSource).toContain('title="脚本" aria-label="脚本"')
+    expect(resultGridSource).not.toContain('<EyeOutlined />预览')
+    expect(resultGridSource).not.toContain('<EditOutlined />编辑')
+    expect(resultGridSource).not.toContain('<FileTextOutlined />文字')
+    expect(resultGridSource).not.toContain('<PlayCircleOutlined />脚本')
     expect(normalizedWorkspace).toContain('display:block')
     expect(normalizedGrid).toContain('grid-template-columns:repeat(3,minmax(240px,1fr))')
     expect(workspaceSuiteCss).toContain('aspect-ratio: 1 / 1;')
     expect(workspaceSuiteCss).toContain('object-fit: contain;')
+    const aplusCardButtonRule = workspaceSuiteCss.match(/\.aplus-result-card footer button\s*\{([^}]*)\}/)?.[1]?.replace(/\s+/g, '') ?? ''
+    expect(aplusCardButtonRule).toContain('width:28px')
+    expect(aplusCardButtonRule).toContain('height:28px')
+    expect(aplusCardButtonRule).toContain('color:#6d7480')
     expect(workspaceSuiteCss).toContain('.aplus-results > header > div:first-child')
     expect(workspaceSuiteCss).toContain('.aplus-result-actions')
     expect(workspaceSuiteCss).toContain('flex-wrap: nowrap;')
     expect(workspaceSuiteCss).toContain('white-space: nowrap;')
     expect(workspaceSuiteCss).toContain('.aplus-script-preview')
+    expect(workspaceSuiteCss).toContain('.text-edit-side-panel')
+    expect(workspaceSuiteCss).toContain('.text-edit-confirm.ready')
+  })
+
+  it('uses regeneration copy and guarded loading for image edit modals', () => {
+    const editPlaceholderRule = workspaceSuiteCss.match(/\.edit-dialog textarea::placeholder\s*\{([^}]*)\}/)?.[1] ?? ''
+    const normalizedEditPlaceholderRule = editPlaceholderRule.replace(/\s+/g, '')
+
+    expect(workspaceSource).toContain("const editInstruction = ref(''); const editSubmitting = ref(false)")
+    expect(workspaceSource).toContain("const suiteEditPlaceholder = '写下这次想调整的画面；不填则按当前版本重新生成。比如：让背景更清爽、主体位置微调、保留商品外观。'")
+    expect(workspaceSource).toContain("const instruction = editInstruction.value.trim()")
+    expect(workspaceSource).not.toContain('suiteDefaultEditInstruction')
+    expect(workspaceSource).toContain('if (editSubmitting.value || !activeItem.value')
+    expect(workspaceSource).toContain('editInstruction.value = \'\'')
+    expect(workspaceSource).toContain('title="二次编辑" ok-text="重新生成"')
+    expect(workspaceSource).toContain(':confirm-loading="editSubmitting" @ok="submitEdit"')
+    expect(workspaceSource).toContain(':placeholder="suiteEditPlaceholder"')
+    expect(workspaceSource).toContain("message.success('已重新生成新版本')")
+    expect(workspaceSource).not.toContain('二次编辑 · 创建子版本')
+    expect(workspaceSource).not.toContain('已创建新的子版本')
+
+    expect(aplusPanelSource).toContain("const editInstruction = ref('')")
+    expect(aplusPanelSource).toContain('const editSubmitting = ref(false)')
+    expect(aplusPanelSource).toContain("const aplusEditPlaceholder = '写下这次想调整的 A+ 画面；不填则按当前版本重新生成。比如：提升背景亮度、强化材质表现、保持商品和文案不变。'")
+    expect(aplusPanelSource).toContain("const aplusDefaultEditInstruction = '按当前 A+ 图片重新生成，保持商品主体、版式卖点和文字信息不变。'")
+    expect(aplusPanelSource).toContain("const instruction = editInstruction.value.trim() || aplusDefaultEditInstruction")
+    expect(aplusPanelSource).toContain('if (editSubmitting.value || !editItemState.value')
+    expect(aplusPanelSource).toContain('title="A+ 二次编辑" ok-text="重新生成"')
+    expect(aplusPanelSource).toContain(':confirm-loading="editSubmitting" @ok="submitEdit"')
+    expect(aplusPanelSource).toContain(':placeholder="aplusEditPlaceholder"')
+    expect(aplusPanelSource).toContain("message.success('A+ 已重新生成新版本')")
+    expect(aplusPanelSource).not.toContain('已创建新的 A+ 子版本')
+
+    expect(normalizedEditPlaceholderRule).toContain('color:#a7acb5')
+    expect(normalizedEditPlaceholderRule).toContain('font-size:13px')
+    expect(normalizedEditPlaceholderRule).toContain('line-height:1.5')
   })
 
   it('renders suite result images inside a contain preview frame', () => {
     expect(resultGridSource).toContain('class="result-image-frame"')
+    expect(resultGridSource).toContain(':data-text-edit-anchor="item.id"')
+    expect(aplusPanelSource).toContain(':data-text-edit-anchor="item.id"')
+    expect(resultGridSource).toContain('class="image-watermark-box"')
+    expect(resultGridSource).toContain('aspectRatio?: string')
+    expect(resultGridSource).toContain('naturalAspectRatios')
+    expect(resultGridSource).toContain('itemPreviewAspectRatio(item)')
+    expect(resultGridSource).toContain(':style="previewAspectStyle(itemPreviewAspectRatio(item))"')
+    expect(resultGridSource).toContain('@load="updateNaturalAspect(currentUrl(item), $event)"')
+    expect(workspaceSource).toContain(':aspect-ratio="String(job.params.aspect_ratio || \'\')"')
+    expect(aplusPanelSource).toContain('naturalAspectRatios')
+    expect(aplusPanelSource).toContain('itemPreviewAspectRatio(item)')
+    expect(aplusPanelSource).toContain(':style="previewAspectStyle(itemPreviewAspectRatio(item))"')
+    expect(aplusPanelSource).toContain('@load="updateNaturalAspect(currentUrl(item), $event)"')
     expect(resultGridSource).toContain('<img :src="currentUrl(item)"')
+    expect(resultGridSource).toContain('textEdit: [item: JobItem]')
+    expect(workspaceSource).toContain('@text-edit="openTextEdit"')
+    expect(workspaceSource).toContain('<ImageTextEditPanel')
+    expect(aplusPanelSource).toContain('<ImageTextEditPanel')
+    expect(workspaceSource).toContain(':dirty="textEditDirty"')
+    expect(aplusPanelSource).toContain(':dirty="textEditDirty"')
+    expect(workspaceSource).toContain("watch(() => job.value?.id, () => {\n  closeTextEdit()\n})")
+    expect(aplusPanelSource).toContain("watch(() => generationJob.value?.id, () => {\n  closeTextEdit()\n})")
+    expect(workspaceSource).toContain("async function openHistoryJob(entry: HistoryEntry) {\n  closeTextEdit()")
+    expect(aplusPanelSource).toContain("async function openHistoryJob(entry: AplusJob, options: { continuePlan?: boolean } = {}) {\n  closeTextEdit()")
+    expect(workspaceSource).toContain("if (!anchor) {\n    closeTextEdit()\n    return\n  }")
+    expect(aplusPanelSource).toContain("if (!anchor) {\n    closeTextEdit()\n    return\n  }")
+    expect(imageTextEditPanelSource).toContain("{{ submitting ? '改字中...' : '确认改字' }}")
+    expect(imageTextEditPanelSource).toContain(':disabled="!dirty || loading || submitting"')
+    expect(imageTextEditPanelSource).toContain("ready: dirty && !loading && !submitting")
+    expect(imageTextEditPanelSource).not.toContain('确认改字 · 15')
+    expect(apiClientSource).toContain('api.post(`/generation-items/${id}/text-ocr`')
+    expect(apiClientSource).toContain('api.post(`/generation-items/${id}/text-versions`')
+    expect(apiClientSource).toContain('const IMAGE_EDIT_REQUEST_TIMEOUT_MS = 900_000')
+    expect(apiClientSource).toContain('api.post(`/generation-items/${id}/versions`, { instruction }, { timeout: IMAGE_EDIT_REQUEST_TIMEOUT_MS })')
+    expect(apiClientSource).toContain('api.post(`/aplus-items/${id}/versions`, { instruction }, { timeout: IMAGE_EDIT_REQUEST_TIMEOUT_MS })')
+    expect(apiClientSource).toContain('api.post(`/generation-items/${id}/text-versions`, { lines }, { timeout: IMAGE_EDIT_REQUEST_TIMEOUT_MS })')
+    expect(apiClientSource).toContain('api.post(`/aplus-items/${id}/text-versions`, { lines }, { timeout: IMAGE_EDIT_REQUEST_TIMEOUT_MS })')
+    expect(frontendNginxConf).toContain('proxy_read_timeout 900s;')
+    expect(frontendNginxConf).toContain('proxy_send_timeout 900s;')
+    expect(workspaceSource).not.toContain('label>原文字')
+    expect(aplusPanelSource).not.toContain('label>原文字')
+    const resultWatermarkBoxRule = workspaceSuiteCss.match(/\.result-card \.result-image-frame \.image-watermark-box,\s*\.aplus-result-image-frame \.image-watermark-box\s*\{([^}]*)\}/)?.[1]?.replace(/\s+/g, '') ?? ''
     expect(workspaceSuiteCss).toContain('.result-card .result-image-frame')
-    expect(workspaceSuiteCss).toContain('.result-card .result-image-frame img')
+    expect(workspaceSuiteCss).toContain('.result-card .result-image-frame .image-watermark-box')
+    expect(workspaceSuiteCss).toContain('.aplus-result-image-frame .image-watermark-box')
+    expect(resultWatermarkBoxRule).toContain('width:100%')
+    expect(resultWatermarkBoxRule).toContain('height:100%')
+    expect(resultWatermarkBoxRule).toContain('width:min(100cqw,calc(100cqh*var(--preview-aspect-number,1)))')
+    expect(resultWatermarkBoxRule).toContain('height:min(100cqh,calc(100cqw/var(--preview-aspect-number,1)))')
+    expect(resultWatermarkBoxRule).toContain('aspect-ratio:var(--preview-aspect-ratio,1/1)')
+    expect(workspaceSuiteCss).toContain('container-type: size;')
+    expect(workspaceSuiteCss).toContain('.result-card .image-watermark-box > img:first-child')
     expect(workspaceSuiteCss).toContain('object-fit: contain;')
     expect(workspaceSuiteCss).not.toContain('.result-card .result-image-frame img {\n  width: 100%;\n  height: 100%;\n  object-fit: cover;')
   })
@@ -607,7 +1110,6 @@ describe('workspace model', () => {
     expect(workspaceVideoCss).not.toContain('video-output-board')
     expect(workspaceVideoCss).not.toContain('video-showcase-card')
     expect(workspaceVideoCss).not.toContain('bg-black')
-    expect(workspaceVideoCss).not.toContain('background: #000')
     expect(normalizedMobile).toContain('.video-empty-stage{min-height:auto;padding:0;grid-template-columns:1fr')
     expect(normalizedMobile).toContain('.video-source-card{left:0;top:88px')
     expect(normalizedMobile).toContain('.video-result-poster{left:98px;top:132px')
@@ -690,17 +1192,51 @@ describe('workspace model', () => {
     expect(videoPanelSource).toContain('job.value = createOptimisticVideoJob(payload)')
     expect(videoPanelSource).toContain('createVideoJob(payload)')
     expect(videoPanelSource).toContain('waitForVideoJob(created.id)')
-    expect(apiClientSource).toContain("api.post('/video-jobs'")
+    expect(apiClientSource).toContain("api.post('/video-jobs', payload, { timeout: GENERATION_REQUEST_TIMEOUT_MS })")
+    expect(apiClientSource).toContain('api.post(`/video-jobs/${jobId}/retry-failed`, undefined, { timeout: GENERATION_REQUEST_TIMEOUT_MS })')
     expect(apiClientSource).toContain("api.post('/video-copywriting-assist'")
     expect(apiClientSource).toContain('/api/v1/video-jobs/')
+    expect(apiClientSource).toContain('api.post(`/video-items/${id}/versions`')
   })
 
-  it('renders video result actions for preview, download and retry', () => {
+  it('keeps video publish ratio valid when platform changes', () => {
+    expect(videoPanelSource).toContain("import { computed, nextTick, onActivated, onMounted, ref, watch } from 'vue'")
+    expect(videoPanelSource).toContain('watch(() => form.value.platform')
+    expect(videoPanelSource).toContain('!options.some((item) => item.value === form.value.ratio)')
+    expect(videoPanelSource).toContain('form.value.ratio = options[0].value')
+  })
+
+  it('renders video result actions for edit, script, download and retry', () => {
     expect(videoPanelSource).toContain('下载选中')
     expect(videoPanelSource).toContain('重试失败')
     expect(videoPanelSource).toContain('视频导演脚本')
-    expect(videoPanelSource).toContain('远程任务号 {{ item.provider_task_id }}')
+    expect(videoPanelSource).toContain('视频二次编辑')
+    expect(videoPanelSource).toContain('title="二次编辑" aria-label="二次编辑"')
+    expect(videoPanelSource).toContain('title="脚本" aria-label="脚本"')
+    expect(videoPanelSource).toContain('<EditOutlined /></button>')
+    expect(videoPanelSource).toContain('<PlayCircleOutlined /></button>')
+    expect(videoPanelSource).not.toContain('<EditOutlined />编辑')
+    expect(videoPanelSource).not.toContain('<PlayCircleOutlined />脚本')
+    expect(videoPanelSource).not.toContain('远程任务号 {{ item.provider_task_id }}')
+    expect(videoPanelSource).not.toContain('<FileTextOutlined />文字')
+    expect(workspaceVideoCss).toContain('.video-card footer .video-card-actions { flex: 0 0 auto; min-width: auto; display: flex; flex-direction: row;')
+    expect(workspaceVideoCss).toContain('justify-content: flex-end; gap: 0;')
+    expect(workspaceVideoCss).toContain('.video-card footer .video-card-actions button { width: 28px; height: 28px; color: #6d7480;')
     expect(videoPanelSource).toContain('AI 转写')
     expect(videoPanelSource).toContain('安全演示模式')
+  })
+
+  it('keeps video fullscreen playback contained instead of cropped', () => {
+    const videoRule = workspaceVideoCss.match(/\.video-frame video\s*\{([^}]*)\}/)?.[1] ?? ''
+    const fullscreenRule = workspaceVideoCss.match(/\.video-frame video:fullscreen,[^{]+\{([^}]*)\}/)?.[1] ?? ''
+    const normalizedVideo = videoRule.replace(/\s+/g, '')
+    const normalizedFullscreen = fullscreenRule.replace(/\s+/g, '')
+
+    expect(normalizedVideo).toContain('object-fit:contain')
+    expect(normalizedVideo).toContain('background:#000')
+    expect(workspaceVideoCss).toContain('.video-frame video:-webkit-full-screen')
+    expect(workspaceVideoCss).toContain('.video-frame video:-moz-full-screen')
+    expect(workspaceVideoCss).toContain('.video-frame video:-ms-fullscreen')
+    expect(normalizedFullscreen).toContain('object-fit:contain')
   })
 })

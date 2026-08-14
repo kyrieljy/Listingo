@@ -1,11 +1,12 @@
 ﻿<script setup lang="ts">
-import { computed, nextTick, onActivated, onMounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onMounted, ref, watch } from 'vue'
 import { Modal, message } from 'ant-design-vue'
 import {
   CheckOutlined,
   CloseOutlined,
   CloudUploadOutlined,
   DownloadOutlined,
+  EditOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   RocketOutlined,
@@ -15,10 +16,12 @@ import {
   assistVideoCopywriting,
   cancelVideoJob,
   createVideoJob,
+  editVideoItem,
   getVideoJob,
   listVideoJobs,
   retryFailedVideoItems,
   uploadAsset,
+  userFacingApiErrorMessage,
   videoDownloadUrl,
   type Asset,
   type VideoItem,
@@ -27,6 +30,7 @@ import {
 import {
   buildVideoPayload,
   createDefaultVideoForm,
+  PRODUCT_IMAGE_UPLOAD_LIMIT,
   renderMarkdown,
   videoCountryOptions,
   videoLanguageOptions,
@@ -35,7 +39,11 @@ import {
   videoRatioOptions,
   videoTypeOptions,
 } from './workspace-model'
+import { trackWorkspaceEvent } from './analytics'
+import { useAuthStore } from '../auth/auth-store'
 
+const emit = defineEmits<{ 'require-auth': [] }>()
+const authStore = useAuthStore()
 const assets = ref<Asset[]>([])
 const form = ref(createDefaultVideoForm())
 const uploading = ref(false)
@@ -43,10 +51,13 @@ const helping = ref(false)
 const generating = ref(false)
 const cancelling = ref(false)
 const cancelRequested = ref(false)
+const editingVideo = ref(false)
 const job = ref<VideoJob | null>(null)
 const history = ref<VideoJob[]>([])
 const selected = ref<string[]>([])
 const previewItem = ref<VideoItem | null>(null)
+const editItemState = ref<VideoItem | null>(null)
+const editInstruction = ref('请保持商品主体一致，按当前视频脚本二次优化画面节奏和卖点表达')
 const advancedOpen = ref(false)
 const aiSuggestion = ref('')
 const aiWriteOpen = ref(false)
@@ -69,19 +80,50 @@ const selectedRatioOptions = computed(() => {
   const filtered = videoRatioOptions.filter((item) => item.platform === form.value.platform)
   return filtered.length ? filtered : videoRatioOptions
 })
-const uploadLimitReached = computed(() => assets.value.length >= 3)
+const uploadLimitReached = computed(() => assets.value.length >= PRODUCT_IMAGE_UPLOAD_LIMIT)
 const canGenerate = computed(() => assets.value.length > 0 && form.value.videoTypes.length > 0)
 const videoJobActive = computed(() => Boolean(job.value && !FINAL_VIDEO_JOB_STATUSES.has(job.value.status)))
 const dryRun = computed(() => form.value.dryRun)
+const editPreviewUrl = computed(() => editItemState.value ? currentVideoUrl(editItemState.value) : '')
+function requireAuthForModelAction(): boolean {
+  if (authStore.isAuthenticated) return false
+  emit('require-auth')
+  return true
+}
+function videoAnalyticsPayload(metadata: Record<string, unknown> = {}) {
+  return {
+    business_type: 'video',
+    platform: form.value.platform,
+    market: form.value.market,
+    language: form.value.language,
+    metadata: {
+      country: form.value.country,
+      ratio: form.value.ratio,
+      duration: form.value.duration,
+      resolution: form.value.resolution,
+      video_types: form.value.videoTypes,
+      dry_run: form.value.dryRun,
+      ...metadata,
+    },
+  }
+}
+function trackVideoEvent(eventName: string, eventType = 'click', featureKey = 'video', metadata: Record<string, unknown> = {}) {
+  trackWorkspaceEvent({ event_name: eventName, event_type: eventType, feature_key: featureKey, ...videoAnalyticsPayload(metadata) })
+}
 onMounted(async () => {
+  trackVideoEvent('video_view', 'view', 'video')
   try { history.value = await listVideoJobs() } catch { history.value = [] }
 })
 onActivated(() => { void resumeCurrentVideoJobRefresh() })
+watch(() => form.value.platform, () => {
+  const options = selectedRatioOptions.value
+  if (!options.some((item) => item.value === form.value.ratio) && options[0]) {
+    form.value.ratio = options[0].value
+  }
+}, { immediate: true })
 
 function requestDetail(error: any): string {
-  const detail = error?.response?.data?.detail
-  if (Array.isArray(detail)) return detail.map((item) => item?.msg || String(item)).join('；')
-  return detail || error?.message || ''
+  return userFacingApiErrorMessage(error)
 }
 function handleRequestError(error: any, fallback: string) {
   const detail = requestDetail(error) || fallback
@@ -184,14 +226,14 @@ function createOptimisticVideoJob(payload: Record<string, unknown>): VideoJob {
 async function filesSelected(event: Event) {
   const input = event.target as HTMLInputElement
   if (uploadLimitReached.value) {
-    message.warning('最多上传 3 张商品图')
+    message.warning(`最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张商品图`)
     input.value = ''
     return
   }
   const selectedFiles = Array.from(input.files ?? [])
-  const remaining = 3 - assets.value.length
+  const remaining = PRODUCT_IMAGE_UPLOAD_LIMIT - assets.value.length
   const files = selectedFiles.slice(0, remaining)
-  if (selectedFiles.length > remaining) message.warning(`最多上传 3 张商品图，本次只添加 ${remaining} 张`)
+  if (selectedFiles.length > remaining) message.warning(`最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张商品图，本次只添加 ${remaining} 张`)
   if (!files.length) return
   clearCopywritingState()
   uploading.value = true
@@ -220,11 +262,14 @@ async function useSample() {
   }
 }
 function toggleVideoType(type: string) {
+  trackVideoEvent('video_type_click', 'click', 'video', { video_type: type, selected: !form.value.videoTypes.includes(type) })
   form.value.videoTypes = form.value.videoTypes.includes(type)
     ? form.value.videoTypes.filter((item) => item !== type)
     : [...form.value.videoTypes, type]
 }
 async function aiWrite() {
+  if (requireAuthForModelAction()) return
+  trackVideoEvent('video_ai_copywriting_click', 'click', 'ai_video_copywriting', { asset_count: assets.value.length })
   helping.value = true
   try {
     const result = await assistVideoCopywriting({
@@ -251,9 +296,12 @@ async function regenerateCopywriting() {
 }
 function applyAiSuggestion() {
   if (!aiSuggestion.value.trim()) return message.warning('AI 转写内容为空，请重新生成')
+  trackVideoEvent('video_ai_copywriting_apply', 'click', 'ai_video_copywriting')
   form.value.sellingPoints = aiSuggestion.value.trim()
-  sellingPointsEditing.value = false
+  aiSuggestion.value = ''
+  aiSuggestionEditing.value = false
   aiWriteOpen.value = false
+  sellingPointsEditing.value = false
   message.success('AI 转写已确认回填')
 }
 async function waitForVideoJob(jobId: string): Promise<VideoJob> {
@@ -266,6 +314,8 @@ async function waitForVideoJob(jobId: string): Promise<VideoJob> {
   throw new Error('视频任务等待超时')
 }
 async function generate() {
+  if (requireAuthForModelAction()) return
+  trackVideoEvent('video_generate_click', 'click', 'video', { asset_count: assets.value.length, can_generate: canGenerate.value })
   if (!assets.value.length) return message.warning('请先上传商品图')
   if (!form.value.videoTypes.length) return message.warning('请至少选择一种视频类型')
   generating.value = true
@@ -273,6 +323,7 @@ async function generate() {
   cancelRequested.value = false
   try {
     const payload = buildVideoPayload(assets.value.map((asset) => asset.id), form.value)
+    trackVideoEvent('video_generate_submit', 'submit', 'video', { asset_count: assets.value.length, video_count: form.value.videoTypes.length })
     job.value = createOptimisticVideoJob(payload)
     selected.value = []
     const created = await createVideoJob(payload)
@@ -300,6 +351,7 @@ async function generate() {
 }
 async function cancelGeneration() {
   if (!job.value || cancelling.value || FINAL_VIDEO_JOB_STATUSES.has(job.value.status)) return
+  trackVideoEvent('video_cancel_click', 'click', 'video', { job_id: job.value.id })
   cancelRequested.value = true
   cancelling.value = true
   if (job.value.id.startsWith('optimistic-video-')) {
@@ -321,6 +373,8 @@ async function cancelGeneration() {
 }
 async function retryFailed() {
   if (!job.value || job.value.id.startsWith('optimistic-video-')) return
+  if (requireAuthForModelAction()) return
+  trackVideoEvent('video_retry_failed_click', 'click', 'video', { job_id: job.value.id, failed_count: job.value.items.filter((item) => item.status === 'failed').length })
   generating.value = true
   try {
     await retryFailedVideoItems(job.value.id)
@@ -343,12 +397,36 @@ function downloadSelected() {
   const successfulIds = new Set(job.value.items.filter((item) => item.status === 'succeeded').map((item) => item.id))
   const itemIds = selected.value.filter((id) => successfulIds.has(id))
   if (!itemIds.length) return message.warning('请先选择成功视频')
+  trackVideoEvent('video_download', 'download', 'download', { job_id: job.value.id, selected_count: itemIds.length })
   window.open(videoDownloadUrl(job.value.id, itemIds), '_blank')
 }
 function toggleSelected(id: string) {
   const item = job.value?.items.find((entry) => entry.id === id)
   if (!item || item.status !== 'succeeded') return
   selected.value = selected.value.includes(id) ? selected.value.filter((item) => item !== id) : [...selected.value, id]
+}
+function openVideoEdit(item: VideoItem) {
+  if (item.status !== 'succeeded' || !currentVideoUrl(item)) return
+  trackVideoEvent('video_edit_click', 'click', 'edit', { item_id: item.id, video_type: item.video_type })
+  editItemState.value = item
+}
+async function submitVideoEdit() {
+  if (!editItemState.value || !job.value) return
+  if (requireAuthForModelAction()) return
+  trackVideoEvent('video_edit_submit', 'submit', 'edit', { item_id: editItemState.value.id, instruction_length: editInstruction.value.length })
+  editingVideo.value = true
+  try {
+    const version = await editVideoItem(editItemState.value.id, editInstruction.value)
+    job.value = await getVideoJob(job.value.id)
+    editItemState.value = job.value.items.find((item) => item.id === editItemState.value?.id) ?? null
+    if (editItemState.value && !editItemState.value.current_version_id) editItemState.value.current_version_id = version.id
+    message.success('视频已生成新版本')
+  } catch (error: any) {
+    handleRequestError(error, '视频二次编辑失败')
+  } finally {
+    editingVideo.value = false
+    editItemState.value = null
+  }
 }
 
 function startNewTask() {
@@ -362,6 +440,8 @@ function startNewTask() {
   job.value = null
   selected.value = []
   previewItem.value = null
+  editItemState.value = null
+  editingVideo.value = false
   advancedOpen.value = false
   aiSuggestion.value = ''
   aiWriteOpen.value = false
@@ -376,11 +456,11 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
   <section class="video-workspace">
     <aside class="video-panel">
       <section class="video-section">
-        <div class="section-title"><span>1</span><strong>上传产品图</strong><em>最多 3 张</em></div>
+        <div class="section-title"><span>1</span><strong>上传产品图</strong><em>最多 {{ PRODUCT_IMAGE_UPLOAD_LIMIT }} 张</em></div>
         <label class="upload-zone" :class="{ disabled: uploading || uploadLimitReached }">
           <input type="file" accept="image/png,image/jpeg,image/webp" multiple :disabled="uploading || uploadLimitReached" @change="filesSelected" />
           <CloudUploadOutlined />
-          <b>{{ uploading ? '上传中...' : uploadLimitReached ? '最多上传 3 张' : '点击上传产品图' }}</b>
+          <b>{{ uploading ? '上传中...' : uploadLimitReached ? `最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张` : '点击上传产品图' }}</b>
           <small>{{ uploadLimitReached ? '删除已有图片后可继续上传' : '建议上传多张不同角度商品图' }}</small>
         </label>
         <div v-if="assets.length" class="uploaded-row">
@@ -475,9 +555,11 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
               <div>
                 <b>{{ item.video_type }}</b>
                 <small>第 {{ item.index + 1 }} 条 · {{ item.status }}</small>
-                <small v-if="item.provider_task_id">远程任务号 {{ item.provider_task_id }}</small>
               </div>
-              <button :disabled="!item.script_markdown" @click="previewItem = item"><PlayCircleOutlined />脚本</button>
+              <div class="video-card-actions">
+                <button type="button" title="二次编辑" aria-label="二次编辑" :disabled="item.status !== 'succeeded'" @click="openVideoEdit(item)"><EditOutlined /></button>
+                <button type="button" title="脚本" aria-label="脚本" :disabled="!item.script_markdown" @click="previewItem = item"><PlayCircleOutlined /></button>
+              </div>
             </footer>
           </article>
         </div>
@@ -514,6 +596,13 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
 
     <a-modal :open="!!previewItem" title="视频导演脚本" :footer="null" width="760" @update:open="(open) => { if (!open) previewItem = null }">
       <div v-if="previewItem" class="video-script-preview" v-html="renderMarkdown(previewItem.script_markdown || previewItem.prompt_text)" />
+    </a-modal>
+    <a-modal :open="!!editItemState" title="视频二次编辑" ok-text="生成新版本" cancel-text="取消" :confirm-loading="editingVideo" @ok="submitVideoEdit" @update:open="(open) => { if (!open) editItemState = null }">
+      <div class="edit-dialog">
+        <video v-if="editPreviewUrl && isVideoUrl(editPreviewUrl)" :src="editPreviewUrl" muted loop playsinline controls />
+        <img v-else-if="editPreviewUrl" :src="editPreviewUrl" alt="当前视频版本" />
+        <label>修改要求<textarea v-model="editInstruction" rows="5" /></label>
+      </div>
     </a-modal>
   </section>
 </template>

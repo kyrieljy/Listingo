@@ -24,6 +24,215 @@ class TimestampMixin:
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class User(Base, TimestampMixin):
+    __tablename__ = "app_user"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    phone: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(160), default="")
+    display_name: Mapped[str] = mapped_column(String(120))
+    avatar_initials: Mapped[str] = mapped_column(String(8), default="LI")
+    uid: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    role: Mapped[str] = mapped_column(String(20), default="user", index=True)
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    password_set: Mapped[bool] = mapped_column(Boolean, default=False)
+    first_password_pending: Mapped[bool] = mapped_column(Boolean, default=False)
+    gender: Mapped[str] = mapped_column(String(20), default="")
+    bio: Mapped[str] = mapped_column(Text, default="")
+    current_plan_code: Mapped[str] = mapped_column(String(40), default="free", index=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class UserSession(Base, TimestampMixin):
+    __tablename__ = "user_session"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_user.id", ondelete="CASCADE"), index=True)
+    session_token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    refresh_token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    refresh_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ip_address: Mapped[str] = mapped_column(String(80), default="")
+    user_agent: Mapped[str] = mapped_column(Text, default="")
+
+
+class LoginEvent(Base):
+    __tablename__ = "login_event"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True, index=True)
+    phone: Mapped[str] = mapped_column(String(32), default="", index=True)
+    method: Mapped[str] = mapped_column(String(30), index=True)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    ip_address: Mapped[str] = mapped_column(String(80), default="")
+    user_agent: Mapped[str] = mapped_column(Text, default="")
+    message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class AnalyticsEvent(Base):
+    __tablename__ = "analytics_event"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True, index=True)
+    session_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    event_name: Mapped[str] = mapped_column(String(120), index=True)
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    surface: Mapped[str] = mapped_column(String(80), default="", index=True)
+    business_type: Mapped[str] = mapped_column(String(40), default="", index=True)
+    feature_key: Mapped[str] = mapped_column(String(80), default="", index=True)
+    platform: Mapped[str] = mapped_column(String(80), default="", index=True)
+    market: Mapped[str] = mapped_column(String(80), default="", index=True)
+    language: Mapped[str] = mapped_column(String(80), default="", index=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    ip_address: Mapped[str] = mapped_column(String(80), default="")
+    user_agent: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class SmsConfig(Base, TimestampMixin):
+    __tablename__ = "sms_config"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    provider: Mapped[str] = mapped_column(String(40), default="aliyun")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    debug_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+    region_id: Mapped[str] = mapped_column(String(80), default="cn-hangzhou")
+    sign_name: Mapped[str] = mapped_column(String(120), default="")
+    login_template_code: Mapped[str] = mapped_column(String(80), default="")
+    register_template_code: Mapped[str] = mapped_column(String(80), default="")
+    change_phone_template_code: Mapped[str] = mapped_column(String(80), default="")
+    admin_template_code: Mapped[str] = mapped_column(String(80), default="")
+    access_key_id: Mapped[str] = mapped_column(String(200), default="")
+    encrypted_access_key_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
+    code_ttl_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    cooldown_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    daily_limit_per_phone: Mapped[int] = mapped_column(Integer, default=10)
+
+
+class SmsVerificationCode(Base, TimestampMixin):
+    __tablename__ = "sms_verification_code"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    phone: Mapped[str] = mapped_column(String(32), index=True)
+    purpose: Mapped[str] = mapped_column(String(30), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    send_ip: Mapped[str] = mapped_column(String(80), default="")
+    provider_message: Mapped[str] = mapped_column(Text, default="")
+
+
+class SubscriptionPlan(Base, TimestampMixin):
+    __tablename__ = "subscription_plan"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text, default="")
+    badge: Mapped[str] = mapped_column(String(80), default="")
+    cta: Mapped[str] = mapped_column(String(80), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    visible: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    is_internal: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_enterprise: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    features_json: Mapped[str] = mapped_column(Text, default="[]")
+    contact_text: Mapped[str] = mapped_column(Text, default="")
+    contact_phone: Mapped[str] = mapped_column(String(32), default="")
+
+
+class PlanPrice(Base, TimestampMixin):
+    __tablename__ = "plan_price"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("subscription_plan.id", ondelete="CASCADE"), index=True)
+    billing_cycle: Mapped[str] = mapped_column(String(20), index=True)
+    amount_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    currency: Mapped[str] = mapped_column(String(12), default="CNY")
+    price_label: Mapped[str] = mapped_column(String(80), default="")
+    period_label: Mapped[str] = mapped_column(String(40), default="")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class PlanQuotaRule(Base, TimestampMixin):
+    __tablename__ = "plan_quota_rule"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("subscription_plan.id", ondelete="CASCADE"), index=True)
+    action_key: Mapped[str] = mapped_column(String(60), index=True)
+    action_label: Mapped[str] = mapped_column(String(120))
+    unit: Mapped[str] = mapped_column(String(40), default="次")
+    monthly_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_multiplier: Mapped[int] = mapped_column(Integer, default=1)
+    warning_threshold: Mapped[int] = mapped_column(Integer, default=80)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class UserSubscription(Base, TimestampMixin):
+    __tablename__ = "user_subscription"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_user.id", ondelete="CASCADE"), index=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("subscription_plan.id"), index=True)
+    billing_cycle: Mapped[str] = mapped_column(String(20), default="monthly")
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    auto_renew: Mapped[bool] = mapped_column(Boolean, default=False)
+    source_order_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+
+
+class PaymentOrder(Base, TimestampMixin):
+    __tablename__ = "payment_order"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    order_no: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_user.id", ondelete="CASCADE"), index=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("subscription_plan.id"), index=True)
+    billing_cycle: Mapped[str] = mapped_column(String(20), default="monthly")
+    amount_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    currency: Mapped[str] = mapped_column(String(12), default="CNY")
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class QuotaLedger(Base):
+    __tablename__ = "quota_ledger"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_user.id", ondelete="CASCADE"), index=True)
+    action_key: Mapped[str] = mapped_column(String(60), index=True)
+    amount: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(30), default="reserved", index=True)
+    ref_type: Mapped[str] = mapped_column(String(40), default="", index=True)
+    ref_id: Mapped[str] = mapped_column(String(36), default="", index=True)
+    period: Mapped[str] = mapped_column(String(7), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Notification(Base, TimestampMixin):
+    __tablename__ = "notification"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_user.id", ondelete="CASCADE"), index=True)
+    category: Mapped[str] = mapped_column(String(40), default="system", index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    body: Mapped[str] = mapped_column(Text, default="")
+    unread: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Provider(Base, TimestampMixin):
     __tablename__ = "provider"
 
@@ -117,6 +326,7 @@ class Asset(Base, TimestampMixin):
     __tablename__ = "asset"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("app_user.id"), nullable=True, index=True)
     original_name: Mapped[str] = mapped_column(String(255))
     mime_type: Mapped[str] = mapped_column(String(80))
     file_path: Mapped[str] = mapped_column(String(1000))
@@ -126,11 +336,11 @@ class Asset(Base, TimestampMixin):
     byte_size: Mapped[int] = mapped_column(Integer)
     sha256: Mapped[str] = mapped_column(String(64))
 
-
 class GenerationJob(Base, TimestampMixin):
     __tablename__ = "generation_job"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("app_user.id"), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, default=True)
     is_admin_test: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
@@ -159,6 +369,7 @@ class GenerationItem(Base, TimestampMixin):
     prompt_text: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     provider_id: Mapped[str | None] = mapped_column(ForeignKey("provider.id"), nullable=True)
+    provider_task_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     job: Mapped[GenerationJob] = relationship(back_populates="items")
@@ -185,6 +396,7 @@ class VideoJob(Base, TimestampMixin):
     __tablename__ = "video_job"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("app_user.id"), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, default=True)
     is_admin_test: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
@@ -240,6 +452,7 @@ class AplusJob(Base, TimestampMixin):
     __tablename__ = "aplus_job"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("app_user.id"), nullable=True, index=True)
     job_type: Mapped[str] = mapped_column(String(30), default="plan", index=True)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -273,6 +486,7 @@ class AplusItem(Base, TimestampMixin):
     prompt_text: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     provider_id: Mapped[str | None] = mapped_column(ForeignKey("provider.id"), nullable=True)
+    provider_task_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
     source_web_item_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
@@ -294,6 +508,46 @@ class AplusVersion(Base, TimestampMixin):
     url: Mapped[str] = mapped_column(String(1000))
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     item: Mapped[AplusItem] = relationship(back_populates="versions")
+
+
+class BatchJob(Base, TimestampMixin):
+    __tablename__ = "batch_job"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("app_user.id"), nullable=True, index=True)
+    business_type: Mapped[str] = mapped_column(String(20), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    global_params_json: Mapped[str] = mapped_column(Text, default="{}")
+    total_count: Mapped[int] = mapped_column(Integer, default=0)
+    completed_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    notification_config_json: Mapped[str] = mapped_column(Text, default="{}")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    items: Mapped[list[BatchItem]] = relationship(
+        back_populates="batch_job", cascade="all, delete-orphan", order_by="BatchItem.index"
+    )
+
+
+class BatchItem(Base, TimestampMixin):
+    __tablename__ = "batch_item"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    batch_job_id: Mapped[str] = mapped_column(ForeignKey("batch_job.id", ondelete="CASCADE"), index=True)
+    index: Mapped[int] = mapped_column(Integer)
+    name: Mapped[str] = mapped_column(String(200), default="")
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    params_json: Mapped[str] = mapped_column(Text, default="{}")
+    asset_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    generation_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    aplus_plan_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    aplus_generation_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    batch_job: Mapped[BatchJob] = relationship(back_populates="items")
 
 
 class ExecutionLog(Base):

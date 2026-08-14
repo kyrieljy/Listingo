@@ -73,29 +73,28 @@ async def run_content_safety_review(
         "requirements": "只判断黄赌毒、政治内容、政治领导人、暴力极端、仇恨和违法犯罪安全风险。",
     }
     user_prompt = json.dumps(payload, ensure_ascii=False)
-    try:
-        raw = await client.call_llm(
-            default_provider,
-            cipher.decrypt(default_provider.encrypted_api_key or ""),
-            prompt_version.content,
-            user_prompt,
-            image_paths=image_paths,
-            response_format="json_object",
-        )
-        return parse_content_safety_review(raw), default_provider
-    except Exception as primary_error:
+    providers: list[Provider] = []
+    seen: set[str] = set()
+    for provider in (default_provider, fallback_provider):
+        if provider.code in seen:
+            continue
+        seen.add(provider.code)
+        providers.append(provider)
+    errors: list[str] = []
+    for provider in providers:
         try:
             raw = await client.call_llm(
-                fallback_provider,
-                cipher.decrypt(fallback_provider.encrypted_api_key or ""),
+                provider,
+                cipher.decrypt(provider.encrypted_api_key or ""),
                 prompt_version.content,
                 user_prompt,
                 image_paths=image_paths,
                 response_format="json_object",
             )
-            return parse_content_safety_review(raw), fallback_provider
-        except Exception as fallback_error:
-            raise RuntimeError(f"内容安全审计失败：默认模型失败：{primary_error}；备用模型失败：{fallback_error}") from fallback_error
+            return parse_content_safety_review(raw), provider
+        except Exception as exc:
+            errors.append(f"{provider.code}: {exc}")
+    raise RuntimeError("内容安全审计失败：" + "；".join(errors))
 
 
 def ensure_content_safe(review: ContentSafetyReview, prefix: str = "内容安全拦截") -> None:

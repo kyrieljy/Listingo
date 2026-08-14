@@ -7,13 +7,21 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.models import Prompt, PromptVersion, Provider, Workflow, WorkflowVersion
+from backend.app.models import Prompt, PromptVersion, Provider, SmsConfig, User, Workflow, WorkflowVersion
+from backend.app.services.sms import normalize_phone
+from backend.app.services.subscriptions import seed_subscription_defaults
 from backend.app.services.provider_routing import (
     PROVIDER_ROUTE_DEFINITIONS,
     default_route_roles_for_provider,
     normalize_route_roles,
     provider_config,
     write_provider_config,
+)
+from backend.app.services.provider_catalog import (
+    DEFAULT_ROUTE_CHAINS,
+    GPT_IMAGE2_EXACT_SIZE_ROUTE_KEYS,
+    ROUTE_SLOT_ORDER,
+    media_provider_presets,
 )
 from backend.app.services.workflow_registry import default_workflow_json, workflow_preset_dicts
 
@@ -29,6 +37,7 @@ AUXILIARY_PROMPT_PRESETS = [
     ("product-vision", "商品视觉事实提取", "读取商品参考图，输出供核心 Meta Prompt 使用的结构化事实。", "product_vision_v1.md"),
     ("copywriting-assist", "AI 卖点帮写", "结合平台、市场、语言与商品事实进行事实型卖点改写。", "copywriting_assist_v1.md"),
     ("edit-rewrite", "二次编辑提示词转写", "将用户修改要求转写为保持商品本体的图片编辑提示词。", "edit_rewrite_v1.md"),
+    ("image-text-edit", "图片文字编辑提示词", "将 OCR 行文本和用户修改转写为只替换图片文字的 edit 提示词。", "image_text_edit_v1.md"),
     ("content-safety-review", "内容安全审计", "拦截黄赌毒、政治内容、政治领导人等安全风险。", "content_safety_review_v1.md"),
     ("ecommerce-video-meta-15s", "电商 15 秒视频 Meta Prompt", "根据商品图、卖点、平台与视频类型输出 Seedance 可用的 15 秒电商视频导演脚本。", "ecommerce_video_meta_prompt_15s.md"),
 ]
@@ -84,6 +93,7 @@ PROVIDER_PRESETS = [
             "allowed_sizes": ["auto", "landscape", "portrait", "square"],
             "timeout_seconds": 600,
             "poll_interval_seconds": 5,
+            "max_reference_images": 6,
             "route_roles": {"suite_fidelity": "primary"},
         },
     },
@@ -103,6 +113,7 @@ PROVIDER_PRESETS = [
             "allowed_sizes": ["auto", "landscape", "portrait", "square"],
             "timeout_seconds": 600,
             "poll_interval_seconds": 5,
+            "max_reference_images": 6,
             "route_roles": {"suite_fidelity": "fallback"},
         },
     },
@@ -125,7 +136,8 @@ PROVIDER_PRESETS = [
             ],
             "timeout_seconds": 600,
             "poll_interval_seconds": 5,
-            "route_roles": {"suite_layout": "primary", "aplus_detail": "primary"},
+            "max_reference_images": 6,
+            "route_roles": {"suite_layout": "primary", "aplus_detail": "primary", "image_edit": "primary"},
         },
     },
     {
@@ -147,6 +159,7 @@ PROVIDER_PRESETS = [
             ],
             "timeout_seconds": 600,
             "poll_interval_seconds": 5,
+            "max_reference_images": 6,
             "route_roles": {"aplus_mobile": "primary"},
         },
     },
@@ -167,11 +180,41 @@ PROVIDER_PRESETS = [
     },
 ]
 
+LEGACY_MEDIA_PROVIDER_CODES = {
+    "yunwu-nano-pro",
+    "yunwu-nano",
+    "yunwu-image-2",
+    "aplus-mobile-edit-low-cost",
+    VIDEO_PROVIDER_CODE,
+    LEGACY_VIDEO_PROVIDER_CODE,
+}
+
+# Preserve the existing LLM presets exactly, then replace image/video presets with
+# the new 9-provider media catalog.
+PROVIDER_PRESETS = PROVIDER_PRESETS[:3] + media_provider_presets()
+
+
+def _preset_parameter_keys(config: dict) -> set[str]:
+    schema = config.get("parameter_schema")
+    if not isinstance(schema, list):
+        return set()
+    return {str(item["key"]) for item in schema if isinstance(item, dict) and isinstance(item.get("key"), str)}
+
+
+def _merge_media_provider_config(existing_config: dict, preset_config: dict) -> dict:
+    config = {**existing_config, **preset_config}
+    for key in _preset_parameter_keys(preset_config) | {"health"}:
+        if key in existing_config:
+            config[key] = existing_config[key]
+    return config
+
 
 def ensure_default_provider_route_roles(session: Session) -> None:
     providers = session.scalars(select(Provider)).all()
     assigned_route_keys: set[str] = set()
     for provider in providers:
+        if provider_config(provider).get("hidden_legacy"):
+            continue
         assigned_route_keys.update(normalize_route_roles(provider_config(provider).get("route_roles")).keys())
     missing_route_keys = set(PROVIDER_ROUTE_DEFINITIONS) - assigned_route_keys
     if not missing_route_keys:
@@ -189,12 +232,134 @@ def ensure_default_provider_route_roles(session: Session) -> None:
         write_provider_config(provider, config)
 
 
+def _provider_supports_exact_route(provider: Provider) -> bool:
+    config = provider_config(provider)
+    return not config.get("hidden_legacy") and bool(config.get("supports_exact_custom_size"))
+
+
+def _clear_route_key(providers: list[Provider], route_key: str) -> None:
+    for provider in providers:
+        config = provider_config(provider)
+        roles = normalize_route_roles(config.get("route_roles"))
+        if route_key not in roles:
+            continue
+        roles.pop(route_key, None)
+        config["route_roles"] = roles
+        write_provider_config(provider, config)
+
+
+def _assign_default_route_chain(providers: list[Provider], route_key: str) -> None:
+    by_code = {provider.code: provider for provider in providers}
+    _clear_route_key(providers, route_key)
+    for index, provider_code in enumerate(DEFAULT_ROUTE_CHAINS.get(route_key, [])[: len(ROUTE_SLOT_ORDER)]):
+        provider = by_code.get(provider_code)
+        if not provider or not _provider_supports_exact_route(provider):
+            continue
+        config = provider_config(provider)
+        roles = normalize_route_roles(config.get("route_roles"))
+        roles[route_key] = ROUTE_SLOT_ORDER[index]  # type: ignore[assignment]
+        config["route_roles"] = roles
+        write_provider_config(provider, config)
+
+
+def ensure_gpt_image2_exact_size_route_roles(session: Session) -> None:
+    providers = session.scalars(select(Provider)).all()
+    by_code = {provider.code: provider for provider in providers}
+    for route_key in GPT_IMAGE2_EXACT_SIZE_ROUTE_KEYS:
+        had_ineligible_assignment = False
+        for provider in providers:
+            config = provider_config(provider)
+            roles = normalize_route_roles(config.get("route_roles"))
+            if route_key not in roles:
+                continue
+            if _provider_supports_exact_route(provider):
+                continue
+            roles.pop(route_key, None)
+            config["route_roles"] = roles
+            write_provider_config(provider, config)
+            had_ineligible_assignment = True
+
+        assigned_roles: set[str] = set()
+        assigned_codes: set[str] = set()
+        for provider in providers:
+            roles = normalize_route_roles(provider_config(provider).get("route_roles"))
+            if route_key in roles and _provider_supports_exact_route(provider):
+                assigned_roles.add(roles[route_key])
+                assigned_codes.add(provider.code)
+
+        if had_ineligible_assignment or "primary" not in assigned_roles:
+            _assign_default_route_chain(providers, route_key)
+            continue
+
+        for index, provider_code in enumerate(DEFAULT_ROUTE_CHAINS.get(route_key, [])[: len(ROUTE_SLOT_ORDER)]):
+            role = ROUTE_SLOT_ORDER[index]
+            if role in assigned_roles or provider_code in assigned_codes:
+                continue
+            provider = by_code.get(provider_code)
+            if not provider or not _provider_supports_exact_route(provider):
+                continue
+            config = provider_config(provider)
+            roles = normalize_route_roles(config.get("route_roles"))
+            roles[route_key] = role  # type: ignore[assignment]
+            config["route_roles"] = roles
+            write_provider_config(provider, config)
+            assigned_roles.add(role)
+            assigned_codes.add(provider_code)
+
+
 def seed_database(session: Session) -> None:
+    seed_subscription_defaults(session)
+
+    admin_phone = normalize_phone("18928268686")
+    admin = session.scalar(select(User).where(User.username == "admin").limit(1))
+    if not admin:
+        admin = User(
+            phone=admin_phone,
+            username="admin",
+            email="",
+            display_name="Listingo 管理员",
+            avatar_initials="AD",
+            uid="10000001",
+            role="admin",
+            status="active",
+            password_hash=None,
+            password_set=False,
+            first_password_pending=True,
+            current_plan_code="internal",
+        )
+        session.add(admin)
+        session.flush()
+    else:
+        admin.phone = admin_phone
+        admin.role = "admin"
+        admin.status = "active"
+        admin.current_plan_code = "internal"
+        if not admin.password_set:
+            admin.first_password_pending = True
+
+    sms_config = session.scalar(select(SmsConfig).limit(1))
+    if not sms_config:
+        session.add(SmsConfig(enabled=True, debug_mode=True, sign_name="Listingo", login_template_code="SMS_DEBUG"))
+        session.flush()
+
     legacy_video = session.scalar(select(Provider).where(Provider.code == LEGACY_VIDEO_PROVIDER_CODE))
     current_video = session.scalar(select(Provider).where(Provider.code == VIDEO_PROVIDER_CODE))
     if legacy_video and not current_video:
         legacy_video.code = VIDEO_PROVIDER_CODE
         session.flush()
+
+    for legacy_code in LEGACY_MEDIA_PROVIDER_CODES:
+        legacy = session.scalar(select(Provider).where(Provider.code == legacy_code))
+        if not legacy:
+            continue
+        legacy.enabled = False
+        legacy.is_default = False
+        legacy.is_fallback = False
+        config = provider_config(legacy)
+        config["hidden_legacy"] = True
+        config["legacy_replaced_by"] = "9-provider-media-catalog"
+        config["route_roles"] = {}
+        write_provider_config(legacy, config)
 
     for preset in PROVIDER_PRESETS:
         existing = session.scalar(select(Provider).where(Provider.code == preset["code"]))
@@ -208,13 +373,20 @@ def seed_database(session: Session) -> None:
             if preset["capability"] in {"image", "video"}:
                 existing_config = json.loads(existing.config_json or "{}")
                 existing_roles = normalize_route_roles(existing_config.get("route_roles"))
-                config = {**existing_config, **preset["config"]}
+                config = _merge_media_provider_config(existing_config, preset["config"])
                 if existing_roles:
                     config["route_roles"] = existing_roles
-                if preset["capability"] == "image":
+                if preset["capability"] == "image" and preset["adapter"] == "hellobabygo_image_generation":
                     for key in ("aspect_ratio", "format", "compression", "quality", "style", "response_format"):
                         config.pop(key, None)
-                if preset["capability"] == "video":
+                if (
+                    preset["capability"] == "image"
+                    and config.get("provider_group") == "apimodels"
+                    and config.get("model_family") == "gpt-image-2"
+                ):
+                    for key in ("format", "quality", "n", "response_format", "output_compression", "background"):
+                        config.pop(key, None)
+                if preset["capability"] == "video" and preset["adapter"] in {"hellobabygo_video_generation", "shengsuanyun_tasks_generation"}:
                     for key in (
                         "image_role",
                         "return_last_frame",
@@ -246,6 +418,7 @@ def seed_database(session: Session) -> None:
             )
         )
     session.flush()
+    ensure_gpt_image2_exact_size_route_roles(session)
     ensure_default_provider_route_roles(session)
 
     legacy_video = session.scalar(select(Provider).where(Provider.code == LEGACY_VIDEO_PROVIDER_CODE))

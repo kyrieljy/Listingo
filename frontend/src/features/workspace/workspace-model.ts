@@ -34,6 +34,7 @@ export type VideoForm = {
   ratio: string
   sellingPoints: string
   productName: string
+  category: string
   targetAudience: string
   videoTypes: string[]
   duration: number
@@ -45,6 +46,7 @@ export type AplusForm = {
   platform: string
   market: string
   language: string
+  category: string
   productInfo: string
   selectedModules: AplusModuleSelection[]
   outputSpec: AplusOutputSpec
@@ -60,7 +62,21 @@ export type AplusOutputTargetForm = {
 }
 export type AplusModuleDefinition = { name: string; description: string }
 export type AplusModuleSelection = { name: string; count: number }
+export const PRODUCT_IMAGE_UPLOAD_LIMIT = 6
 export const APLUS_MODULE_TOTAL_LIMIT = 12
+export const finalWorkspaceJobStatuses = ['succeeded', 'partial_failed', 'failed', 'cancelled', 'partial_cancelled'] as const
+export const restorableWorkspaceJobStatuses = ['queued', 'running'] as const
+const restorableWorkspaceJobStatusSet = new Set<string>(restorableWorkspaceJobStatuses)
+
+export function isActiveWorkspaceJob(job: { status: string }): boolean {
+  return restorableWorkspaceJobStatusSet.has(job.status)
+}
+
+export function latestActiveWorkspaceJob<T extends { status: string; created_at: string }>(jobs: T[]): T | null {
+  const active = jobs.filter(isActiveWorkspaceJob)
+  active.sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0))
+  return active[0] ?? null
+}
 
 export const phaseDefinitions = [
   { key: 'suite' as const, label: '商品套图', short: '套图' },
@@ -88,6 +104,21 @@ export const ratioValues: Record<string, string> = {
   '3:4': '3:4',
   '9:16': '9:16',
   '16:9': '16:9',
+}
+
+export type PreviewAspectStyle = Record<`--${string}`, string>
+
+export function previewAspectStyle(aspectRatio: string | null | undefined): PreviewAspectStyle {
+  const fallback = { '--preview-aspect-ratio': '1 / 1', '--preview-aspect-number': '1' }
+  const match = String(aspectRatio ?? '').trim().match(/^(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)$/)
+  if (!match) return fallback
+  const width = Number(match[1])
+  const height = Number(match[2])
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return fallback
+  return {
+    '--preview-aspect-ratio': `${width} / ${height}`,
+    '--preview-aspect-number': String(width / height),
+  }
 }
 
 export const videoPlatformOptions = ['TikTok', '抖音', '小红书', '淘宝', '亚马逊']
@@ -168,6 +199,7 @@ export function createDefaultAplusForm(): AplusForm {
     platform: '亚马逊',
     market: '美国',
     language: '英文',
+    category: '',
     productInfo: '',
     selectedModules: [...defaultAplusModules],
     outputSpec: 'amazon_aplus_standard',
@@ -216,6 +248,7 @@ export function buildAplusPlanPayload(assetIds: string[], form: AplusForm) {
     platform: form.platform,
     market: form.market,
     language: form.language,
+    category: form.category,
     product_info: form.productInfo,
     module_selections: moduleSelections,
     selected_modules: moduleSelections.map((selection) => selection.name),
@@ -263,6 +296,7 @@ export function createDefaultVideoForm(): VideoForm {
     ratio: '9:16',
     sellingPoints: '',
     productName: '',
+    category: '',
     targetAudience: '',
     videoTypes: ['UGC 种草'],
     duration: 15,
@@ -324,6 +358,7 @@ export function buildVideoPayload(assetIds: string[], form: VideoForm) {
     aspect_ratio: form.ratio,
     selling_points: form.sellingPoints,
     product_name: form.productName,
+    category: form.category,
     target_audience: form.targetAudience,
     video_types: form.videoTypes,
     duration: form.duration,

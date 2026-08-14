@@ -10,14 +10,15 @@
 .video-assets { display: flex; gap: 8px; margin-top: 10px; }
 .video-assets figure { margin: 0; width: 70px; height: 70px; border: 1px solid #e3e5eb; border-radius: 9px; overflow: hidden; position: relative; background: #f4f5f7; }
 .video-assets img { width: 100%; height: 100%; object-fit: cover; }
-.video-assets .remove-uploaded-asset { position: absolute; right: 3px; top: 3px; width: 24px; height: 24px; border-radius: 50%; background: rgba(55,60,67,.72); color: #fff; display: grid; place-items: center; padding: 0; line-height: 0; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.18); }
+.video-assets .remove-uploaded-asset { position: absolute; right: 4px; top: 4px; width: 24px; height: 24px; border: 1px solid rgba(255,255,255,.72); border-radius: 50%; background: rgba(255,255,255,.9); color: #303742; display: grid; place-items: center; padding: 0; line-height: 0; font-size: 11px; box-shadow: 0 8px 18px rgba(15,23,42,.18); backdrop-filter: blur(8px); transition: background .18s ease, color .18s ease, box-shadow .18s ease, transform .18s ease; }
 .video-assets .remove-uploaded-asset .anticon { display: block; }
+.video-assets .remove-uploaded-asset:hover, .video-assets .remove-uploaded-asset:focus-visible { background: #fff; color: #111827; box-shadow: 0 10px 24px rgba(15,23,42,.22); transform: translateY(-1px); outline: none; }
 .video-sample { width: 100%; height: 30px; margin-top: 9px; border-radius: 8px; background: #f3f0ff; color: #6c5ce7; }
 .video-field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .video-field-grid label, .video-full-select, .video-advanced label { display: flex; flex-direction: column; gap: 6px; color: #687080; font-size: 11px; }
 .video-field-grid select, .video-full-select select, .video-full-select input, .video-advanced select, .video-section textarea { height: 34px; border: 1px solid #e2e5eb; border-radius: 8px; background: #fff; padding: 0 9px; color: #252a32; outline: none; }
 .video-full-select { margin-top: 8px; }
-.video-section textarea { height: auto; min-height: 116px; width: 100%; padding: 10px; resize: vertical; line-height: 1.5; }
+.video-section textarea { height: auto; min-height: 160px; width: 100%; padding: 10px; resize: vertical; line-height: 1.5; }
 .video-selling-points-input::placeholder { color: #a7acb5; opacity: 1; font-size: 13px; line-height: 1.5; }
 .video-type-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .video-type-grid button { min-height: 58px; padding: 10px; border: 1px solid #e0e3ea; border-radius: 9px; background: #fff; color: #4b5563; display: flex; align-items: center; gap: 9px; text-align: left; }
@@ -140,10 +141,18 @@
 .video-card { background: #fff; border-radius: 13px; overflow: hidden; position: relative; border: 2px solid transparent; box-shadow: 0 5px 16px rgba(31,35,41,.08); }
 .video-card.selected { border-color: #6c5ce7; }
 .video-card.failed { border-color: #ffccc7; }
-.video-select { position: absolute; right: 10px; top: 10px; z-index: 2; width: 24px; height: 24px; border-radius: 50%; background: rgba(255,255,255,.95); color: #6c5ce7; box-shadow: 0 2px 8px rgba(0,0,0,.16); }
+.video-select { position: absolute; right: 12px; top: 12px; z-index: 2; width: 30px; height: 30px; border: 1px solid rgba(255,255,255,.78); border-radius: 50%; background: rgba(255,255,255,.82); color: #5b4ee7; display: grid; place-items: center; padding: 0; line-height: 0; box-shadow: 0 10px 24px rgba(15,23,42,.16); backdrop-filter: blur(10px); transition: background .18s ease, border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
+.video-select:hover, .video-select:focus-visible { background: #fff; border-color: rgba(109,93,242,.38); box-shadow: 0 12px 28px rgba(15,23,42,.2); transform: translateY(-1px); outline: none; }
+.video-card.selected .video-select { border-color: rgba(255,255,255,.82); background: linear-gradient(135deg, #7c6cff, #5e50dc); color: #fff; box-shadow: 0 12px 28px rgba(91,78,231,.3); }
+.video-select .anticon { display: block; font-size: 14px; stroke-width: 42px; }
 .video-select:disabled { opacity: .55; }
-.video-frame { aspect-ratio: 9 / 16; background: #eef0f4; display: grid; place-items: center; color: #8d95a3; }
-.video-frame video, .video-frame img { width: 100%; height: 100%; object-fit: cover; }
+.video-frame { aspect-ratio: 9 / 16; background: #eef0f4; display: grid; place-items: center; color: #8d95a3; overflow: hidden; }
+.video-frame video { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; }
+.video-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.video-frame video:fullscreen,
+.video-frame video:-webkit-full-screen,
+.video-frame video:-moz-full-screen,
+.video-frame video:-ms-fullscreen { width: 100vw; height: 100vh; object-fit: contain; background: #000; }
 .video-loading { display: flex; align-items: center; gap: 8px; }
 .video-loading span { width: 18px; height: 18px; border: 2px solid #c6ccd6; border-top-color: #6c5ce7; border-radius: 50%; animation: video-spin 1s linear infinite; }
 .video-failed { padding: 18px; text-align: center; color: #cf1322; display: flex; flex-direction: column; gap: 6px; }
@@ -152,7 +161,10 @@
 .video-card footer div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .video-card footer b { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .video-card footer small { color: #8d95a3; font-size: 10px; }
-.video-card footer button { height: 28px; padding: 0 8px; border-radius: 7px; background: #f5f6f8; color: #596171; display: inline-flex; align-items: center; gap: 4px; }
+.video-card footer .video-card-actions { flex: 0 0 auto; min-width: auto; display: flex; flex-direction: row; align-items: center; justify-content: flex-end; gap: 0; }
+.video-card footer .video-card-actions button { width: 28px; height: 28px; color: #6d7480; }
+.video-card footer .video-card-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.edit-dialog video { width: 150px; height: 150px; object-fit: contain; border-radius: 10px; background: #000; }
 .video-script-preview { max-height: 60vh; overflow: auto; color: #2d333d; line-height: 1.7; }
 .video-script-preview h1, .video-script-preview h2, .video-script-preview h3 { margin: 14px 0 8px; }
 .video-script-preview p { margin: 7px 0; }

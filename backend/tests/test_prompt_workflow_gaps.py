@@ -246,14 +246,17 @@ def test_seedance_failed_status_from_http_200_is_failure_state() -> None:
 def test_aplus_generation_runs_items_through_configured_concurrency_guard() -> None:
     source = Path("backend/app/services/aplus_jobs.py").read_text(encoding="utf-8")
 
-    assert "async def guarded(item_id: str) -> None:" in source
-    assert "await asyncio.gather(*(guarded(item_id) for item_id in item_ids))" in source
+    assert "independent_item_ids = [item.id for item in pending_items if not item.source_web_item_id]" in source
+    assert "derived_mobile_item_ids = [item.id for item in pending_items if item.source_web_item_id]" in source
+    assert "async def run_item_group(item_ids: list[str]) -> None:" in source
+    assert "await run_item_group(independent_item_ids)" in source
+    assert "await run_item_group(derived_mobile_item_ids)" in source
 
 
 def test_seed_exposes_all_prompt_engineering_assets(client) -> None:
     with client.app.state.session_factory() as session:
         codes = set(session.scalars(select(Prompt.code)).all())
-    assert {"ecommerce-meta", "product-vision", "copywriting-assist", "edit-rewrite", "content-safety-review"}.issubset(codes)
+    assert {"ecommerce-meta", "product-vision", "copywriting-assist", "edit-rewrite", "image-text-edit", "content-safety-review"}.issubset(codes)
 
 
 def test_default_workflow_registers_visual_facts_semantic_validation_and_image_generation() -> None:

@@ -1,4 +1,7 @@
-export type ProviderRouteRole = 'primary' | 'fallback'
+export type ProviderRouteRole = 'primary' | 'backup1' | 'backup2' | 'backup3' | 'backup4'
+
+export const providerRouteRoleOrder: ProviderRouteRole[] = ['primary', 'backup1', 'backup2', 'backup3', 'backup4']
+export const providerRouteChainConfigValue = '__chain_config__'
 
 export type ProviderDisplayRecord = {
   id: string
@@ -12,9 +15,17 @@ export type ProviderDisplayRecord = {
   is_default: boolean
   is_fallback: boolean
   route_roles: Record<string, ProviderRouteRole>
+  provider_group?: string | null
+  provider_group_label?: string | null
+  operation?: string | null
+  supports_custom_size?: boolean
+  supports_exact_custom_size?: boolean
+  supports_edit?: boolean
+  pricing?: any | null
+  health?: any | null
   has_api_key: boolean
   api_key_masked: string | null
-  config: Record<string, unknown>
+  config: Record<string, any>
 }
 
 export type ProviderRuntimeState = {
@@ -32,7 +43,7 @@ export type ProviderRouteDefinition = {
   capability: 'llm' | 'image' | 'video'
 }
 
-export type ProviderBusinessItem = ProviderDisplayRecord & { role: string; routeRole: ProviderRouteRole }
+export type ProviderBusinessItem = ProviderDisplayRecord & { role: string; routeRole: ProviderRouteRole | null }
 
 export type ProviderBusinessGroup = {
   key: string
@@ -41,7 +52,14 @@ export type ProviderBusinessGroup = {
   title: string
   description: string
   route: string
+  routeModels: string
   providers: ProviderBusinessItem[]
+  providerGroups: { key: string; label: string; count: number }[]
+  selectedProviderGroup: string
+  defaultProviderGroup: string
+  selectionMode: 'provider_group' | 'chain_config'
+  assignedProviderCodes: string[]
+  chainCandidates: ProviderDisplayRecord[]
   ready: boolean
   statusLabel: '链路已生效' | '链路未完整启用'
 }
@@ -58,7 +76,7 @@ export const providerRouteDefinitions: ProviderRouteDefinition[] = [
     categoryKey: 'suite',
     categoryTitle: '套图',
     title: '保真',
-    description: '商品保持优先链路，强调商品外观、颜色、结构与标签一致。',
+    description: 'Nano Pro 主线 + Nano 2 备线，强调商品外观、颜色、结构与标签一致。',
     capability: 'image',
   },
   {
@@ -66,7 +84,7 @@ export const providerRouteDefinitions: ProviderRouteDefinition[] = [
     categoryKey: 'suite',
     categoryTitle: '套图',
     title: '排版',
-    description: '视觉排版优先链路，强化文字层级与海报版式。',
+    description: 'GPT Image 2 generations，强化文字层级与海报版式。',
     capability: 'image',
   },
   {
@@ -82,7 +100,15 @@ export const providerRouteDefinitions: ProviderRouteDefinition[] = [
     categoryKey: 'aplus',
     categoryTitle: 'A+',
     title: '移动端',
-    description: '高级 A+ 移动端 600:450 生成或 Web 成图派生链路。',
+    description: '高级 A+ 移动端 600:450，必须使用 GPT Image 2 edit。',
+    capability: 'image',
+  },
+  {
+    key: 'image_edit',
+    categoryKey: 'image_edit',
+    categoryTitle: '改图',
+    title: '图片编辑',
+    description: '套图与 A+ 结果图二次编辑、文字替换，只调用图片 edit 能力。',
     capability: 'image',
   },
   {
@@ -90,7 +116,7 @@ export const providerRouteDefinitions: ProviderRouteDefinition[] = [
     categoryKey: 'video',
     categoryTitle: '视频',
     title: '视频',
-    description: '爆款视频异步生成链路，接收商品图公网地址与导演脚本。',
+    description: 'Seedance 2.0 异步视频生成链路。',
     capability: 'video',
   },
   {
@@ -98,27 +124,26 @@ export const providerRouteDefinitions: ProviderRouteDefinition[] = [
     categoryKey: 'llm',
     categoryTitle: 'LLM',
     title: 'LLM',
-    description: '提示词理解、商品识别、AI 帮写与安全审计链路。',
+    description: '提示词理解、商品识别、文案帮写与安全审计链路，暂不重构。',
     capability: 'llm',
   },
 ]
 
 const legacyDefaultRoles: Record<string, Record<string, ProviderRouteRole>> = {
   'doubao-seed-2-0-mini': { llm: 'primary' },
-  'qwen-3-6': { llm: 'fallback' },
-  'yunwu-nano-pro': { suite_fidelity: 'primary' },
-  'yunwu-nano': { suite_fidelity: 'fallback' },
-  'yunwu-image-2': { suite_layout: 'primary', aplus_detail: 'primary' },
-  'aplus-mobile-edit-low-cost': { aplus_mobile: 'primary' },
-  'shengsuanyun-doubao-seedance-2-0': { video: 'primary' },
+  'qwen-3-6': { llm: 'backup1' },
 }
 
 function routeRole(provider: ProviderDisplayRecord, routeKey: string): ProviderRouteRole | undefined {
   return provider.route_roles?.[routeKey] ?? legacyDefaultRoles[provider.code]?.[routeKey]
 }
 
-function roleLabel(role: ProviderRouteRole): string {
-  return role === 'primary' ? '主模型' : '失败备用'
+export function roleLabel(role: ProviderRouteRole): string {
+  return role === 'primary' ? '主模型' : `备${role.replace('backup', '')}`
+}
+
+function roleRank(role: ProviderRouteRole | null): number {
+  return role ? providerRouteRoleOrder.indexOf(role) : 99
 }
 
 export function providerRuntimeState(provider: ProviderDisplayRecord): ProviderRuntimeState {
@@ -135,21 +160,83 @@ export function providerRoutesForCapability(capability: string): ProviderRouteDe
   return providerRouteDefinitions.filter((route) => route.capability === capability)
 }
 
-export function groupProvidersByBusinessRoute(providers: ProviderDisplayRecord[]): ProviderBusinessGroup[] {
-  return providerRouteDefinitions.map((routeDefinition) => {
-    const members = providers
-      .map((provider) => {
-        const assignedRole = routeRole(provider, routeDefinition.key)
-        return assignedRole ? { ...provider, routeRole: assignedRole, role: roleLabel(assignedRole) } : null
-      })
-      .filter((provider): provider is ProviderBusinessItem => Boolean(provider))
-      .sort((left, right) => (left.routeRole === right.routeRole ? 0 : left.routeRole === 'primary' ? -1 : 1))
+function providerGroupLabel(provider: ProviderDisplayRecord): string {
+  return provider.provider_group_label || provider.provider_group || '未分组'
+}
 
-    const primary = members.find((provider) => provider.routeRole === 'primary')
-    const fallback = members.find((provider) => provider.routeRole === 'fallback')
+function providerModelFamily(provider: ProviderDisplayRecord): string {
+  return String(provider.config?.model_family || provider.model_name || provider.code)
+}
+
+export function providerMatchesRoute(provider: ProviderDisplayRecord, route: ProviderRouteDefinition): boolean {
+  if (provider.capability !== route.capability) return false
+  const operation = String(provider.operation || provider.config?.operation || '')
+  const family = providerModelFamily(provider)
+  const requiresExactSize = route.key === 'suite_layout' || route.key === 'aplus_detail' || route.key === 'aplus_mobile' || route.key === 'image_edit'
+  if (requiresExactSize && !provider.supports_exact_custom_size) return false
+  if (route.key === 'suite_fidelity') {
+    return operation === 'generate' && family.includes('nano-banana')
+  }
+  if (route.key === 'suite_layout' || route.key === 'aplus_detail') {
+    return operation === 'generate' && family === 'gpt-image-2'
+  }
+  if (route.key === 'aplus_mobile' || route.key === 'image_edit') {
+    return operation === 'edit' && family === 'gpt-image-2' && Boolean(provider.supports_edit)
+  }
+  if (route.key === 'video') {
+    return operation === 'video' && family === 'seedance-2.0'
+  }
+  return true
+}
+
+function assignedProviderItems(providers: ProviderDisplayRecord[], route: ProviderRouteDefinition): ProviderBusinessItem[] {
+  return providers
+    .map((provider): ProviderBusinessItem | null => {
+      const assignedRole = routeRole(provider, route.key)
+      return assignedRole ? { ...provider, routeRole: assignedRole, role: roleLabel(assignedRole) } : null
+    })
+    .filter((provider): provider is ProviderBusinessItem => Boolean(provider))
+    .sort((left, right) => roleRank(left.routeRole) - roleRank(right.routeRole))
+}
+
+export function groupProvidersByBusinessRoute(
+  providers: ProviderDisplayRecord[],
+  selectedProviderGroups: Record<string, string> = {},
+): ProviderBusinessGroup[] {
+  return providerRouteDefinitions.map((routeDefinition) => {
+    const assignedMembers = assignedProviderItems(providers, routeDefinition)
+    const candidates = providers
+      .filter((provider) => providerMatchesRoute(provider, routeDefinition))
+      .sort((left, right) => {
+        const leftRole = routeRole(left, routeDefinition.key) ?? null
+        const rightRole = routeRole(right, routeDefinition.key) ?? null
+        return roleRank(leftRole) - roleRank(rightRole) || providerGroupLabel(left).localeCompare(providerGroupLabel(right)) || left.label.localeCompare(right.label)
+      })
+    const providerGroups = Array.from(
+      candidates.reduce((map, provider) => {
+        const key = provider.provider_group || 'ungrouped'
+        const existing = map.get(key)
+        map.set(key, { key, label: providerGroupLabel(provider), count: (existing?.count || 0) + 1 })
+        return map
+      }, new Map<string, { key: string; label: string; count: number }>()),
+    ).map(([, value]) => value)
+    const primary = assignedMembers.find((provider) => provider.routeRole === 'primary')
+    const defaultProviderGroup = primary?.provider_group || providerGroups[0]?.key || ''
+    const selectedProviderGroup = selectedProviderGroups[routeDefinition.key] || defaultProviderGroup
+    const selectionMode = selectedProviderGroup === providerRouteChainConfigValue ? 'chain_config' : 'provider_group'
+    const members = selectionMode === 'chain_config'
+      ? assignedMembers
+      : candidates
+        .filter((provider) => (provider.provider_group || 'ungrouped') === selectedProviderGroup)
+        .map((provider) => {
+          const assignedRole = routeRole(provider, routeDefinition.key) ?? null
+          return { ...provider, routeRole: assignedRole, role: assignedRole ? roleLabel(assignedRole) : '可配置' }
+        })
+
     const ready = Boolean(primary && providerRuntimeState(primary).tone === 'ready')
-      && (!fallback || providerRuntimeState(fallback).tone === 'ready')
-    const route = members.length ? members.map((provider) => `${provider.label} ${provider.role}`).join(' → ') : '未配置'
+      && assignedMembers.every((provider) => providerRuntimeState(provider).tone === 'ready')
+    const routeModels = assignedMembers.length ? assignedMembers.map((provider) => provider.label).join(' -> ') : '未配置'
+    const route = routeModels
 
     return {
       key: routeDefinition.key,
@@ -158,16 +245,26 @@ export function groupProvidersByBusinessRoute(providers: ProviderDisplayRecord[]
       title: routeDefinition.title,
       description: routeDefinition.description,
       route,
+      routeModels,
       providers: members,
+      providerGroups,
+      selectedProviderGroup,
+      defaultProviderGroup,
+      selectionMode,
+      assignedProviderCodes: assignedMembers.map((provider) => provider.code),
+      chainCandidates: candidates,
       ready,
       statusLabel: ready ? '链路已生效' : '链路未完整启用',
     }
   })
 }
 
-export function groupProviderCategoriesByBusinessRoute(providers: ProviderDisplayRecord[]): ProviderBusinessCategory[] {
-  const groups = groupProvidersByBusinessRoute(providers)
-  const categoryOrder = ['suite', 'aplus', 'video', 'llm']
+export function groupProviderCategoriesByBusinessRoute(
+  providers: ProviderDisplayRecord[],
+  selectedProviderGroups: Record<string, string> = {},
+): ProviderBusinessCategory[] {
+  const groups = groupProvidersByBusinessRoute(providers, selectedProviderGroups)
+  const categoryOrder = ['suite', 'aplus', 'image_edit', 'video', 'llm']
   return categoryOrder
     .map((categoryKey) => {
       const categoryGroups = groups.filter((group) => group.categoryKey === categoryKey)

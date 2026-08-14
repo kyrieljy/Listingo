@@ -55,7 +55,7 @@ class AssetOut(BaseModel):
 
 
 class GenerationJobCreate(BaseModel):
-    asset_ids: list[str] = Field(min_length=1, max_length=3)
+    asset_ids: list[str] = Field(min_length=1, max_length=6)
     platform: str = Field(min_length=1, max_length=80)
     market: str = Field(min_length=1, max_length=80)
     language: str = Field(min_length=1, max_length=80)
@@ -113,7 +113,7 @@ class CustomImageCounts(BaseModel):
 
 
 class CopywritingAssistCreate(BaseModel):
-    asset_ids: list[str] = Field(default_factory=list, max_length=3)
+    asset_ids: list[str] = Field(default_factory=list, max_length=6)
     platform: str = Field(min_length=1, max_length=80)
     market: str = Field(min_length=1, max_length=80)
     language: str = Field(min_length=1, max_length=80)
@@ -140,7 +140,7 @@ VIDEO_TYPES = {
 
 
 class VideoJobCreate(BaseModel):
-    asset_ids: list[str] = Field(min_length=1, max_length=3)
+    asset_ids: list[str] = Field(min_length=1, max_length=6)
     platform: str = Field(min_length=1, max_length=80)
     market: str = Field(min_length=1, max_length=80)
     country: str = Field(min_length=1, max_length=80)
@@ -148,6 +148,7 @@ class VideoJobCreate(BaseModel):
     aspect_ratio: str = "9:16"
     selling_points: str = Field(default="", max_length=6000)
     product_name: str = Field(default="", max_length=200)
+    category: str = Field(default="", max_length=200)
     target_audience: str = Field(default="", max_length=1000)
     video_types: list[str] = Field(min_length=1, max_length=8)
     duration: int = Field(default=15, ge=5, le=15)
@@ -189,7 +190,7 @@ class VideoJobCreate(BaseModel):
 
 
 class VideoCopywritingAssistCreate(BaseModel):
-    asset_ids: list[str] = Field(default_factory=list, max_length=3)
+    asset_ids: list[str] = Field(default_factory=list, max_length=6)
     platform: str = Field(min_length=1, max_length=80)
     market: str = Field(min_length=1, max_length=80)
     country: str = Field(min_length=1, max_length=80)
@@ -262,11 +263,12 @@ class AplusModuleSelection(BaseModel):
 
 
 class AplusPlanJobCreate(BaseModel):
-    asset_ids: list[str] = Field(min_length=1, max_length=3)
+    asset_ids: list[str] = Field(min_length=1, max_length=6)
     platform: str = Field(min_length=1, max_length=80)
     market: str = Field(min_length=1, max_length=80)
     language: str = Field(min_length=1, max_length=80)
     product_info: str = Field(default="", max_length=6000)
+    category: str = Field(default="", max_length=200)
     module_selections: list[AplusModuleSelection] | None = Field(default=None, max_length=A_PLUS_MODULE_TOTAL_LIMIT)
     selected_modules: list[str] | None = Field(default=None, max_length=A_PLUS_MODULE_TOTAL_LIMIT)
     output_targets: list[AplusOutputTarget] = Field(min_length=1, max_length=8)
@@ -355,6 +357,7 @@ class AplusItemOut(BaseModel):
     prompt_text: str
     status: str
     provider_id: str | None
+    provider_task_id: str | None
     source_web_item_id: str | None
     error: str | None
     current_version_id: str | None
@@ -436,6 +439,7 @@ class GenerationItemOut(BaseModel):
     prompt_text: str
     status: str
     provider_id: str | None
+    provider_task_id: str | None
     error: str | None
     current_version_id: str | None
     versions: list[GenerationVersionOut]
@@ -456,7 +460,39 @@ class GenerationJobOut(BaseModel):
 
 
 class GenerationVersionCreate(BaseModel):
-    instruction: str = Field(min_length=2, max_length=2000)
+    instruction: str = Field(max_length=2000)
+
+
+class ImageTextBox(BaseModel):
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+    width: int = Field(ge=0)
+    height: int = Field(ge=0)
+
+
+class ImageTextLineOut(BaseModel):
+    id: str
+    index: int
+    text: str
+    confidence: float = Field(ge=0, le=1)
+    bbox: ImageTextBox
+
+
+class ImageTextOcrOut(BaseModel):
+    lines: list[ImageTextLineOut] = Field(default_factory=list)
+    warning: str | None = None
+
+
+class ImageTextEditLine(BaseModel):
+    id: str | None = Field(default=None, max_length=80)
+    index: int = Field(ge=0)
+    original_text: str = Field(default="", max_length=500)
+    text: str = Field(default="", max_length=500)
+    bbox: ImageTextBox | None = None
+
+
+class ImageTextVersionCreate(BaseModel):
+    lines: list[ImageTextEditLine] = Field(min_length=1, max_length=80)
 
 
 class ProviderUpdate(BaseModel):
@@ -477,6 +513,85 @@ class ProviderUpdate(BaseModel):
     compression: int | None = Field(default=None, ge=0, le=100)
     timeout_seconds: int | None = Field(default=None, ge=5, le=1800)
     poll_interval_seconds: int | None = Field(default=None, ge=0, le=120)
+    max_reference_images: int | None = Field(default=None, ge=0, le=14)
+    parameter_values: dict[str, Any] | None = None
+
+
+class ProviderRouteChainUpdate(BaseModel):
+    provider_codes: list[str] = Field(default_factory=list, max_length=5)
+
+
+class WorkspaceConfigOut(BaseModel):
+    max_upload_bytes: int
+    max_batch_tasks: int
+    max_batch_item_assets: int
+    max_active_batch_items: int
+    max_provider_concurrency: int
+
+
+class BatchItemCreate(BaseModel):
+    asset_ids: list[str] = Field(min_length=1, max_length=6)
+    name: str = Field(default="", max_length=200)
+    selling_points: str = Field(default="", max_length=6000)
+    overrides: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("asset_ids")
+    @classmethod
+    def unique_batch_assets(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("商品图不能重复")
+        return value
+
+
+class BatchJobCreate(BaseModel):
+    business_type: Literal["suite", "aplus"]
+    global_params: dict[str, Any] = Field(default_factory=dict)
+    items: list[BatchItemCreate] = Field(min_length=1, max_length=100)
+    notification_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class BatchItemOut(BaseModel):
+    id: str
+    index: int
+    name: str
+    status: str
+    thumbnail_url: str | None = None
+    completed_image_count: int = 0
+    failed_image_count: int = 0
+    total_image_count: int = 0
+    params: dict[str, Any]
+    asset_ids: list[str]
+    generation_job_id: str | None
+    aplus_plan_job_id: str | None
+    aplus_generation_job_id: str | None
+    error: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    generation_job: GenerationJobOut | None = None
+    aplus_plan_job: AplusJobOut | None = None
+    aplus_generation_job: AplusJobOut | None = None
+
+
+class BatchJobOut(BaseModel):
+    id: str
+    business_type: str
+    status: str
+    global_params: dict[str, Any]
+    total_count: int
+    completed_count: int
+    failed_count: int
+    progress: int
+    notification_config: dict[str, Any]
+    error: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    items: list[BatchItemOut] = Field(default_factory=list)
+
+
+class BatchValidationFixturesCreate(BaseModel):
+    business_type: Literal["suite", "aplus"]
 
 
 class ProviderOut(BaseModel):
@@ -491,6 +606,14 @@ class ProviderOut(BaseModel):
     is_default: bool
     is_fallback: bool
     route_roles: dict[str, str]
+    provider_group: str | None = None
+    provider_group_label: str | None = None
+    operation: str | None = None
+    supports_custom_size: bool = False
+    supports_exact_custom_size: bool = False
+    supports_edit: bool = False
+    pricing: dict[str, Any] | None = None
+    health: dict[str, Any] | None = None
     has_api_key: bool
     api_key_masked: str | None
     config: dict[str, Any]
@@ -501,6 +624,16 @@ class ProviderTestOut(BaseModel):
     ok: bool
     latency_ms: int
     message: str
+    status: Literal["ok", "failed", "unknown"] = "ok"
+
+
+class ProviderGroupOut(BaseModel):
+    key: str
+    label: str
+    website: str
+    provider_count: int = 0
+    enabled_count: int = 0
+    keyed_count: int = 0
 
 
 class PromptVersionCreate(BaseModel):
@@ -538,3 +671,226 @@ class PromptTestRunOut(BaseModel):
 class WorkflowVersionCreate(BaseModel):
     graph: dict[str, Any]
     change_note: str = Field(default="", max_length=500)
+
+
+class SmsSendCreate(BaseModel):
+    phone: str = Field(min_length=5, max_length=32)
+    purpose: Literal["login", "register", "reset_password", "change_phone", "admin"] = "login"
+
+
+class SmsSendOut(BaseModel):
+    ok: bool
+    expires_in: int
+    message: str
+    debug_code: str | None = None
+
+
+class SmsLoginCreate(BaseModel):
+    phone: str = Field(min_length=5, max_length=32)
+    code: str = Field(min_length=4, max_length=12)
+    mode: Literal["login", "register"] = "login"
+
+
+class RegisterCreate(BaseModel):
+    username: str = Field(min_length=2, max_length=80)
+    password: str = Field(min_length=6, max_length=128)
+    phone: str = Field(min_length=5, max_length=32)
+    code: str = Field(min_length=4, max_length=12)
+
+
+class PasswordLoginCreate(BaseModel):
+    identifier: str = Field(min_length=2, max_length=160)
+    password: str = Field(min_length=1, max_length=128)
+    admin_code: str | None = Field(default=None, max_length=12)
+
+
+class FirstPasswordCreate(BaseModel):
+    password: str = Field(min_length=6, max_length=128)
+
+
+class AuthUserOut(BaseModel):
+    id: str
+    phone: str
+    phone_masked: str
+    username: str
+    display_name: str
+    email: str
+    avatar_initials: str
+    uid: str
+    role: str
+    status: str
+    plan: str
+    gender: str
+    bio: str
+    password_set: bool
+    first_password_pending: bool
+    last_login_at: datetime | None
+    created_at: datetime
+
+
+class AuthMeOut(BaseModel):
+    user: AuthUserOut | None
+    unread_count: int = 0
+
+
+class AnalyticsEventCreate(BaseModel):
+    session_id: str = Field(default="", max_length=80)
+    event_name: str = Field(min_length=1, max_length=120)
+    event_type: str = Field(default="click", max_length=40)
+    surface: str = Field(default="", max_length=80)
+    business_type: str = Field(default="", max_length=40)
+    feature_key: str = Field(default="", max_length=80)
+    platform: str = Field(default="", max_length=80)
+    market: str = Field(default="", max_length=80)
+    language: str = Field(default="", max_length=80)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProfileUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    email: str | None = Field(default=None, max_length=160)
+    gender: str | None = Field(default=None, max_length=20)
+    bio: str | None = Field(default=None, max_length=140)
+
+
+class PasswordChangeCreate(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    next_password: str = Field(min_length=6, max_length=128)
+
+
+class ChangePhoneStartCreate(BaseModel):
+    phone: str = Field(min_length=5, max_length=32)
+
+
+class ChangePhoneConfirmCreate(BaseModel):
+    phone: str = Field(min_length=5, max_length=32)
+    code: str = Field(min_length=4, max_length=12)
+
+
+class PlanPriceOut(BaseModel):
+    id: str
+    billing_cycle: str
+    amount_cents: int | None
+    currency: str
+    price_label: str
+    period_label: str
+
+
+class PlanQuotaRuleOut(BaseModel):
+    id: str
+    action_key: str
+    action_label: str
+    unit: str
+    monthly_limit: int | None
+    cost_multiplier: int
+    warning_threshold: int
+    enabled: bool
+
+
+class SubscriptionPlanOut(BaseModel):
+    id: str
+    code: str
+    name: str
+    description: str
+    badge: str
+    cta: str
+    enabled: bool
+    visible: bool
+    is_internal: bool
+    is_enterprise: bool
+    features: list[str]
+    contact_text: str
+    contact_phone: str
+    prices: list[PlanPriceOut]
+    quota_rules: list[PlanQuotaRuleOut]
+    sort_order: int
+
+
+class QuotaRowOut(PlanQuotaRuleOut):
+    used: int
+    remaining: int | None
+    period: str
+
+
+class QuotaSummaryOut(BaseModel):
+    plan: SubscriptionPlanOut
+    period: str
+    rows: list[QuotaRowOut]
+
+
+class PaymentOrderCreate(BaseModel):
+    plan_code: str = Field(min_length=1, max_length=40)
+    billing_cycle: Literal["monthly", "yearly"] = "monthly"
+
+
+class PaymentOrderOut(BaseModel):
+    id: str
+    order_no: str
+    plan_code: str
+    plan_name: str
+    billing_cycle: str
+    amount_cents: int | None
+    currency: str
+    status: str
+    paid_at: datetime | None
+    expires_at: datetime | None
+    created_at: datetime
+
+
+class NotificationOut(BaseModel):
+    id: str
+    category: str
+    title: str
+    body: str
+    unread: bool
+    metadata: dict[str, Any]
+    created_at: datetime
+    read_at: datetime | None
+
+
+class AdminUserUpdate(BaseModel):
+    role: Literal["user", "admin"] | None = None
+    status: Literal["active", "disabled"] | None = None
+    plan_code: str | None = Field(default=None, max_length=40)
+
+
+class AdminPlanUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+    badge: str | None = Field(default=None, max_length=80)
+    cta: str | None = Field(default=None, max_length=80)
+    visible: bool | None = None
+    enabled: bool | None = None
+    features: list[str] | None = None
+    contact_text: str | None = None
+    contact_phone: str | None = Field(default=None, max_length=32)
+
+
+class AdminQuotaRuleUpdate(BaseModel):
+    monthly_limit: int | None = Field(default=None, ge=0)
+    cost_multiplier: int | None = Field(default=None, ge=1, le=100)
+    warning_threshold: int | None = Field(default=None, ge=1, le=100)
+    enabled: bool | None = None
+
+
+class SmsSettingsUpdate(BaseModel):
+    provider: Literal["aliyun", "aliyun_pnvs"] | None = None
+    enabled: bool | None = None
+    debug_mode: bool | None = None
+    region_id: str | None = Field(default=None, max_length=80)
+    sign_name: str | None = Field(default=None, max_length=120)
+    login_template_code: str | None = Field(default=None, max_length=80)
+    register_template_code: str | None = Field(default=None, max_length=80)
+    change_phone_template_code: str | None = Field(default=None, max_length=80)
+    admin_template_code: str | None = Field(default=None, max_length=80)
+    access_key_id: str | None = Field(default=None, max_length=200)
+    access_key_secret: str | None = Field(default=None, max_length=1000)
+    code_ttl_seconds: int | None = Field(default=None, ge=60, le=1800)
+    cooldown_seconds: int | None = Field(default=None, ge=10, le=600)
+    daily_limit_per_phone: int | None = Field(default=None, ge=1, le=100)
+
+
+class AdminNotificationBroadcastCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    body: str = Field(default="", max_length=4000)
+    user_ids: list[str] = Field(default_factory=list, max_length=500)

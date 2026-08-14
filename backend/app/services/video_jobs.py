@@ -19,10 +19,11 @@ from backend.app.services.content_safety import (
     run_local_text_safety_review,
 )
 from backend.app.services.jobs import _call_llm_with_fallback
-from backend.app.services.provider_routing import enabled_provider_for_route
+from backend.app.services.provider_routing import enabled_provider_for_route, provider_display_names_by_code, route_provider_codes
 from backend.app.services.providers import HELLOBABYGO_VIDEO_ADAPTER, ProviderClient
 from backend.app.services.redaction import safe_json
 from backend.app.services.storage import public_file_url
+from backend.app.services.subscriptions import confirm_quota, release_quota
 
 
 FINAL_STATUSES = {"succeeded", "partial_failed", "failed", "cancelled", "partial_cancelled"}
@@ -118,6 +119,52 @@ def dryrun_video_script(params: dict[str, Any], video_type: str) -> str:
 """
 
 
+def _current_video_version(item: VideoItem) -> VideoVersion | None:
+    if not item.current_version_id:
+        return None
+    return next((version for version in item.versions if version.id == item.current_version_id), None)
+
+
+def _edited_video_script(item: VideoItem, instruction: str) -> str:
+    base_script = item.script_markdown.strip() or item.prompt_text.strip()
+    if not base_script:
+        raise ValueError("Current video script is unavailable")
+    return (
+        f"{base_script}\n\n"
+        "## Secondary edit instruction\n"
+        f"{instruction.strip()}"
+    )
+
+
+def create_dryrun_video_child_version(session: Session, item: VideoItem, instruction: str) -> VideoVersion:
+    current = _current_video_version(item)
+    if not current:
+        raise ValueError("Current video version is unavailable")
+    version_no = max((version.version_no for version in item.versions), default=0) + 1
+    params = json.loads(item.job.params_json)
+    script = _edited_video_script(item, instruction)
+    version = VideoVersion(
+        item_id=item.id,
+        parent_version_id=current.id,
+        version_no=version_no,
+        instruction=instruction,
+        file_path="",
+        url=f"/demo/video-skincare-result.png?v={version_no}",
+        remote_url="",
+        metadata_json=safe_json({"dry_run": True, "video_type": item.video_type, "secondary_edit": True}),
+    )
+    session.add(version)
+    session.flush()
+    item.script_markdown = script
+    item.prompt_text = seedance_prompt_from_script(script, params, item)
+    item.current_version_id = version.id
+    item.status = "succeeded"
+    item.error = None
+    session.commit()
+    session.refresh(version)
+    return version
+
+
 def extract_request_id(data: dict[str, Any]) -> str:
     candidates = [
         data.get("request_id"),
@@ -126,6 +173,10 @@ def extract_request_id(data: dict[str, Any]) -> str:
         data.get("data", {}).get("request_id") if isinstance(data.get("data"), dict) else None,
         data.get("data", {}).get("id") if isinstance(data.get("data"), dict) else None,
         data.get("data", {}).get("task_id") if isinstance(data.get("data"), dict) else None,
+        data.get("taskId"),
+        data.get("taskUUID"),
+        data.get("data", {}).get("taskId") if isinstance(data.get("data"), dict) else None,
+        data.get("data", {}).get("taskUUID") if isinstance(data.get("data"), dict) else None,
     ]
     for candidate in candidates:
         if isinstance(candidate, str) and candidate.strip():
@@ -200,7 +251,11 @@ def _enabled_provider(session: Session, capability: str, relation: str = "defaul
     route_key = "llm" if capability == "llm" else "video" if capability == "video" else ""
     if route_key:
         try:
-            return enabled_provider_for_route(session, route_key, "primary" if relation == "default" else "fallback")
+            provider_codes = route_provider_codes(session, route_key)
+            provider_code = provider_codes[0] if relation == "default" or len(provider_codes) == 1 else provider_codes[1]
+            provider = session.scalar(select(Provider).where(Provider.code == provider_code, Provider.enabled.is_(True)))
+            if provider and provider.encrypted_api_key:
+                return provider
         except RuntimeError:
             # Compatibility for older tests and databases that still only use capability-level flags.
             pass
@@ -240,6 +295,14 @@ def finalize_video_cancellation(session: Session, job: VideoJob) -> None:
     job.status = _job_status(job.items)
     job.progress = 100
     job.completed_at = utcnow()
+    sync_video_quota(session, job)
+
+
+def sync_video_quota(session: Session, job: VideoJob) -> None:
+    if job.status in {"succeeded", "partial_failed"}:
+        confirm_quota(session, ref_type="video_job", ref_id=job.id)
+    elif job.status in {"failed", "cancelled", "partial_cancelled"}:
+        release_quota(session, ref_type="video_job", ref_id=job.id)
 
 
 def cancel_video_job(session: Session, job: VideoJob) -> VideoJob:
@@ -247,6 +310,7 @@ def cancel_video_job(session: Session, job: VideoJob) -> VideoJob:
         return job
     job.status = "cancelling"
     finalize_video_cancellation(session, job)
+    sync_video_quota(session, job)
     session.commit()
     session.refresh(job)
     return job
@@ -262,6 +326,7 @@ def video_cancel_requested(session_factory, job_id: str) -> bool:
         if job.status not in CANCEL_REQUESTED_STATUSES:
             return False
         finalize_video_cancellation(session, job)
+        sync_video_quota(session, job)
         session.commit()
         return True
 
@@ -315,6 +380,7 @@ async def run_video_job(job_id: str, session_factory, settings: Settings, cipher
                     if item.status in {"queued", "running"}:
                         item.status = "failed"
                         item.error = str(exc)
+                sync_video_quota(session, job)
                 session.commit()
 
 
@@ -349,7 +415,7 @@ async def _run_video_job(
         prompt_content = str(params.get("_admin_prompt_content") or prompt_version.content)
         llm_default = _enabled_provider(session, "llm", "default") if not job.dry_run else None
         llm_fallback = _enabled_provider(session, "llm", "fallback") if not job.dry_run else None
-        video_provider = _enabled_provider(session, "video", "default") if not job.dry_run else None
+        video_provider_codes = route_provider_codes(session, "video") if not job.dry_run else []
         safety_prompt_model = session.scalar(select(Prompt).where(Prompt.code == "content-safety-review")) if not job.dry_run else None
         safety_prompt = (
             session.get(PromptVersion, safety_prompt_model.active_version_id)
@@ -427,7 +493,7 @@ async def _run_video_job(
             prompt_content,
             llm_default,
             llm_fallback,
-            video_provider,
+            video_provider_codes,
             session_factory,
             settings,
             cipher,
@@ -449,6 +515,7 @@ async def _run_video_job(
         job.status = _job_status(job.items)
         job.progress = 100
         job.completed_at = utcnow()
+        sync_video_quota(session, job)
         session.commit()
 
 
@@ -460,7 +527,7 @@ async def _run_video_item(
     prompt_content: str,
     llm_default: Provider | None,
     llm_fallback: Provider | None,
-    video_provider: Provider | None,
+    video_provider_codes: list[str],
     session_factory,
     settings: Settings,
     cipher: ApiKeyCipher,
@@ -531,46 +598,68 @@ async def _run_video_item(
 
         if cancel_video_item_if_requested(session_factory, job_id, item_id):
             return
-        submit_started = perf_counter()
-        api_key = cipher.decrypt(video_provider.encrypted_api_key or "")
-        response = await client.submit_video_task(
-            video_provider,
-            api_key,
-            seedance_prompt_from_script(script.strip(), params, item),
-            image_urls,
-            aspect_ratio=params.get("aspect_ratio", "9:16"),
-            duration=int(params.get("duration", 15)),
-            resolution=params.get("resolution", "1080p"),
-        )
-        request_id = extract_request_id(response)
         generation_settings = {
             "size": params.get("aspect_ratio", "9:16"),
             "seconds": int(params.get("duration", 15)),
             "resolution": params.get("resolution", "1080p"),
             "image_count": len(image_urls),
         }
+        errors: list[str] = []
         with session_factory() as session:
-            item = session.get(VideoItem, item_id)
-            item.provider_id = video_provider.id
-            item.provider_task_id = request_id
-            session.add(
-                ExecutionLog(
-                    node="video_submit",
-                    provider_id=video_provider.id,
-                    status="succeeded",
-                    duration_ms=int((perf_counter() - submit_started) * 1000),
-                    request_summary=safe_json({"video_job_id": job_id, "item_id": item_id, "request_id": request_id, "generation_settings": generation_settings}),
-                    response_summary=safe_json(response),
-                    dry_run=False,
+            provider_display_names = provider_display_names_by_code(session, video_provider_codes)
+        used_provider: Provider | None = None
+        used_api_key = ""
+        request_id = ""
+        response: dict[str, Any] = {}
+        remote_url = ""
+        for provider_code in video_provider_codes:
+            submit_started = perf_counter()
+            with session_factory() as session:
+                candidate = session.scalar(select(Provider).where(Provider.code == provider_code, Provider.enabled.is_(True)))
+                if not candidate or not candidate.encrypted_api_key:
+                    errors.append(f"{provider_display_names.get(provider_code, provider_code)}: 未启用或缺少 API Key")
+                    continue
+                api_key = cipher.decrypt(candidate.encrypted_api_key)
+            try:
+                response = await client.submit_video_task(
+                    candidate,
+                    api_key,
+                    seedance_prompt_from_script(script.strip(), params, item),
+                    image_urls,
+                    aspect_ratio=params.get("aspect_ratio", "9:16"),
+                    duration=int(params.get("duration", 15)),
+                    resolution=params.get("resolution", "1080p"),
                 )
-            )
-            session.commit()
-
-        remote_url = await poll_video_completion(client, video_provider, api_key, request_id, job_id, item_id, session_factory)
+                request_id = extract_request_id(response)
+                with session_factory() as session:
+                    write_item = session.get(VideoItem, item_id)
+                    if write_item:
+                        write_item.provider_id = candidate.id
+                        write_item.provider_task_id = request_id
+                        session.add(
+                            ExecutionLog(
+                                node="video_submit",
+                                provider_id=candidate.id,
+                                status="succeeded",
+                                duration_ms=int((perf_counter() - submit_started) * 1000),
+                                request_summary=safe_json({"video_job_id": job_id, "item_id": item_id, "request_id": request_id, "generation_settings": generation_settings, "route_candidates": video_provider_codes}),
+                                response_summary=safe_json(response),
+                                dry_run=False,
+                            )
+                        )
+                        session.commit()
+                remote_url = await poll_video_completion(client, candidate, api_key, request_id, job_id, item_id, session_factory)
+                used_provider = candidate
+                used_api_key = api_key
+                break
+            except Exception as provider_error:
+                errors.append(f"{provider_display_names.get(provider_code, provider_code)}: {provider_error}")
+        if not used_provider or not remote_url:
+            raise RuntimeError("视频模型调用失败：" + "；".join(errors))
         content_api_key = (
-            api_key
-            if video_provider.adapter == HELLOBABYGO_VIDEO_ADAPTER
-            and remote_url.startswith(video_provider.base_url.rstrip("/") + "/")
+            used_api_key
+            if used_provider.adapter == HELLOBABYGO_VIDEO_ADAPTER
+            and remote_url.startswith(used_provider.base_url.rstrip("/") + "/")
             else None
         )
         local_url, file_path = await save_remote_video(client, settings, remote_url, job_id, item_id, api_key=content_api_key)
@@ -583,7 +672,7 @@ async def _run_video_item(
                 file_path=str(file_path),
                 url=local_url,
                 remote_url=remote_url,
-                metadata_json=safe_json({"provider": video_provider.code, "request_id": request_id, "params": params}),
+                metadata_json=safe_json({"provider": used_provider.code, "request_id": request_id, "params": params}),
             )
             session.add(version)
             session.flush()
@@ -602,7 +691,7 @@ async def _run_video_item(
                 session.add(
                     ExecutionLog(
                         node="video_generate",
-                        provider_id=video_provider.id if video_provider else None,
+                        provider_id=item.provider_id,
                         status="failed",
                         request_summary=safe_json({"video_job_id": job_id, "item_id": item_id}),
                         response_summary="{}",
@@ -611,6 +700,118 @@ async def _run_video_item(
                     )
                 )
                 session.commit()
+
+
+async def create_live_video_child_version(
+    session: Session,
+    item: VideoItem,
+    instruction: str,
+    settings: Settings,
+    cipher: ApiKeyCipher,
+    session_factory,
+) -> VideoVersion:
+    current = _current_video_version(item)
+    job = session.get(VideoJob, item.job_id)
+    if not current or not job:
+        raise ValueError("Current video version is unavailable")
+
+    params = json.loads(job.params_json)
+    asset_ids = json.loads(job.asset_ids_json)
+    assets = session.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()
+    assets_by_id = {asset.id: asset for asset in assets}
+    ordered_assets = [assets_by_id.get(asset_id) for asset_id in asset_ids]
+    if any(asset is None for asset in ordered_assets):
+        raise ValueError("Referenced product images are unavailable")
+
+    script = _edited_video_script(item, instruction)
+    prompt = seedance_prompt_from_script(script, params, item)
+    ensure_content_safe(run_local_text_safety_review(script), "Input content safety blocked")
+    ensure_content_safe(run_local_text_safety_review(prompt), "Input content safety blocked")
+
+    video_provider_codes = route_provider_codes(session, "video")
+    provider_display_names = provider_display_names_by_code(session, video_provider_codes)
+    image_urls = [public_asset_url(settings, asset) for asset in ordered_assets if asset]
+    client = ProviderClient()
+    errors: list[str] = []
+    used_provider: Provider | None = None
+    used_api_key = ""
+    request_id = ""
+    remote_url = ""
+    response: dict[str, Any] = {}
+    for provider_code in video_provider_codes:
+        video_provider = session.scalar(select(Provider).where(Provider.code == provider_code, Provider.enabled.is_(True)))
+        if not video_provider or not video_provider.encrypted_api_key:
+            errors.append(f"{provider_display_names.get(provider_code, provider_code)}: 未启用或缺少 API Key")
+            continue
+        api_key = cipher.decrypt(video_provider.encrypted_api_key or "")
+        try:
+            response = await client.submit_video_task(
+                video_provider,
+                api_key,
+                prompt,
+                image_urls,
+                aspect_ratio=params.get("aspect_ratio", "9:16"),
+                duration=int(params.get("duration", 15)),
+                resolution=params.get("resolution", "1080p"),
+            )
+            request_id = extract_request_id(response)
+            item.provider_id = video_provider.id
+            item.provider_task_id = request_id
+            session.add(
+                ExecutionLog(
+                    node="video_edit_submit",
+                    provider_id=video_provider.id,
+                    status="succeeded",
+                    request_summary=safe_json({"video_job_id": job.id, "item_id": item.id, "request_id": request_id, "route_candidates": video_provider_codes}),
+                    response_summary=safe_json(response),
+                    dry_run=False,
+                )
+            )
+            session.commit()
+            remote_url = await poll_video_completion(client, video_provider, api_key, request_id, job.id, item.id, session_factory)
+            used_provider = video_provider
+            used_api_key = api_key
+            break
+        except Exception as provider_error:
+            errors.append(f"{provider_display_names.get(provider_code, provider_code)}: {provider_error}")
+    if not used_provider or not remote_url:
+        raise RuntimeError("视频编辑模型调用失败：" + "；".join(errors))
+    content_api_key = (
+        used_api_key
+        if used_provider.adapter == HELLOBABYGO_VIDEO_ADAPTER
+        and remote_url.startswith(used_provider.base_url.rstrip("/") + "/")
+        else None
+    )
+    version_no = max((version.version_no for version in item.versions), default=0) + 1
+    local_url, file_path = await save_remote_video(
+        client,
+        settings,
+        remote_url,
+        job.id,
+        item.id,
+        api_key=content_api_key,
+        version_no=version_no,
+    )
+    version = VideoVersion(
+        item_id=item.id,
+        parent_version_id=current.id,
+        version_no=version_no,
+        instruction=instruction,
+        file_path=str(file_path),
+        url=local_url,
+        remote_url=remote_url,
+        metadata_json=safe_json({"dry_run": False, "provider": used_provider.code, "request_id": request_id, "secondary_edit": True}),
+    )
+    session.add(version)
+    session.flush()
+    item.script_markdown = script
+    item.prompt_text = prompt
+    item.current_version_id = version.id
+    item.status = "succeeded"
+    item.error = None
+    session.commit()
+    session.refresh(version)
+    return version
 
 
 async def poll_video_completion(
@@ -656,12 +857,13 @@ async def save_remote_video(
     item_id: str,
     *,
     api_key: str | None = None,
+    version_no: int | None = None,
 ) -> tuple[str, Path]:
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     content = await client._download(remote_url, 600, headers=headers)
     video_dir = settings.results_dir / "videos" / job_id
     video_dir.mkdir(parents=True, exist_ok=True)
-    destination = video_dir / f"{item_id}.mp4"
+    destination = video_dir / (f"{item_id}-v{version_no}.mp4" if version_no else f"{item_id}.mp4")
     destination.write_bytes(content)
     relative = destination.relative_to(settings.data_dir).as_posix()
     return f"/files/{relative}", destination

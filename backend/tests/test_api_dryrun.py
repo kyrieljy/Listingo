@@ -1,14 +1,19 @@
 from io import BytesIO
+from datetime import datetime, timedelta, timezone
 import json
 from zipfile import ZipFile
 
+import pytest
 from PIL import Image
 from sqlalchemy import select
 
+from backend.app.api import admin as admin_api
 from backend.app.api.public import build_copywriting_user_prompt
 from backend.app.models import (
     AplusItem,
     AplusJob,
+    BatchItem,
+    BatchJob,
     GenerationItem,
     GenerationJob,
     Provider,
@@ -17,8 +22,10 @@ from backend.app.models import (
     VideoJob,
     Workflow,
 )
-from backend.app.schemas import CopywritingAssistCreate
+from backend.app.schemas import A_PLUS_MODULES, CopywritingAssistCreate, VIDEO_TYPES
 from backend.app.services.aplus_jobs import DEMO_ASSETS
+from backend.app.services.jobs import INVALID_GENERATED_IMAGE_ERROR, validate_generated_image_bytes
+from backend.app.services.workspace_recovery import recover_interrupted_workspace_jobs, repair_monitoring_fixture_history
 
 
 def make_png() -> bytes:
@@ -50,6 +57,61 @@ def active_workflow_version_id(client, code: str) -> str:
         return workflow.active_version_id
 
 
+def test_admin_ocr_settings_can_be_updated_and_prewarmed(client, monkeypatch) -> None:
+    current = client.get("/api/v1/admin/ocr-settings")
+    assert current.status_code == 200
+    assert current.json()["ocr_engine"] == "rapidocr"
+    assert current.json()["ocr_primary_model"] == "PP-OCRv5"
+
+    updated = client.patch(
+        "/api/v1/admin/ocr-settings",
+        json={
+            "ocr_engine": "rapidocr",
+            "ocr_primary_model": "PP-OCRv5",
+            "ocr_fallback_model": "PP-OCRv6",
+            "ocr_text_score_threshold": 0.7,
+            "ocr_min_box_width": 8,
+            "ocr_use_enhanced_variants": True,
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    data = updated.json()
+    assert data["ocr_engine"] == "rapidocr"
+    assert data["ocr_primary_model"] == "PP-OCRv5"
+    assert data["ocr_text_score_threshold"] == 0.7
+    assert data["ocr_min_box_width"] == 8
+    assert data["ocr_use_enhanced_variants"] is True
+
+    def fake_prewarm(settings):
+        assert settings.ocr_engine == "rapidocr"
+        return {
+            "ok": True,
+            "active_engine": "RapidOCR",
+            "active_model": "PP-OCRv4-onnx",
+            "elapsed_ms": 12,
+            "warmed": [{"engine": "RapidOCR", "model": "PP-OCRv4-onnx", "ok": True, "elapsed_ms": 12}],
+            "warning": None,
+            "cache_size": 1,
+        }
+
+    monkeypatch.setattr(admin_api, "prewarm_ocr_engine", fake_prewarm)
+    prewarm = client.post("/api/v1/admin/ocr-settings/prewarm")
+    assert prewarm.status_code == 200, prewarm.text
+    assert prewarm.json()["prewarm"]["active_engine"] == "RapidOCR"
+
+
+def test_admin_ocr_settings_reject_invalid_engine(client) -> None:
+    response = client.patch("/api/v1/admin/ocr-settings", json={"ocr_engine": "unknown"})
+    assert response.status_code == 422
+
+
+def test_generated_image_validation_reports_readable_error() -> None:
+    with pytest.raises(RuntimeError) as exc_info:
+        validate_generated_image_bytes(b'{"error":"not an image"}')
+    assert INVALID_GENERATED_IMAGE_ERROR in str(exc_info.value)
+    assert "BytesIO" not in str(exc_info.value)
+
+
 def test_dryrun_job_completes_without_external_calls_and_exports_zip(client) -> None:
     asset_id = upload_asset(client)
     response = client.post(
@@ -79,6 +141,8 @@ def test_dryrun_job_completes_without_external_calls_and_exports_zip(client) -> 
     assert all(item["versions"][0]["url"].startswith("/files/results/") for item in detail["items"])
 
     item_ids = ",".join(item["id"] for item in detail["items"][:3])
+    source_path = client.app.state.settings.data_dir / detail["items"][0]["versions"][0]["url"].removeprefix("/files/")
+    original_source_bytes = source_path.read_bytes()
     archive = client.get(
         f"/api/v1/generation-jobs/{job['id']}/download",
         params={"item_ids": item_ids},
@@ -87,6 +151,20 @@ def test_dryrun_job_completes_without_external_calls_and_exports_zip(client) -> 
     assert archive.headers["content-type"] == "application/zip"
     with ZipFile(BytesIO(archive.content)) as zip_file:
         assert len(zip_file.namelist()) == 3
+        watermarked_name = zip_file.namelist()[0]
+        watermarked_bytes = zip_file.read(watermarked_name)
+
+    plain_archive = client.get(
+        f"/api/v1/generation-jobs/{job['id']}/download",
+        params={"item_ids": item_ids, "include_watermark": False},
+    )
+    assert plain_archive.status_code == 200
+    with ZipFile(BytesIO(plain_archive.content)) as zip_file:
+        plain_bytes = zip_file.read(zip_file.namelist()[0])
+    with Image.open(BytesIO(watermarked_bytes)) as watermarked, Image.open(BytesIO(plain_bytes)) as plain:
+        assert watermarked.size == plain.size
+    assert watermarked_bytes != plain_bytes
+    assert source_path.read_bytes() == original_source_bytes
 
     long_image = client.get(
         f"/api/v1/generation-jobs/{job['id']}/download",
@@ -181,6 +259,262 @@ def test_aplus_cancel_endpoints_are_idempotent_and_preserve_successes(client) ->
     assert [item["status"] for item in generation_payload["items"]] == ["succeeded", "cancelled"]
 
 
+def test_aplus_single_item_retry_only_reruns_target_failed_item(client) -> None:
+    asset_id = upload_asset(client)
+    prompt_version_id = active_prompt_version_id(client, "aplus-meta")
+    with client.app.state.session_factory() as session:
+        job = AplusJob(
+            job_type="generation",
+            status="partial_failed",
+            dry_run=True,
+            params_json=json.dumps({"output_targets": [{"mode": "detail", "aspect_ratio": "1:1"}]}, ensure_ascii=False),
+            asset_ids_json=json.dumps([asset_id]),
+            count=2,
+            prompt_version_id=prompt_version_id,
+        )
+        session.add(job)
+        session.flush()
+        target = AplusItem(
+            job_id=job.id,
+            index=0,
+            module_index=1,
+            module_name="商品主视觉",
+            output_mode="detail",
+            aspect_ratio="1:1",
+            image_prompt="主视觉",
+            copy_requirements="No Text Overlay",
+            prompt_text="{}",
+            status="failed",
+            error="target failed",
+        )
+        other = AplusItem(
+            job_id=job.id,
+            index=1,
+            module_index=2,
+            module_name="卖点拆解",
+            output_mode="detail",
+            aspect_ratio="1:1",
+            image_prompt="卖点",
+            copy_requirements="No Text Overlay",
+            prompt_text="{}",
+            status="failed",
+            error="other failed",
+        )
+        session.add_all([target, other])
+        session.commit()
+        target_id = target.id
+        other_id = other.id
+
+    response = client.post(f"/api/v1/aplus-items/{target_id}/retry")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    by_id = {item["id"]: item for item in payload["items"]}
+    assert by_id[target_id]["status"] == "succeeded"
+    assert by_id[target_id]["versions"]
+    assert by_id[other_id]["status"] == "failed"
+    assert by_id[other_id]["error"] == "other failed"
+    assert payload["status"] == "partial_failed"
+
+
+def test_suite_single_item_retry_only_reruns_target_failed_item(client) -> None:
+    asset_id = upload_asset(client)
+    prompt_version_id = active_prompt_version_id(client, "ecommerce-meta")
+    workflow_version_id = active_workflow_version_id(client, "product-suite-v1")
+    with client.app.state.session_factory() as session:
+        job = GenerationJob(
+            status="partial_failed",
+            dry_run=True,
+            params_json=json.dumps({"aspect_ratio": "1:1", "model_preference": "fidelity"}, ensure_ascii=False),
+            asset_ids_json=json.dumps([asset_id]),
+            count=2,
+            prompt_version_id=prompt_version_id,
+            workflow_version_id=workflow_version_id,
+        )
+        session.add(job)
+        session.flush()
+        target = GenerationItem(
+            job_id=job.id,
+            index=0,
+            route_symbol="#@",
+            image_type="主图",
+            prompt_text="{}",
+            status="failed",
+            error="target failed",
+        )
+        other = GenerationItem(
+            job_id=job.id,
+            index=1,
+            route_symbol="#@",
+            image_type="卖点图",
+            prompt_text="{}",
+            status="failed",
+            error="other failed",
+        )
+        session.add_all([target, other])
+        session.commit()
+        target_id = target.id
+        other_id = other.id
+
+    response = client.post(f"/api/v1/generation-items/{target_id}/retry")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    by_id = {item["id"]: item for item in payload["items"]}
+    assert by_id[target_id]["status"] == "succeeded"
+    assert by_id[target_id]["versions"]
+    assert by_id[other_id]["status"] == "failed"
+    assert by_id[other_id]["error"] == "other failed"
+    assert payload["status"] == "partial_failed"
+
+
+def test_aplus_plan_history_lists_active_user_plans_newest_first(client) -> None:
+    prompt_version_id = active_prompt_version_id(client, "aplus-meta")
+    now = datetime.now(timezone.utc)
+    with client.app.state.session_factory() as session:
+        older = AplusJob(
+            job_type="plan",
+            status="running",
+            dry_run=True,
+            params_json='{"module_selections":[{"name":"商品主视觉","count":1}],"output_targets":[{"mode":"detail","aspect_ratio":"1:1"}]}',
+            asset_ids_json="[]",
+            count=1,
+            prompt_version_id=prompt_version_id,
+            created_at=now - timedelta(minutes=2),
+        )
+        newest = AplusJob(
+            job_type="plan",
+            status="queued",
+            dry_run=True,
+            params_json='{"module_selections":[{"name":"卖点拆解","count":1}],"output_targets":[{"mode":"detail","aspect_ratio":"1:1"}]}',
+            asset_ids_json="[]",
+            count=1,
+            prompt_version_id=prompt_version_id,
+            created_at=now,
+        )
+        admin = AplusJob(
+            job_type="plan",
+            status="running",
+            dry_run=True,
+            is_admin_test=True,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=1,
+            prompt_version_id=prompt_version_id,
+            created_at=now + timedelta(minutes=1),
+        )
+        batch_plan = AplusJob(
+            job_type="plan",
+            status="running",
+            dry_run=True,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=1,
+            prompt_version_id=prompt_version_id,
+            created_at=now + timedelta(minutes=2),
+        )
+        session.add_all([older, newest, admin, batch_plan])
+        session.flush()
+        batch = BatchJob(business_type="aplus", status="running", total_count=1)
+        session.add(batch)
+        session.flush()
+        session.add(BatchItem(batch_job_id=batch.id, index=0, name="batch", aplus_plan_job_id=batch_plan.id))
+        session.commit()
+        older_id = older.id
+        newest_id = newest.id
+        admin_id = admin.id
+        batch_plan_id = batch_plan.id
+
+    history = client.get("/api/v1/aplus-plan-jobs")
+    assert history.status_code == 200, history.text
+    ids = [job["id"] for job in history.json()]
+    assert ids[:2] == [newest_id, older_id]
+    assert admin_id not in ids
+    assert batch_plan_id not in ids
+
+
+def test_history_filters_and_repairs_empty_monitoring_fixture_jobs(client) -> None:
+    generation_prompt_id = active_prompt_version_id(client, "ecommerce-meta")
+    workflow_version_id = active_workflow_version_id(client, "product-suite-v1")
+    aplus_prompt_id = active_prompt_version_id(client, "aplus-meta")
+    video_prompt_id = active_prompt_version_id(client, "ecommerce-video-meta-15s")
+    with client.app.state.session_factory() as session:
+        demo_generation = GenerationJob(
+            id="demo-monitor-generation-empty",
+            status="queued",
+            dry_run=True,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=1,
+            prompt_version_id=generation_prompt_id,
+            workflow_version_id=workflow_version_id,
+        )
+        real_generation = GenerationJob(
+            id="real-history-generation",
+            status="succeeded",
+            dry_run=True,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=1,
+            progress=100,
+            prompt_version_id=generation_prompt_id,
+            workflow_version_id=workflow_version_id,
+        )
+        demo_aplus_plan = AplusJob(
+            id="demo-monitor-aplus-plan-empty",
+            job_type="plan",
+            status="queued",
+            dry_run=True,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=1,
+            prompt_version_id=aplus_prompt_id,
+        )
+        demo_aplus_generation = AplusJob(
+            id="demo-monitor-aplus-generation-empty",
+            job_type="generation",
+            status="queued",
+            dry_run=True,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=1,
+            prompt_version_id=aplus_prompt_id,
+        )
+        demo_video = VideoJob(
+            id="demo-monitor-video-empty",
+            status="queued",
+            dry_run=True,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=1,
+            prompt_version_id=video_prompt_id,
+        )
+        demo_batch = BatchJob(id="demo-monitor-batch-empty", business_type="suite", status="queued", total_count=0)
+        session.add_all([demo_generation, real_generation, demo_aplus_plan, demo_aplus_generation, demo_video, demo_batch])
+        session.flush()
+        session.add(GenerationItem(job_id=real_generation.id, index=0, image_type="hero", prompt_text="{}", status="succeeded"))
+        session.commit()
+
+        assert repair_monitoring_fixture_history(session) == 4
+        assert session.get(GenerationJob, demo_generation.id).is_admin_test is True
+        assert session.get(AplusJob, demo_aplus_plan.id).is_admin_test is True
+        assert session.get(AplusJob, demo_aplus_generation.id).is_admin_test is True
+        assert session.get(VideoJob, demo_video.id).is_admin_test is True
+
+    suite_ids = {job["id"] for job in client.get("/api/v1/generation-jobs").json()}
+    plan_ids = {job["id"] for job in client.get("/api/v1/aplus-plan-jobs").json()}
+    aplus_ids = {job["id"] for job in client.get("/api/v1/aplus-generation-jobs").json()}
+    video_ids = {job["id"] for job in client.get("/api/v1/video-jobs").json()}
+    batch_ids = {job["id"] for job in client.get("/api/v1/batch-jobs").json()}
+
+    assert "real-history-generation" in suite_ids
+    assert "demo-monitor-generation-empty" not in suite_ids
+    assert "demo-monitor-aplus-plan-empty" not in plan_ids
+    assert "demo-monitor-aplus-generation-empty" not in aplus_ids
+    assert "demo-monitor-video-empty" not in video_ids
+    assert "demo-monitor-batch-empty" not in batch_ids
+
+
 def test_video_cancel_endpoint_cancels_queued_items_idempotently(client) -> None:
     prompt_version_id = active_prompt_version_id(client, "ecommerce-video-meta-15s")
     with client.app.state.session_factory() as session:
@@ -209,6 +543,142 @@ def test_video_cancel_endpoint_cancels_queued_items_idempotently(client) -> None
     assert payload["status"] == "cancelled"
     assert [item["status"] for item in payload["items"]] == ["cancelled", "cancelled"]
     assert client.post(f"/api/v1/video-jobs/{job_id}/cancel").json()["status"] == "cancelled"
+
+
+def test_workspace_recovery_settles_orphaned_open_jobs_across_surfaces(client) -> None:
+    generation_prompt_id = active_prompt_version_id(client, "ecommerce-meta")
+    workflow_version_id = active_workflow_version_id(client, "product-suite-v1")
+    aplus_prompt_id = active_prompt_version_id(client, "aplus-meta")
+    video_prompt_id = active_prompt_version_id(client, "ecommerce-video-meta-15s")
+    with client.app.state.session_factory() as session:
+        generation_job = GenerationJob(
+            status="running",
+            dry_run=False,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=2,
+            progress=50,
+            prompt_version_id=generation_prompt_id,
+            workflow_version_id=workflow_version_id,
+        )
+        aplus_job = AplusJob(
+            job_type="generation",
+            status="cancelling",
+            dry_run=False,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=2,
+            progress=50,
+            prompt_version_id=aplus_prompt_id,
+        )
+        video_job = VideoJob(
+            status="queued",
+            dry_run=False,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=1,
+            progress=0,
+            prompt_version_id=video_prompt_id,
+        )
+        session.add_all([generation_job, aplus_job, video_job])
+        session.flush()
+        session.add_all(
+            [
+                GenerationItem(job_id=generation_job.id, index=0, image_type="hero", prompt_text="{}", status="succeeded"),
+                GenerationItem(job_id=generation_job.id, index=1, image_type="scene", prompt_text="{}", status="running"),
+                AplusItem(job_id=aplus_job.id, index=0, module_index=1, module_name="hero", prompt_text="{}", status="failed"),
+                AplusItem(job_id=aplus_job.id, index=1, module_index=2, module_name="detail", prompt_text="{}", status="running"),
+                VideoItem(job_id=video_job.id, index=0, video_type="ugc", status="queued"),
+            ]
+        )
+        generation_job_id = generation_job.id
+        aplus_job_id = aplus_job.id
+        video_job_id = video_job.id
+        session.commit()
+
+    with client.app.state.session_factory() as session:
+        assert recover_interrupted_workspace_jobs(session) == 3
+
+    with client.app.state.session_factory() as session:
+        generation_job = session.get(GenerationJob, generation_job_id)
+        aplus_job = session.get(AplusJob, aplus_job_id)
+        video_job = session.get(VideoJob, video_job_id)
+        generation_statuses = session.scalars(
+            select(GenerationItem.status).where(GenerationItem.job_id == generation_job_id).order_by(GenerationItem.index)
+        ).all()
+        aplus_statuses = session.scalars(
+            select(AplusItem.status).where(AplusItem.job_id == aplus_job_id).order_by(AplusItem.index)
+        ).all()
+        video_statuses = session.scalars(
+            select(VideoItem.status).where(VideoItem.job_id == video_job_id).order_by(VideoItem.index)
+        ).all()
+
+    assert generation_job.status == "partial_failed"
+    assert generation_job.progress == 100
+    assert generation_job.completed_at is not None
+    assert generation_statuses == ["succeeded", "failed"]
+    assert aplus_job.status == "partial_cancelled"
+    assert aplus_job.progress == 100
+    assert aplus_job.completed_at is not None
+    assert aplus_statuses == ["failed", "cancelled"]
+    assert video_job.status == "failed"
+    assert video_job.progress == 100
+    assert video_job.completed_at is not None
+    assert video_statuses == ["failed"]
+
+
+def test_workspace_recovery_leaves_batch_child_jobs_for_scheduler(client) -> None:
+    generation_prompt_id = active_prompt_version_id(client, "ecommerce-meta")
+    workflow_version_id = active_workflow_version_id(client, "product-suite-v1")
+    aplus_prompt_id = active_prompt_version_id(client, "aplus-meta")
+    with client.app.state.session_factory() as session:
+        suite_child = GenerationJob(
+            status="running",
+            dry_run=False,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=1,
+            prompt_version_id=generation_prompt_id,
+            workflow_version_id=workflow_version_id,
+        )
+        aplus_child = AplusJob(
+            job_type="generation",
+            status="running",
+            dry_run=False,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=1,
+            prompt_version_id=aplus_prompt_id,
+        )
+        session.add_all([suite_child, aplus_child])
+        session.flush()
+        suite_item = GenerationItem(job_id=suite_child.id, index=0, image_type="hero", prompt_text="{}", status="running")
+        aplus_item = AplusItem(job_id=aplus_child.id, index=0, module_index=1, module_name="hero", prompt_text="{}", status="running")
+        session.add_all([suite_item, aplus_item])
+        suite_batch = BatchJob(business_type="suite", status="running", total_count=1)
+        aplus_batch = BatchJob(business_type="aplus", status="running", total_count=1)
+        session.add_all([suite_batch, aplus_batch])
+        session.flush()
+        session.add_all(
+            [
+                BatchItem(batch_job_id=suite_batch.id, index=0, name="suite", status="running", generation_job_id=suite_child.id),
+                BatchItem(batch_job_id=aplus_batch.id, index=0, name="aplus", status="running", aplus_generation_job_id=aplus_child.id),
+            ]
+        )
+        suite_child_id = suite_child.id
+        aplus_child_id = aplus_child.id
+        suite_item_id = suite_item.id
+        aplus_item_id = aplus_item.id
+        session.commit()
+
+    with client.app.state.session_factory() as session:
+        assert recover_interrupted_workspace_jobs(session) == 0
+
+    with client.app.state.session_factory() as session:
+        assert session.get(GenerationJob, suite_child_id).status == "running"
+        assert session.get(AplusJob, aplus_child_id).status == "running"
+        assert session.get(GenerationItem, suite_item_id).status == "running"
+        assert session.get(AplusItem, aplus_item_id).status == "running"
 
 
 def test_aplus_dryrun_plan_and_generation_respect_amazon_a_plus_ratios(client) -> None:
@@ -273,6 +743,26 @@ def test_aplus_dryrun_plan_and_generation_respect_amazon_a_plus_ratios(client) -
     )
     assert archive.status_code == 200
     assert archive.headers["content-type"] == "application/zip"
+    with ZipFile(BytesIO(archive.content)) as zip_file:
+        watermarked_bytes = zip_file.read(zip_file.namelist()[0])
+    plain_archive = client.get(
+        f"/api/v1/aplus-generation-jobs/{generation['id']}/download",
+        params={"item_ids": ",".join(item["id"] for item in generation["items"][:2]), "include_watermark": False},
+    )
+    assert plain_archive.status_code == 200
+    with ZipFile(BytesIO(plain_archive.content)) as zip_file:
+        plain_bytes = zip_file.read(zip_file.namelist()[0])
+    assert watermarked_bytes != plain_bytes
+
+    aplus_long_image = client.get(
+        f"/api/v1/aplus-generation-jobs/{generation['id']}/download",
+        params={"item_ids": ",".join(item["id"] for item in generation["items"][:2]), "format": "long_image"},
+    )
+    assert aplus_long_image.status_code == 200
+    assert aplus_long_image.headers["content-type"] == "image/png"
+    with Image.open(BytesIO(aplus_long_image.content)) as image:
+        assert image.height > 0
+        assert image.width > 0
 
     original_item = generation["items"][0]
     original_version_id = original_item["current_version_id"]
@@ -287,6 +777,26 @@ def test_aplus_dryrun_plan_and_generation_respect_amazon_a_plus_ratios(client) -
     updated_item = next(item for item in updated["items"] if item["id"] == original_item["id"])
     assert updated_item["current_version_id"] == edited_version["id"]
     assert len(updated_item["versions"]) == 2
+
+    ocr = client.post(f"/api/v1/aplus-items/{original_item['id']}/text-ocr")
+    assert ocr.status_code == 200, ocr.text
+    assert "lines" in ocr.json()
+    text_edit = client.post(
+        f"/api/v1/aplus-items/{original_item['id']}/text-versions",
+        json={
+            "lines": [
+                {
+                    "id": "manual-1",
+                    "index": 0,
+                    "original_text": "OLD",
+                    "text": "NEW",
+                    "bbox": {"x": 12, "y": 24, "width": 120, "height": 32},
+                }
+            ]
+        },
+    )
+    assert text_edit.status_code == 201, text_edit.text
+    assert text_edit.json()["parent_version_id"] == edited_version["id"]
 
 
 def test_aplus_advanced_mobile_only_uses_direct_generation_path(client) -> None:
@@ -437,6 +947,75 @@ def test_video_dryrun_creates_one_item_per_selected_type(client) -> None:
     assert all(item["script_markdown"].startswith("# 15 秒电商短视频脚本") for item in detail["items"])
 
 
+def test_video_dryrun_edit_creates_child_version(client) -> None:
+    asset_id = upload_asset(client)
+    job = client.post(
+        "/api/v1/video-jobs",
+        json={
+            "asset_ids": [asset_id],
+            "platform": "TikTok",
+            "market": "北美",
+            "country": "美国",
+            "language": "英语",
+            "aspect_ratio": "9:16",
+            "selling_points": "便携、防漏、适合通勤",
+            "video_types": ["UGC 种草"],
+            "dry_run": True,
+        },
+    ).json()
+    detail = client.get(f"/api/v1/video-jobs/{job['id']}").json()
+    item = detail["items"][0]
+    first_version = item["versions"][0]
+
+    response = client.post(
+        f"/api/v1/video-items/{item['id']}/versions",
+        json={"instruction": "节奏更快，结尾加强产品定格"},
+    )
+    assert response.status_code == 201, response.text
+    child = response.json()
+
+    assert child["version_no"] == 2
+    assert child["parent_version_id"] == first_version["id"]
+    assert child["url"] != first_version["url"]
+
+    updated = client.get(f"/api/v1/video-jobs/{job['id']}").json()
+    updated_item = updated["items"][0]
+    assert updated_item["current_version_id"] == child["id"]
+    assert updated_item["versions"][-1]["instruction"] == "节奏更快，结尾加强产品定格"
+    assert "Secondary edit instruction" in updated_item["script_markdown"]
+
+
+def test_video_edit_rejects_missing_item_and_current_version(client) -> None:
+    missing = client.post("/api/v1/video-items/not-found/versions", json={"instruction": "节奏更快"})
+    assert missing.status_code == 404
+
+    asset_id = upload_asset(client)
+    job = client.post(
+        "/api/v1/video-jobs",
+        json={
+            "asset_ids": [asset_id],
+            "platform": "TikTok",
+            "market": "北美",
+            "country": "美国",
+            "language": "英语",
+            "aspect_ratio": "9:16",
+            "selling_points": "便携、防漏、适合通勤",
+            "video_types": ["UGC 种草"],
+            "dry_run": True,
+        },
+    ).json()
+    detail = client.get(f"/api/v1/video-jobs/{job['id']}").json()
+    item_id = detail["items"][0]["id"]
+    with client.app.state.session_factory() as session:
+        item = session.get(VideoItem, item_id)
+        item.current_version_id = None
+        session.commit()
+
+    response = client.post(f"/api/v1/video-items/{item_id}/versions", json={"instruction": "节奏更快"})
+    assert response.status_code == 422
+    assert "Current video version is unavailable" in response.text
+
+
 def test_video_live_rejects_missing_public_asset_base_url_after_provider_checks(client) -> None:
     asset_id = upload_asset(client)
     session_factory = client.app.state.session_factory
@@ -499,9 +1078,57 @@ def test_dryrun_edit_creates_child_version_and_keeps_original(client) -> None:
     assert child["parent_version_id"] == first_version["id"]
     assert child["url"] != first_version["url"]
 
+    ocr = client.post(f"/api/v1/generation-items/{item['id']}/text-ocr")
+    assert ocr.status_code == 200, ocr.text
+    assert "lines" in ocr.json()
+    unchanged = client.post(
+        f"/api/v1/generation-items/{item['id']}/text-versions",
+        json={"lines": [{"id": "manual-1", "index": 0, "original_text": "Same", "text": "Same"}]},
+    )
+    assert unchanged.status_code == 422
+    text_edit = client.post(
+        f"/api/v1/generation-items/{item['id']}/text-versions",
+        json={"lines": [{"id": "manual-1", "index": 0, "original_text": "Old title", "text": "New title"}]},
+    )
+    assert text_edit.status_code == 201, text_edit.text
+    assert text_edit.json()["version_no"] == 3
+    assert text_edit.json()["parent_version_id"] == child["id"]
 
-def test_validation_rejects_four_uploads_and_invalid_count(client) -> None:
-    asset_ids = [upload_asset(client) for _ in range(4)]
+
+def test_suite_version_endpoint_accepts_empty_instruction_for_regenerate(client) -> None:
+    asset_id = upload_asset(client)
+    job = client.post(
+        "/api/v1/generation-jobs",
+        json={
+            "asset_ids": [asset_id],
+            "platform": "Amazon",
+            "market": "United States",
+            "language": "English",
+            "aspect_ratio": "1:1",
+            "selling_points": "Insulated tumbler",
+            "mode": "smart",
+            "count": 7,
+            "dry_run": True,
+        },
+    ).json()
+    detail = client.get(f"/api/v1/generation-jobs/{job['id']}").json()
+    item = detail["items"][0]
+    first_version = item["versions"][0]
+
+    response = client.post(
+        f"/api/v1/generation-items/{item['id']}/versions",
+        json={"instruction": ""},
+    )
+
+    assert response.status_code == 201, response.text
+    child = response.json()
+    assert child["version_no"] == 2
+    assert child["parent_version_id"] == first_version["id"]
+    assert child["instruction"] == ""
+
+
+def test_validation_rejects_seven_uploads(client) -> None:
+    asset_ids = [upload_asset(client) for _ in range(7)]
     response = client.post(
         "/api/v1/generation-jobs",
         json={
@@ -512,11 +1139,66 @@ def test_validation_rejects_four_uploads_and_invalid_count(client) -> None:
             "aspect_ratio": "2:3",
             "selling_points": "测试",
             "mode": "smart",
-            "count": 6,
+            "count": 7,
             "dry_run": True,
         },
     )
     assert response.status_code == 422
+
+
+def test_validation_accepts_six_product_images_for_all_single_surfaces(client) -> None:
+    asset_ids = [upload_asset(client) for _ in range(6)]
+    aplus_module = next(iter(A_PLUS_MODULES))
+    video_type = next(iter(VIDEO_TYPES))
+
+    suite_payload = {
+        "asset_ids": asset_ids,
+        "platform": "Amazon",
+        "market": "United States",
+        "language": "English",
+        "aspect_ratio": "2:3",
+        "selling_points": "Test selling points",
+        "mode": "smart",
+        "count": 7,
+        "dry_run": True,
+    }
+    response = client.post("/api/v1/generation-jobs", json=suite_payload)
+    assert response.status_code == 201, response.text
+
+    invalid_count = client.post("/api/v1/generation-jobs", json={**suite_payload, "asset_ids": [asset_ids[0]], "count": 6})
+    assert invalid_count.status_code == 422
+
+    aplus = client.post(
+        "/api/v1/aplus-plan-jobs",
+        json={
+            "asset_ids": asset_ids,
+            "platform": "Amazon",
+            "market": "United States",
+            "language": "English",
+            "product_info": "Test product info",
+            "module_selections": [{"name": aplus_module, "count": 1}],
+            "output_targets": [{"mode": "detail", "aspect_ratio": "1:1"}],
+            "dry_run": True,
+        },
+    )
+    assert aplus.status_code == 201, aplus.text
+
+    video_payload = {
+        "asset_ids": asset_ids,
+        "platform": "TikTok",
+        "market": "North America",
+        "country": "United States",
+        "language": "English",
+        "aspect_ratio": "9:16",
+        "selling_points": "Portable product",
+        "video_types": [video_type],
+        "dry_run": True,
+    }
+    video = client.post("/api/v1/video-jobs", json=video_payload)
+    assert video.status_code == 201, video.text
+
+    video_assist = client.post("/api/v1/video-copywriting-assist", json=video_payload)
+    assert video_assist.status_code == 200, video_assist.text
 
 
 def test_custom_counts_drive_dryrun_plan_and_are_limited_to_four_each(client) -> None:
@@ -692,7 +1374,7 @@ def test_dryrun_executes_the_extended_prompt_workflow_without_external_calls(cli
     assert response.status_code == 201, response.text
     detail = client.get(f"/api/v1/generation-jobs/{response.json()['id']}").json()
     assert set(detail["params"]["_prompt_versions"]) == {
-        "product-vision", "copywriting-assist", "edit-rewrite", "content-safety-review"
+        "product-vision", "copywriting-assist", "edit-rewrite", "image-text-edit", "content-safety-review"
     }
     logs = client.get("/api/v1/admin/logs", params={"job_id": detail["id"], "page_size": 100}).json()["items"]
     nodes = {log["node"] for log in logs}

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -41,12 +41,17 @@ from backend.app.services.prompt_contract import (
 from backend.app.services.content_safety import ContentSafetyBlocked, ensure_content_safe, run_content_safety_review
 from backend.app.services.provider_routing import (
     enabled_provider_for_route,
+    provider_config,
     provider_display_names_by_code,
+    provider_is_route_eligible,
     route_provider_codes,
 )
-from backend.app.services.providers import HELLOBABYGO_IMAGE_ADAPTER, ProviderClient
+from backend.app.services.provider_catalog import DEFAULT_ROUTE_CHAINS
+from backend.app.services.provider_limiter import provider_slot
+from backend.app.services.providers import ProviderClient, provider_requires_public_urls, requested_image_size
 from backend.app.services.redaction import safe_json
 from backend.app.services.storage import public_file_url
+from backend.app.services.subscriptions import confirm_quota, release_quota
 
 
 DEMO_ASSET_DIR = Path(__file__).resolve().parents[1] / "static" / "demo"
@@ -60,6 +65,19 @@ JOB_FINAL_STATUSES = {"succeeded", "partial_failed", "failed", "cancelled", "par
 ITEM_FINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 CANCEL_REQUESTED_STATUSES = {"cancelling", "cancelled", "partial_cancelled"}
 USER_CANCELLED_ERROR = "用户已取消任务"
+INVALID_GENERATED_IMAGE_ERROR = "图片模型返回的不是有效图片，请检查模型结果 URL 或中转站响应"
+
+
+def validate_generated_image_bytes(image_bytes: bytes) -> tuple[int, int]:
+    if not image_bytes:
+        raise RuntimeError("图片模型返回空图片内容")
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            image.verify()
+        with Image.open(BytesIO(image_bytes)) as image:
+            return image.size
+    except (UnidentifiedImageError, OSError) as exc:
+        raise RuntimeError(INVALID_GENERATED_IMAGE_ERROR) from exc
 SMART_TYPES = [
     "首屏主视觉",
     "核心卖点图",
@@ -100,7 +118,46 @@ def image_provider_route(preference: str, session: Session | None = None) -> lis
     route_key = "suite_layout" if preference == "layout" else "suite_fidelity"
     if session is not None:
         return route_provider_codes(session, route_key)
-    return ["yunwu-image-2"] if route_key == "suite_layout" else ["yunwu-nano-pro", "yunwu-nano"]
+    return list(DEFAULT_ROUTE_CHAINS[route_key])
+
+
+def suite_route_key(preference: str | None) -> str:
+    return "suite_layout" if preference == "layout" else "suite_fidelity"
+
+
+def generation_prompt_from_item(item: GenerationItem) -> str:
+    prompt_item = json.loads(item.prompt_text)
+    return (
+        f"{prompt_item['picture_requirement']}\n\n"
+        f"\u6587\u6848\u8981\u6c42\uff1a{prompt_item['copywriting_requirements']}"
+    )
+
+
+def provider_can_regenerate_for_route(provider: Provider | None, route_key: str) -> bool:
+    if not provider or not provider.enabled or not provider.encrypted_api_key:
+        return False
+    if provider_config(provider).get("hidden_legacy"):
+        return False
+    return provider_is_route_eligible(provider, route_key)
+
+
+def regenerate_provider_route(session: Session, item: GenerationItem, route_key: str) -> tuple[list[str], str | None]:
+    route_error: RuntimeError | None = None
+    try:
+        route_codes = route_provider_codes(session, route_key)
+    except RuntimeError as exc:
+        route_codes = []
+        route_error = exc
+
+    preferred = session.get(Provider, item.provider_id) if item.provider_id else None
+    preferred_code = preferred.code if provider_can_regenerate_for_route(preferred, route_key) else None
+    if preferred_code and (preferred_code in route_codes or preferred_code in DEFAULT_ROUTE_CHAINS.get(route_key, [])):
+        return [preferred_code, *[code for code in route_codes if code != preferred_code]], preferred_code
+    if route_codes:
+        return route_codes, None
+    if route_error:
+        raise route_error
+    raise RuntimeError(f"No available provider for {route_key}")
 
 
 def generation_status_from_item_statuses(statuses: list[str]) -> str:
@@ -129,6 +186,14 @@ def finalize_generation_cancellation(session: Session, job: GenerationJob) -> No
     job.status = generation_status_from_item_statuses(statuses)
     job.progress = 100
     job.completed_at = utcnow()
+    sync_generation_quota(session, job)
+
+
+def sync_generation_quota(session: Session, job: GenerationJob) -> None:
+    if job.status in {"succeeded", "partial_failed"}:
+        confirm_quota(session, ref_type="generation_job", ref_id=job.id)
+    elif job.status in {"failed", "cancelled", "partial_cancelled"}:
+        release_quota(session, ref_type="generation_job", ref_id=job.id)
 
 
 def cancel_generation_job(session: Session, job: GenerationJob) -> GenerationJob:
@@ -136,6 +201,7 @@ def cancel_generation_job(session: Session, job: GenerationJob) -> GenerationJob
         return job
     job.status = "cancelling"
     finalize_generation_cancellation(session, job)
+    sync_generation_quota(session, job)
     session.commit()
     session.refresh(job)
     return job
@@ -149,6 +215,7 @@ def generation_cancel_requested(session_factory: sessionmaker[Session], job_id: 
         if job.status not in CANCEL_REQUESTED_STATUSES:
             return False
         finalize_generation_cancellation(session, job)
+        sync_generation_quota(session, job)
         session.commit()
         return True
 
@@ -306,6 +373,7 @@ def _run_dryrun_job(job_id: str, session_factory: sessionmaker[Session], setting
             job.status = "succeeded"
             job.progress = 100
             job.completed_at = utcnow()
+            sync_generation_quota(session, job)
             session.add(
                 ExecutionLog(
                     job_id=job.id,
@@ -332,6 +400,7 @@ def _run_dryrun_job(job_id: str, session_factory: sessionmaker[Session], setting
                 job.status = "partial_failed" if succeeded else "failed"
                 job.error = str(exc)
                 job.completed_at = utcnow()
+                sync_generation_quota(session, job)
                 session.add(
                     ExecutionLog(
                         job_id=job.id,
@@ -367,7 +436,11 @@ def _enabled_provider(session: Session, capability: str, relation: str) -> Provi
     route_key = "llm" if capability == "llm" else "video" if capability == "video" else ""
     if route_key:
         try:
-            return enabled_provider_for_route(session, route_key, "primary" if relation == "default" else "fallback")
+            provider_codes = route_provider_codes(session, route_key)
+            provider_code = provider_codes[0] if relation == "default" or len(provider_codes) == 1 else provider_codes[1]
+            provider = session.scalar(select(Provider).where(Provider.code == provider_code, Provider.enabled.is_(True)))
+            if provider and provider.encrypted_api_key:
+                return provider
         except RuntimeError:
             # Compatibility for tests and older databases that still only mark global default/fallback flags.
             pass
@@ -403,30 +476,30 @@ async def _call_llm_with_fallback(
     image_paths: list[str] | None = None,
     response_format: str | None = "json_object",
 ) -> tuple[str, Provider]:
-    try:
-        return (
-            await client.call_llm(
-                default_provider,
-                cipher.decrypt(default_provider.encrypted_api_key or ""),
-                system_prompt,
-                user_prompt,
-                image_paths=image_paths,
-                response_format=response_format,
-            ),
-            default_provider,
-        )
-    except Exception:
-        return (
-            await client.call_llm(
-                fallback_provider,
-                cipher.decrypt(fallback_provider.encrypted_api_key or ""),
-                system_prompt,
-                user_prompt,
-                image_paths=image_paths,
-                response_format=response_format,
-            ),
-            fallback_provider,
-        )
+    providers: list[Provider] = []
+    seen: set[str] = set()
+    for provider in (default_provider, fallback_provider):
+        if provider.code in seen:
+            continue
+        seen.add(provider.code)
+        providers.append(provider)
+    errors: list[str] = []
+    for provider in providers:
+        try:
+            return (
+                await client.call_llm(
+                    provider,
+                    cipher.decrypt(provider.encrypted_api_key or ""),
+                    system_prompt,
+                    user_prompt,
+                    image_paths=image_paths,
+                    response_format=response_format,
+                ),
+                provider,
+            )
+        except Exception as exc:
+            errors.append(f"{provider.code}: {exc}")
+    raise RuntimeError("LLM route failed: " + "; ".join(errors))
 
 
 async def _run_live_job(
@@ -481,6 +554,49 @@ async def _run_live_job(
                 )
             )
             session.commit()
+
+        with session_factory() as session:
+            all_existing_item_ids = session.scalars(
+                select(GenerationItem.id)
+                .where(GenerationItem.job_id == job_id)
+                .order_by(GenerationItem.index)
+            ).all()
+            existing_item_ids = session.scalars(
+                select(GenerationItem.id)
+                .where(GenerationItem.job_id == job_id, GenerationItem.status.not_in(ITEM_FINAL_STATUSES))
+                .order_by(GenerationItem.index)
+            ).all()
+        if all_existing_item_ids:
+            if generation_cancel_requested(session_factory, job_id):
+                return
+            semaphore = asyncio.Semaphore(settings.max_job_concurrency)
+
+            async def guarded_existing(item_id: str) -> None:
+                async with semaphore:
+                    await _run_live_item(
+                        item_id,
+                        session_factory,
+                        settings,
+                        cipher,
+                        client,
+                        image_codes,
+                        asset_paths,
+                        params["aspect_ratio"],
+                        params,
+                    )
+
+            await asyncio.gather(*(guarded_existing(item_id) for item_id in existing_item_ids))
+            with session_factory() as session:
+                job = session.get(GenerationJob, job_id)
+                if not job:
+                    return
+                statuses = session.scalars(select(GenerationItem.status).where(GenerationItem.job_id == job_id)).all()
+                job.status = generation_status_from_item_statuses(statuses)
+                job.progress = 100
+                job.completed_at = utcnow()
+                sync_generation_quota(session, job)
+                session.commit()
+            return
 
         if generation_cancel_requested(session_factory, job_id):
             return
@@ -699,17 +815,21 @@ async def _run_live_job(
                 finalize_generation_cancellation(session, job)
                 session.commit()
                 return
-            for index, prompt_item in enumerate(plan.images):
-                session.add(
-                    GenerationItem(
-                        job_id=job.id,
-                        index=index,
-                        route_symbol=prompt_item.route_symbol,
-                        image_type=prompt_item.image_type,
-                        prompt_text=json.dumps(prompt_item.model_dump(), ensure_ascii=False),
-                        status="queued",
+            existing_item_ids = session.scalars(
+                select(GenerationItem.id).where(GenerationItem.job_id == job.id).order_by(GenerationItem.index)
+            ).all()
+            if not existing_item_ids:
+                for index, prompt_item in enumerate(plan.images):
+                    session.add(
+                        GenerationItem(
+                            job_id=job.id,
+                            index=index,
+                            route_symbol=prompt_item.route_symbol,
+                            image_type=prompt_item.image_type,
+                            prompt_text=json.dumps(prompt_item.model_dump(), ensure_ascii=False),
+                            status="queued",
+                        )
                     )
-                )
             session.add(
                 ExecutionLog(
                     job_id=job.id,
@@ -732,7 +852,9 @@ async def _run_live_job(
             ))
             session.commit()
             item_ids = session.scalars(
-                select(GenerationItem.id).where(GenerationItem.job_id == job.id).order_by(GenerationItem.index)
+                select(GenerationItem.id)
+                .where(GenerationItem.job_id == job.id, GenerationItem.status.not_in(ITEM_FINAL_STATUSES))
+                .order_by(GenerationItem.index)
             ).all()
 
         if generation_cancel_requested(session_factory, job_id):
@@ -765,6 +887,7 @@ async def _run_live_job(
             job.status = generation_status_from_item_statuses(statuses)
             job.progress = 100
             job.completed_at = utcnow()
+            sync_generation_quota(session, job)
             session.add(
                 ExecutionLog(
                     job_id=job.id,
@@ -787,6 +910,7 @@ async def _run_live_job(
                 job.status = "failed"
                 job.error = str(exc)
                 job.completed_at = utcnow()
+                sync_generation_quota(session, job)
                 session.add(
                     ExecutionLog(
                         job_id=job.id,
@@ -824,8 +948,7 @@ async def _run_live_item(
                 session.commit()
             return
         item.status = "running"
-        prompt_item = json.loads(item.prompt_text)
-        prompt = f"{prompt_item['picture_requirement']}\n\n文案要求：{prompt_item['copywriting_requirements']}"
+        prompt = generation_prompt_from_item(item)
         provider_display_names = provider_display_names_by_code(session, provider_codes)
         session.commit()
 
@@ -840,24 +963,38 @@ async def _run_live_item(
                 raise RuntimeError(f"Provider {provider_code} 不可用")
             input_urls = (
                 [public_file_url(settings, path) for path in asset_paths]
-                if provider.adapter == HELLOBABYGO_IMAGE_ADAPTER and asset_paths
+                if provider_requires_public_urls(provider) and asset_paths
                 else None
             )
-            return await client.generate_image(
-                provider,
-                cipher.decrypt(provider.encrypted_api_key),
-                prompt,
-                asset_paths,
-                aspect_ratio,
-                input_urls=input_urls,
-            )
+            provider_id = provider.id
+            existing_task_id = item.provider_task_id if item.provider_id == provider_id else None
+
+            async def persist_task_id(task_id: str) -> None:
+                with session_factory() as write_session:
+                    write_item = write_session.get(GenerationItem, item_id)
+                    if write_item:
+                        write_item.provider_id = provider_id
+                        write_item.provider_task_id = task_id
+                        write_session.commit()
+
+            async with provider_slot(settings.max_provider_concurrency):
+                image_bytes = await client.generate_image(
+                    provider,
+                    cipher.decrypt(provider.encrypted_api_key),
+                    prompt,
+                    asset_paths,
+                    aspect_ratio,
+                    input_urls=input_urls,
+                    existing_task_id=existing_task_id,
+                    on_task_submitted=persist_task_id,
+                    idempotency_key=item.id,
+                )
+            validate_generated_image_bytes(image_bytes)
+            return image_bytes
 
     try:
         image_bytes, used_code = await run_image_route(provider_codes, generate, provider_display_names)
-        with Image.open(BytesIO(image_bytes)) as image:
-            image.verify()
-        with Image.open(BytesIO(image_bytes)) as image:
-            width, height = image.size
+        width, height = validate_generated_image_bytes(image_bytes)
         result_name = f"{item_id}-{uuid4().hex[:8]}.png"
         destination = settings.results_dir / result_name
         destination.write_bytes(image_bytes)
@@ -933,7 +1070,7 @@ async def _run_live_item(
                 instruction="Live 初始生成",
                 file_path=str(destination),
                 url=f"/files/results/{result_name}",
-                metadata_json=safe_json({"dry_run": False, "provider": used_code, "actual_size": [width, height]}),
+                metadata_json=safe_json({"dry_run": False, "provider": used_code, "requested_size": requested_image_size(aspect_ratio), "actual_size": [width, height]}),
             )
             session.add(version)
             session.flush()
@@ -960,7 +1097,7 @@ async def _run_live_item(
                     node="image_generate",
                     provider_id=item.provider_id,
                     status="succeeded",
-                    request_summary=safe_json({"route_symbol": "#@", "aspect_ratio": aspect_ratio, "prompt_chars": len(prompt)}),
+                    request_summary=safe_json({"route_symbol": "#@", "aspect_ratio": aspect_ratio, "requested_size": requested_image_size(aspect_ratio), "prompt_chars": len(prompt)}),
                     response_summary=safe_json({"url": version.url, "bytes": len(image_bytes)}),
                     dry_run=False,
                 )
@@ -1032,6 +1169,160 @@ def create_dryrun_child_version(session: Session, item: GenerationItem, instruct
     return version
 
 
+async def create_live_regenerated_child_version(
+    session: Session,
+    item: GenerationItem,
+    current: GenerationVersion,
+    params: dict[str, Any],
+    original_paths: list[str],
+    settings: Settings,
+    cipher: ApiKeyCipher,
+    client: ProviderClient,
+    llm_default: Provider,
+    llm_fallback: Provider,
+    safety_prompt: PromptVersion,
+) -> GenerationVersion:
+    aspect_ratio = str(params.get("aspect_ratio") or "1:1")
+    route_key = suite_route_key(str(params.get("model_preference") or "fidelity"))
+    image_codes, preferred_code = regenerate_provider_route(session, item, route_key)
+    provider_display_names = provider_display_names_by_code(session, image_codes)
+    prompt = generation_prompt_from_item(item)
+
+    async def generate(provider_code: str) -> bytes:
+        provider = session.scalar(select(Provider).where(Provider.code == provider_code))
+        if not provider or not provider.encrypted_api_key:
+            raise RuntimeError(f"Provider {provider_code} is unavailable")
+        input_urls = (
+            [public_file_url(settings, path) for path in original_paths]
+            if provider_requires_public_urls(provider) and original_paths
+            else None
+        )
+        async with provider_slot(settings.max_provider_concurrency):
+            image_bytes = await client.generate_image(
+                provider,
+                cipher.decrypt(provider.encrypted_api_key),
+                prompt,
+                original_paths,
+                aspect_ratio,
+                input_urls=input_urls,
+                idempotency_key=f"{item.id}:regenerate:{current.id}",
+            )
+        validate_generated_image_bytes(image_bytes)
+        return image_bytes
+
+    image_bytes, used_code = await run_image_route(image_codes, generate, provider_display_names)
+    width, height = validate_generated_image_bytes(image_bytes)
+    version_no = max((version.version_no for version in item.versions), default=0) + 1
+    result_name = f"{item.job_id}-{item.index + 1}-regen-v{version_no}-{uuid4().hex[:8]}.png"
+    destination = settings.results_dir / result_name
+    destination.write_bytes(image_bytes)
+    try:
+        safety_review, safety_provider = await run_content_safety_review(
+            client,
+            llm_default,
+            llm_fallback,
+            cipher,
+            safety_prompt,
+            subject="generated_image",
+            text=prompt,
+            image_paths=[str(destination), *original_paths],
+        )
+        ensure_content_safe(safety_review, "Content safety blocked")
+    except ContentSafetyBlocked as exc:
+        destination.unlink(missing_ok=True)
+        session.add(
+            ExecutionLog(
+                job_id=item.job_id,
+                item_id=item.id,
+                node="content_safety",
+                provider_id=safety_provider.id if "safety_provider" in locals() else None,
+                status="failed",
+                request_summary=safe_json({"subject": "generated_image", "asset_count": len(original_paths) + 1}),
+                response_summary=safe_json(exc.review.model_dump() if exc.review else {}),
+                error=str(exc),
+                dry_run=False,
+            )
+        )
+        session.commit()
+        raise
+    except Exception as exc:
+        destination.unlink(missing_ok=True)
+        error = f"Content safety review failed: {exc}"
+        session.add(
+            ExecutionLog(
+                job_id=item.job_id,
+                item_id=item.id,
+                node="content_safety",
+                status="failed",
+                request_summary=safe_json({"subject": "generated_image", "asset_count": len(original_paths) + 1}),
+                response_summary="{}",
+                error=error,
+                dry_run=False,
+            )
+        )
+        session.commit()
+        raise RuntimeError(error) from exc
+
+    version = GenerationVersion(
+        item_id=item.id,
+        parent_version_id=current.id,
+        version_no=version_no,
+        instruction="",
+        file_path=str(destination),
+        url=f"/files/results/{result_name}",
+        metadata_json=safe_json(
+            {
+                "dry_run": False,
+                "edit_type": "regenerate",
+                "route_key": route_key,
+                "provider": used_code,
+                "source_provider_preferred": used_code == preferred_code,
+                "requested_size": requested_image_size(aspect_ratio),
+                "actual_size": [width, height],
+            }
+        ),
+    )
+    session.add(version)
+    session.flush()
+    item.current_version_id = version.id
+    provider = session.scalar(select(Provider).where(Provider.code == used_code))
+    item.provider_id = provider.id if provider else item.provider_id
+    session.add(
+        ExecutionLog(
+            job_id=item.job_id,
+            item_id=item.id,
+            node="content_safety",
+            provider_id=safety_provider.id,
+            status="succeeded",
+            request_summary=safe_json({"subject": "generated_image", "asset_count": len(original_paths) + 1}),
+            response_summary=safe_json(safety_review.model_dump()),
+            dry_run=False,
+        )
+    )
+    session.add(
+        ExecutionLog(
+            job_id=item.job_id,
+            item_id=item.id,
+            node="image_regenerate",
+            provider_id=item.provider_id,
+            status="succeeded",
+            request_summary=safe_json(
+                {
+                    "route_key": route_key,
+                    "source_provider_preferred": used_code == preferred_code,
+                    "requested_size": requested_image_size(aspect_ratio),
+                    "prompt_chars": len(prompt),
+                }
+            ),
+            response_summary=safe_json({"url": version.url, "version_no": version_no}),
+            dry_run=False,
+        )
+    )
+    session.commit()
+    session.refresh(version)
+    return version
+
+
 async def create_live_child_version(
     session: Session,
     item: GenerationItem,
@@ -1046,20 +1337,34 @@ async def create_live_child_version(
     llm_default = _enabled_provider(session, "llm", "default")
     llm_fallback = _enabled_provider(session, "llm", "fallback")
     params = json.loads(job.params_json)
-    image_codes = image_provider_route(params.get("model_preference", "fidelity"))
-    for image_code in image_codes:
-        _enabled_provider_by_code(session, image_code)
-    provider_display_names = provider_display_names_by_code(session, image_codes)
     asset_ids = json.loads(job.asset_ids_json)
     original_paths = [asset.file_path for asset in session.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()]
     client = ProviderClient()
     prompt_versions = params.get("_prompt_versions") or {}
-    edit_prompt = session.get(PromptVersion, prompt_versions.get("edit-rewrite"))
-    if not edit_prompt:
-        raise RuntimeError("二次编辑 Prompt 版本不存在")
     safety_prompt = session.get(PromptVersion, prompt_versions.get("content-safety-review"))
     if not safety_prompt:
         raise RuntimeError("内容安全审计 Prompt 版本不存在")
+    instruction = instruction.strip()
+    if not instruction:
+        return await create_live_regenerated_child_version(
+            session,
+            item,
+            current,
+            params,
+            original_paths,
+            settings,
+            cipher,
+            client,
+            llm_default,
+            llm_fallback,
+            safety_prompt,
+        )
+
+    image_codes = route_provider_codes(session, "image_edit")
+    provider_display_names = provider_display_names_by_code(session, image_codes)
+    edit_prompt = session.get(PromptVersion, prompt_versions.get("edit-rewrite"))
+    if not edit_prompt:
+        raise RuntimeError("二次编辑 Prompt 版本不存在")
     input_paths = [current.file_path, *original_paths]
     rewritten, _ = await _call_llm_with_fallback(
         client,
@@ -1080,23 +1385,24 @@ async def create_live_child_version(
             raise RuntimeError(f"Provider {provider_code} 不可用")
         input_urls = (
             [public_file_url(settings, path) for path in input_paths]
-            if provider.adapter == HELLOBABYGO_IMAGE_ADAPTER and input_paths
+            if provider_requires_public_urls(provider) and input_paths
             else None
         )
-        return await client.generate_image(
-            provider,
-            cipher.decrypt(provider.encrypted_api_key),
-            prompt,
-            input_paths,
-            params["aspect_ratio"],
-            input_urls=input_urls,
-        )
+        async with provider_slot(settings.max_provider_concurrency):
+            image_bytes = await client.edit_image(
+                provider,
+                cipher.decrypt(provider.encrypted_api_key),
+                prompt,
+                input_paths,
+                params["aspect_ratio"],
+                input_urls=input_urls,
+                idempotency_key=f"{item.id}:edit:{instruction}",
+            )
+        validate_generated_image_bytes(image_bytes)
+        return image_bytes
 
     image_bytes, used_code = await run_image_route(image_codes, generate, provider_display_names)
-    with Image.open(BytesIO(image_bytes)) as image:
-        image.verify()
-    with Image.open(BytesIO(image_bytes)) as image:
-        width, height = image.size
+    width, height = validate_generated_image_bytes(image_bytes)
     version_no = max((version.version_no for version in item.versions), default=0) + 1
     result_name = f"{item.job_id}-{item.index + 1}-v{version_no}-{uuid4().hex[:8]}.png"
     destination = settings.results_dir / result_name
@@ -1154,7 +1460,7 @@ async def create_live_child_version(
         instruction=instruction,
         file_path=str(destination),
         url=f"/files/results/{result_name}",
-        metadata_json=safe_json({"dry_run": False, "provider": used_code, "capability_routed": True, "actual_size": [width, height]}),
+        metadata_json=safe_json({"dry_run": False, "provider": used_code, "capability_routed": True, "requested_size": requested_image_size(params["aspect_ratio"]), "actual_size": [width, height]}),
     )
     session.add(version)
     session.flush()
@@ -1180,7 +1486,7 @@ async def create_live_child_version(
             node="image_generate_edit",
             provider_id=item.provider_id,
             status="succeeded",
-            request_summary=safe_json({"instruction": instruction, "input_image_count": len(input_paths)}),
+            request_summary=safe_json({"instruction": instruction, "input_image_count": len(input_paths), "requested_size": requested_image_size(params["aspect_ratio"])}),
             response_summary=safe_json({"url": version.url, "version_no": version_no}),
             dry_run=False,
         )
@@ -1208,10 +1514,18 @@ async def retry_failed_live_items(
         params = json.loads(job.params_json)
         asset_ids = json.loads(job.asset_ids_json)
         asset_paths = [asset.file_path for asset in session.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()]
-        image_codes = image_provider_route(params.get("model_preference", "fidelity"))
+        image_codes = image_provider_route(params.get("model_preference", "fidelity"), session)
         for image_code in image_codes:
             _enabled_provider_by_code(session, image_code)
         job.status = "running"
+        job.error = None
+        for failed_item in session.scalars(
+            select(GenerationItem).where(GenerationItem.id.in_(failed_ids))
+        ).all():
+            failed_item.status = "queued"
+            failed_item.error = None
+            failed_item.provider_id = None
+            failed_item.provider_task_id = None
         session.commit()
     semaphore = asyncio.Semaphore(settings.max_job_concurrency)
     client = ProviderClient()
@@ -1229,3 +1543,97 @@ async def retry_failed_live_items(
         job.status = generation_status_from_item_statuses(statuses)
         job.completed_at = utcnow()
         session.commit()
+
+
+async def retry_live_item(
+    item_id: str,
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    cipher: ApiKeyCipher,
+) -> str | None:
+    with session_factory() as session:
+        item = session.get(GenerationItem, item_id)
+        if not item:
+            return None
+        job = session.get(GenerationJob, item.job_id)
+        if not job:
+            return None
+        if item.status != "failed":
+            return job.id
+        params = json.loads(job.params_json)
+        if job.dry_run:
+            version_no = max((version.version_no for version in item.versions), default=0) + 1
+            source = DEMO_ASSETS[item.index % len(DEMO_ASSETS)]
+            result_name = f"{job.id}-{item.index + 1}-retry-{uuid4().hex[:8]}.png"
+            destination = settings.results_dir / result_name
+            shutil.copy2(source, destination)
+            version = GenerationVersion(
+                item_id=item.id,
+                parent_version_id=item.current_version_id,
+                version_no=version_no,
+                instruction="Dryrun 单图重试",
+                file_path=str(destination),
+                url=f"/files/results/{result_name}",
+                metadata_json=safe_json({"dry_run": True, "demo_asset": source.name, "retry": True}),
+            )
+            session.add(version)
+            session.flush()
+            item.current_version_id = version.id
+            item.status = "succeeded"
+            item.error = None
+            item.provider_id = None
+            item.provider_task_id = None
+            session.flush()
+            statuses = session.scalars(select(GenerationItem.status).where(GenerationItem.job_id == job.id)).all()
+            job.status = generation_status_from_item_statuses(statuses)
+            job.progress = 100
+            job.completed_at = utcnow()
+            session.add(
+                ExecutionLog(
+                    job_id=job.id,
+                    item_id=item.id,
+                    node="image_generate",
+                    status="succeeded",
+                    request_summary=safe_json({"retry": True, "index": item.index}),
+                    response_summary=safe_json({"url": version.url}),
+                    dry_run=True,
+                )
+            )
+            session.commit()
+            return job.id
+
+        asset_ids = json.loads(job.asset_ids_json)
+        asset_paths = [asset.file_path for asset in session.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()]
+        image_codes = image_provider_route(params.get("model_preference", "fidelity"), session)
+        for image_code in image_codes:
+            _enabled_provider_by_code(session, image_code)
+        item.status = "queued"
+        item.error = None
+        item.provider_id = None
+        item.provider_task_id = None
+        job.status = "running"
+        job.error = None
+        job.completed_at = None
+        session.commit()
+        job_id = job.id
+
+    client = ProviderClient()
+    await _run_live_item(
+        item_id,
+        session_factory,
+        settings,
+        cipher,
+        client,
+        image_codes,
+        asset_paths,
+        params["aspect_ratio"],
+        params,
+    )
+    with session_factory() as session:
+        job = session.get(GenerationJob, job_id)
+        if job:
+            statuses = session.scalars(select(GenerationItem.status).where(GenerationItem.job_id == job_id)).all()
+            job.status = generation_status_from_item_statuses(statuses)
+            job.completed_at = utcnow()
+            session.commit()
+    return job_id

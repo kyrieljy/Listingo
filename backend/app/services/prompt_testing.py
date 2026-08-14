@@ -493,11 +493,10 @@ def _create_suite_admin_test_job(
     workflow = session.scalar(select(Workflow).where(Workflow.code == "product-suite-v1"))
     if not prompt_version_id or not workflow or not workflow.active_version_id:
         raise RuntimeError("核心 Prompt 或 Workflow 未启用")
-    auxiliary_prompts = session.scalars(
-        select(Prompt).where(Prompt.code.in_(("product-vision", "copywriting-assist", "edit-rewrite", "content-safety-review")))
-    ).all()
+    auxiliary_codes = ("product-vision", "copywriting-assist", "edit-rewrite", "image-text-edit", "content-safety-review")
+    auxiliary_prompts = session.scalars(select(Prompt).where(Prompt.code.in_(auxiliary_codes))).all()
     prompt_versions = {item.code: item.active_version_id for item in auxiliary_prompts if item.active_version_id}
-    if len(prompt_versions) != 4:
+    if len(prompt_versions) != len(auxiliary_codes):
         raise RuntimeError("Prompt 工程辅助资产未完整启用")
     params = data.model_dump()
     params["_prompt_versions"] = prompt_versions

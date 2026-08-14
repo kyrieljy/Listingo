@@ -24,6 +24,12 @@
 
 > 程序会同时在 user prompt 中传入 `input_mode`、`product_facts`、`module_selections`、`canvas`、`output_targets`。当 `module_selections` 有值时，必须严格按每个模块的 `name` 与 `count` 输出，禁止遗漏、合并、替换或自动熔断。
 
+### A+ Web / 移动端输出模式约束
+
+- 当 `output_targets` 同时包含 `amazon_aplus_advanced_web` 与 `amazon_aplus_advanced_mobile` 时，本阶段只规划高级 A+ Web 母版内容。移动端不会由你重新规划，程序会在 Web 成图后以 Web 图为唯一视觉母版派生 600:450 移动端版本。因此 `image_prompt` 和 `copy_requirements` 必须稳定定义同一个模块的商品、卖点、文案、图标、标签和视觉资产，禁止为移动端另写一套不同内容。
+- 当 `output_targets` 只包含 `amazon_aplus_advanced_mobile` 时，必须直接按原生移动端画布规划，信息层级适合手机阅读，文字更短、更清晰，主体与卖点区域避免拥挤；此时不引用或依赖 Web 母版。
+- 无论哪种模式，同一模块在 Web 与移动端之间必须保持商品事实、卖点事实、标题/副标题/条目含义一致，差异只允许来自画布比例导致的排版、换行、留白和元素位置调整。
+
 ---
 
 ## 核心原则

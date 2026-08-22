@@ -71,7 +71,7 @@ describe('auth model', () => {
     expect(authModalSource).toContain('phoneCountryPrefix')
     expect(authModalSource).toContain('auth-country-menu')
     expect(authModalSource).toContain('/auth/water-ripple-landscape-subjects.png')
-    expect(authCssSource).toContain('height: min(620px, calc(100vh - 48px))')
+    expect(authCssSource).toContain('height: min(680px, calc(100vh - 48px))')
     expect(authCssSource).toContain('max-width: 460px')
     expect(authCssSource).toContain('padding: 5px')
     expect(authCssSource).toContain('overflow: visible')

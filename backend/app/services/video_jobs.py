@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -316,7 +315,7 @@ def cancel_video_job(session: Session, job: VideoJob) -> VideoJob:
     return job
 
 
-def video_cancel_requested(session_factory, job_id: str) -> bool:
+def video_cancel_requested(session_factory: sessionmaker[Session], job_id: str) -> bool:
     with session_factory() as session:
         job = session.scalar(
             select(VideoJob).where(VideoJob.id == job_id).options(selectinload(VideoJob.items))
@@ -331,7 +330,9 @@ def video_cancel_requested(session_factory, job_id: str) -> bool:
         return True
 
 
-def cancel_video_item_if_requested(session_factory, job_id: str, item_id: str) -> bool:
+def cancel_video_item_if_requested(
+    session_factory: sessionmaker[Session], job_id: str, item_id: str
+) -> bool:
     with session_factory() as session:
         job = session.get(VideoJob, job_id)
         item = session.get(VideoItem, item_id)
@@ -345,7 +346,12 @@ def cancel_video_item_if_requested(session_factory, job_id: str, item_id: str) -
         return True
 
 
-async def run_video_job(job_id: str, session_factory, settings: Settings, cipher: ApiKeyCipher) -> None:
+async def run_video_job(
+    job_id: str,
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    cipher: ApiKeyCipher,
+) -> None:
     client = ProviderClient()
     with session_factory() as session:
         job = session.scalar(
@@ -386,7 +392,7 @@ async def run_video_job(job_id: str, session_factory, settings: Settings, cipher
 
 async def _run_video_job(
     job_id: str,
-    session_factory,
+    session_factory: sessionmaker[Session],
     settings: Settings,
     cipher: ApiKeyCipher,
     client: ProviderClient,
@@ -528,7 +534,7 @@ async def _run_video_item(
     llm_default: Provider | None,
     llm_fallback: Provider | None,
     video_provider_codes: list[str],
-    session_factory,
+    session_factory: sessionmaker[Session],
     settings: Settings,
     cipher: ApiKeyCipher,
     client: ProviderClient,
@@ -708,7 +714,7 @@ async def create_live_video_child_version(
     instruction: str,
     settings: Settings,
     cipher: ApiKeyCipher,
-    session_factory,
+    session_factory: sessionmaker[Session],
 ) -> VideoVersion:
     current = _current_video_version(item)
     job = session.get(VideoJob, item.job_id)
@@ -821,7 +827,7 @@ async def poll_video_completion(
     request_id: str,
     job_id: str,
     item_id: str,
-    session_factory,
+    session_factory: sessionmaker[Session],
 ) -> str:
     for _ in range(180):
         data = await client.get_video_task(provider, api_key, request_id)
@@ -867,8 +873,3 @@ async def save_remote_video(
     destination.write_bytes(content)
     relative = destination.relative_to(settings.data_dir).as_posix()
     return f"/files/{relative}", destination
-
-
-def copy_video_file(source: str, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, destination)

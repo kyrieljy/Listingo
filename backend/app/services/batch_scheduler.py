@@ -32,7 +32,7 @@ class BatchScheduler:
         cipher: ApiKeyCipher,
         *,
         poll_interval_seconds: float = 2.0,
-    ):
+    ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._cipher = cipher

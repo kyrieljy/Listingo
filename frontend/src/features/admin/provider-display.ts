@@ -3,6 +3,10 @@ export type ProviderRouteRole = 'primary' | 'backup1' | 'backup2' | 'backup3' | 
 export const providerRouteRoleOrder: ProviderRouteRole[] = ['primary', 'backup1', 'backup2', 'backup3', 'backup4']
 export const providerRouteChainConfigValue = '__chain_config__'
 
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
+export type ProviderPricing = { cost?: string | number; unit?: string }
+export type ProviderHealth = { status?: string; message?: string }
+
 export type ProviderDisplayRecord = {
   id: string
   code: string
@@ -21,11 +25,11 @@ export type ProviderDisplayRecord = {
   supports_custom_size?: boolean
   supports_exact_custom_size?: boolean
   supports_edit?: boolean
-  pricing?: any | null
-  health?: any | null
+  pricing?: ProviderPricing | null
+  health?: ProviderHealth | null
   has_api_key: boolean
   api_key_masked: string | null
-  config: Record<string, any>
+  config: Record<string, JsonValue>
 }
 
 export type ProviderRuntimeState = {

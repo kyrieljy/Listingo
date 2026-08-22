@@ -9,7 +9,7 @@ import {
 } from '@ant-design/icons-vue'
 import BrandLogo from '../../components/BrandLogo.vue'
 import {
-  assistCopywriting, batchSelectionDownloadUrl, cancelJob, createJob, editItem, editItemText, generationDownloadUrl, getJob, listAplusGenerationJobs, listAplusPlanJobs, listJobs, listVideoJobs, ocrItemText, retryFailedItems, retryItem, uploadAsset, userFacingApiErrorMessage,
+  apiErrorStatus, assistCopywriting, batchSelectionDownloadUrl, cancelJob, createJob, editItem, editItemText, generationDownloadUrl, getJob, listAplusGenerationJobs, listAplusPlanJobs, listJobs, listVideoJobs, ocrItemText, retryFailedItems, retryItem, uploadAsset, userFacingApiErrorMessage,
   type AplusJob, type Asset, type DownloadFormat, type ImageTextEditLine, type Job, type JobItem, type VideoJob,
 } from '../../api/client'
 import APlusPhasePanel from './APlusPhasePanel.vue'
@@ -354,12 +354,12 @@ onBeforeUnmount(() => {
   window.removeEventListener('scroll', updateTextEditPanelPosition, true)
 })
 
-function requestDetail(error: any): string {
+function requestDetail(error: unknown): string {
   return userFacingApiErrorMessage(error)
 }
-function handleRequestError(error: any, fallback: string) {
+function handleRequestError(error: unknown, fallback: string) {
   const detail = requestDetail(error) || fallback
-  if (error?.response?.status === 422 && detail.includes('安全拦截')) {
+  if (apiErrorStatus(error) === 422 && detail.includes('安全拦截')) {
     Modal.error({ title: '内容安全拦截', content: detail })
     return
   }
@@ -647,7 +647,7 @@ async function aiWrite() {
   try {
     const result = await assistCopywriting({ asset_ids: assets.value.map((asset) => asset.id), platform: form.value.platform, market: form.value.market, language: form.value.language, selling_points: form.value.sellingPoints, dry_run: form.value.dryRun })
     aiSuggestion.value = result.selling_points; aiSuggestionEditing.value = false; aiWriteOpen.value = true
-  } catch (error: any) { handleRequestError(error, 'AI 帮写失败，请检查语言模型配置') }
+  } catch (error: unknown) { handleRequestError(error, 'AI 帮写失败，请检查语言模型配置') }
   finally { helping.value = false }
 }
 async function regenerateCopywriting() { await aiWrite() }
@@ -730,7 +730,7 @@ async function runConfirmedGeneration() {
     if (cancelRequested.value) job.value = preservePendingJobItems(await cancelJob(created.id))
     message.success('任务已提交，可继续新建任务')
     void followSubmittedSuiteJob(created.id)
-  } catch (error: any) {
+  } catch (error: unknown) {
     if (job.value?.id.startsWith('optimistic-')) job.value = null
     handleRequestError(error, '任务创建失败，请检查配置与后端日志')
   } finally { generating.value = false; submittingGeneration.value = false; cancelling.value = false }
@@ -748,7 +748,7 @@ async function retryFailed() {
     selected.value = finished.items.filter((item) => item.status === 'succeeded' && currentItemUrl(item)).map((item) => item.id)
     history.value = await listJobs()
     message[finished.status === 'succeeded' ? 'success' : 'warning'](finished.status === 'succeeded' ? '失败图片已全部重试成功' : '重试完成，仍有图片生成失败')
-  } catch (error: any) {
+  } catch (error: unknown) {
     const detail = requestDetail(error) || '失败项重试失败'
     markSuiteItemsFailed(failedIds, detail)
     message.error(detail)
@@ -768,7 +768,7 @@ async function retrySingleItem(item: JobItem) {
     message[refreshed?.status === 'succeeded' ? 'success' : 'warning'](
       refreshed?.status === 'succeeded' ? '单图已重新生成' : '单图重试完成，仍未成功',
     )
-  } catch (error: any) {
+  } catch (error: unknown) {
     const detail = requestDetail(error) || '单图重试失败'
     markSuiteItemsFailed([item.id], detail)
     message.error(detail)
@@ -796,7 +796,7 @@ async function cancelGeneration() {
   try {
     job.value = preservePendingJobItems(await cancelJob(job.value.id))
     message.success('已提交取消请求')
-  } catch (error: any) {
+  } catch (error: unknown) {
     message.error(requestDetail(error) || '取消任务失败')
   } finally {
     if (!generating.value) cancelling.value = false
@@ -841,7 +841,7 @@ async function openTextEdit(item: JobItem) {
       : [emptyTextLine(0)]
     if (result.warning) message.warning(result.warning)
     else if (!result.lines.length) message.info('未识别到文字，可手动新增需要替换的文字行')
-  } catch (error: any) {
+  } catch (error: unknown) {
     handleRequestError(error, '文字识别失败')
     textEditLines.value = [emptyTextLine(0)]
   } finally {
@@ -895,7 +895,7 @@ async function submitEdit() {
     }
     editOpen.value = false
     message.success('已重新生成新版本')
-  } catch (error: any) {
+  } catch (error: unknown) {
     handleRequestError(error, '二次编辑失败')
   } finally {
     editSubmitting.value = false
@@ -918,7 +918,7 @@ async function submitTextEdit() {
       activeItem.value = await refreshSuiteBatchGroupForItem(activeItemId)
       closeTextEdit()
       message.success('文字已生成新版本')
-    } catch (error: any) {
+    } catch (error: unknown) {
       handleRequestError(error, '文字编辑失败')
     } finally {
       textEditSubmitting.value = false
@@ -932,7 +932,7 @@ async function submitTextEdit() {
     activeItem.value = job.value.items.find((item) => item.id === activeItem.value?.id) ?? null
     closeTextEdit()
     message.success('文字已生成新版本')
-  } catch (error: any) {
+  } catch (error: unknown) {
     handleRequestError(error, '文字编辑失败')
   } finally {
     textEditSubmitting.value = false

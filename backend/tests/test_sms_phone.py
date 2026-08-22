@@ -32,3 +32,12 @@ def test_admin_sms_send_skips_daily_limit_for_admin_phone(client) -> None:
     assert second.status_code == 200
     assert normal.status_code == 200
     assert limited.status_code == 429
+
+
+def test_debug_sms_code_comes_from_settings(client) -> None:
+    client.app.state.settings.debug_sms_code = "654321"
+
+    response = client.post("/api/v1/auth/sms/send", json={"phone": "13800138000", "purpose": "login"})
+
+    assert response.status_code == 200
+    assert response.json()["debug_code"] == "654321"

@@ -520,7 +520,7 @@ async function submitBatch() {
     await createBatchJob(payload)
     historyOpen.value = true
     message.success('批量生成托管任务已提交')
-  } catch (error: any) {
+  } catch (error: unknown) {
     message.error(userFacingApiErrorMessage(error) || '批量生成托管提交失败')
   } finally {
     submitting.value = false

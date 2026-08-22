@@ -5,6 +5,15 @@ const GENERATION_REQUEST_TIMEOUT_MS = 900_000
 const OCR_REQUEST_TIMEOUT_MS = 120_000
 const IMAGE_EDIT_REQUEST_TIMEOUT_MS = 900_000
 
+function createRequestNonce(): string {
+  const cryptoApi = globalThis.crypto
+  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID()
+  const bytes = new Uint8Array(16)
+  if (typeof cryptoApi?.getRandomValues !== 'function') throw new Error('A secure browser random generator is required')
+  cryptoApi.getRandomValues(bytes)
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
 type ApiErrorPayload = {
   detail?: unknown
   message?: unknown
@@ -71,6 +80,11 @@ export function userFacingApiErrorMessage(error: unknown): string {
   const rawMessage = error instanceof Error ? error.message.trim() : ''
   if (rawMessage && !rawMessage.startsWith('Request failed with status code')) return rawMessage
   return fallbackStatusMessage(status, url)
+}
+
+export function apiErrorStatus(error: unknown): number | undefined {
+  const apiError = error as ApiErrorLike
+  return apiError.response?.status
 }
 
 api.interceptors.response.use(
@@ -549,7 +563,7 @@ export async function updateProfileApi(payload: { display_name?: string; email?:
 }
 
 export async function changePasswordApi(payload: { current_password: string; next_password: string }): Promise<AuthMeResponse> {
-  return (await api.post('/account/password', payload)).data
+  return (await api.post('/account/password', payload, { headers: { 'X-Request-Nonce': createRequestNonce() } })).data
 }
 
 export async function startChangePhoneApi(phone: string): Promise<SmsSendResponse> {
@@ -577,7 +591,7 @@ export async function createSubscriptionOrderApi(payload: { plan_code: string; b
 }
 
 export async function mockPayOrderApi(orderId: string): Promise<PaymentOrderDto> {
-  return (await api.post(`/subscription/orders/${orderId}/mock-pay`)).data
+  return (await api.post(`/subscription/orders/${orderId}/mock-pay`, undefined, { headers: { 'X-Request-Nonce': createRequestNonce() } })).data
 }
 
 export async function listNotificationsApi(): Promise<NotificationDto[]> {

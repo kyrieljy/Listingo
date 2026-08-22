@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image
-from sqlalchemy import or_, select
+from sqlalchemy import ColumnElement, Select, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.database import get_session
+from backend.app.core.rate_limit import RateLimitResult, rate_limit_headers
 from backend.app.models import (
     Asset,
     AplusItem,
@@ -131,6 +133,27 @@ from backend.app.services.subscriptions import confirm_quota, release_quota, res
 
 router = APIRouter(prefix="/api/v1", tags=["generation"])
 
+GENERATION_RATE_LIMIT = 20
+GENERATION_RATE_WINDOW_SECONDS = 60
+GENERATION_RATE_LIMIT_KEY = "workspace:generation"
+
+
+def _consume_generation_rate_limit(request: Request, response: Response) -> RateLimitResult:
+    result = request.app.state.rate_limiter.consume_rate_limit(
+        GENERATION_RATE_LIMIT_KEY,
+        GENERATION_RATE_LIMIT,
+        GENERATION_RATE_WINDOW_SECONDS,
+    )
+    for name, value in rate_limit_headers(result).items():
+        response.headers[name] = value
+    if not result.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="生成请求过于频繁，请稍后再试",
+            headers=rate_limit_headers(result),
+        )
+    return result
+
 
 def raise_task_creation_error(exc: TaskCreationError) -> None:
     raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
@@ -146,7 +169,7 @@ def enforce_watermark_access(current_user: User, include_watermark: bool) -> Non
     raise HTTPException(status_code=403, detail="当前套餐不支持无水印下载，请升级订阅")
 
 
-def asset_query_for_user(asset_ids: list[str], current_user: User):
+def asset_query_for_user(asset_ids: list[str], current_user: User) -> Select[tuple[Asset]]:
     query = select(Asset).where(Asset.id.in_(asset_ids))
     if current_user.role != "admin":
         query = query.where(or_(Asset.user_id == current_user.id, Asset.user_id.is_(None)))
@@ -157,7 +180,9 @@ def ensure_job_owner(current_user: User, job: GenerationJob | VideoJob | AplusJo
     ensure_owner_access(current_user, job.user_id)
 
 
-def visible_history_job_filters(job_model) -> tuple[Any, Any]:
+def visible_history_job_filters(
+    job_model: type[GenerationJob] | type[VideoJob] | type[AplusJob],
+) -> tuple[ColumnElement[bool], ColumnElement[bool]]:
     return (
         ~job_model.id.like(f"{MONITORING_FIXTURE_JOB_ID_PREFIX}%"),
         or_(job_model.user_id.is_(None), ~job_model.user_id.like(f"{MONITORING_FIXTURE_JOB_ID_PREFIX}%")),
@@ -189,7 +214,7 @@ def release_edit_quota(session: Session, quota_ref: str | None) -> None:
 
 
 @router.get("/workspace-config", response_model=WorkspaceConfigOut)
-def get_workspace_config(request: Request):
+def get_workspace_config(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     return {
         "max_upload_bytes": settings.max_upload_bytes,
@@ -418,7 +443,7 @@ async def create_asset(
     file: UploadFile,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     asset = await store_upload(file, request.app.state.settings)
     asset.user_id = current_user.id
     session.add(asset)
@@ -433,7 +458,7 @@ async def create_batch_job(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     settings = request.app.state.settings
     try:
         batch = create_batch_job_record(session, payload, settings, user_id=current_user.id)
@@ -460,7 +485,7 @@ async def create_batch_job(
 
 
 @router.get("/batch-jobs", response_model=list[BatchJobOut])
-def list_batch_jobs(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def list_batch_jobs(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     query = (
         select(BatchJob)
         .where(*visible_history_job_filters(BatchJob))
@@ -479,7 +504,7 @@ async def create_batch_validation_fixtures_endpoint(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> list[dict[str, Any]]:
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Only administrators can create validation fixtures")
     settings = request.app.state.settings
@@ -515,7 +540,7 @@ def download_batch_selection_results(
     include_watermark: bool = Query(default=True),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> FileResponse:
     enforce_watermark_access(current_user, include_watermark)
     selected_batch_item_ids = [item_id for item_id in batch_item_ids.split(",") if item_id]
     selected_child_item_ids = {item_id for item_id in item_ids.split(",") if item_id}
@@ -550,7 +575,7 @@ def get_batch_job(
     batch_id: str,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     batch = load_batch_job(session, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch job does not exist")
@@ -563,7 +588,7 @@ def cancel_batch_job_endpoint(
     batch_id: str,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     batch = load_batch_job(session, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch job does not exist")
@@ -577,7 +602,7 @@ async def retry_failed_batch_job_endpoint(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     batch = load_batch_job(session, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch job does not exist")
@@ -607,7 +632,7 @@ def download_batch_results(
     include_watermark: bool = Query(default=True),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> FileResponse:
     enforce_watermark_access(current_user, include_watermark)
     batch = load_batch_job(session, batch_id)
     if not batch:
@@ -623,9 +648,11 @@ async def create_generation_job(
     payload: GenerationJobCreate,
     background_tasks: BackgroundTasks,
     request: Request,
+    response: Response,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
+    _consume_generation_rate_limit(request, response)
     if len(payload.asset_ids) > 6:
         raise HTTPException(status_code=422, detail="Single generation jobs allow at most 6 product images")
     try:
@@ -715,7 +742,7 @@ async def assist_copywriting(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     user_prompt = build_copywriting_user_prompt(payload)
     try:
         ensure_content_safe(run_local_text_safety_review(user_prompt), "输入内容安全拦截")
@@ -841,7 +868,7 @@ async def create_aplus_plan_job(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     if len(payload.asset_ids) > 6:
         raise HTTPException(status_code=422, detail="Single A+ plan jobs allow at most 6 product images")
     try:
@@ -903,7 +930,7 @@ def get_aplus_plan_job(
     job_id: str,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     job = load_aplus_job_or_404(session, job_id)
     ensure_job_owner(current_user, job)
     if job.job_type != "plan":
@@ -916,7 +943,7 @@ def cancel_aplus_plan_job(
     job_id: str,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     job = load_aplus_job_or_404(session, job_id)
     ensure_job_owner(current_user, job)
     if job.job_type != "plan":
@@ -925,7 +952,7 @@ def cancel_aplus_plan_job(
 
 
 @router.get("/aplus-plan-jobs", response_model=list[AplusJobOut])
-def list_aplus_plan_jobs(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def list_aplus_plan_jobs(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     batch_plan_ids = select(BatchItem.aplus_plan_job_id).where(BatchItem.aplus_plan_job_id.is_not(None))
     query = (
         select(AplusJob)
@@ -951,7 +978,7 @@ async def create_aplus_generation_job(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     try:
         job = create_aplus_generation_job_record(session, payload, user_id=current_user.id)
         reserve_quota(
@@ -1013,7 +1040,7 @@ async def create_aplus_generation_job(
 
 
 @router.get("/aplus-generation-jobs", response_model=list[AplusJobOut])
-def list_aplus_generation_jobs(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def list_aplus_generation_jobs(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     batch_generation_ids = select(BatchItem.aplus_generation_job_id).where(BatchItem.aplus_generation_job_id.is_not(None))
     query = (
         select(AplusJob)
@@ -1037,7 +1064,7 @@ def get_aplus_generation_job(
     job_id: str,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     job = load_aplus_job_or_404(session, job_id)
     ensure_job_owner(current_user, job)
     if job.job_type != "generation":
@@ -1050,7 +1077,7 @@ def cancel_aplus_generation_job(
     job_id: str,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     job = load_aplus_job_or_404(session, job_id)
     ensure_job_owner(current_user, job)
     if job.job_type != "generation":
@@ -1064,7 +1091,7 @@ async def retry_failed_aplus_generation_job(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     job = load_aplus_job_or_404(session, job_id)
     ensure_job_owner(current_user, job)
     if job.job_type != "generation":
@@ -1096,7 +1123,7 @@ async def retry_single_aplus_item(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     item = session.get(AplusItem, item_id)
     if not item:
         raise HTTPException(status_code=404, detail="A+ item not found")
@@ -1136,7 +1163,7 @@ def download_aplus_results(
     include_watermark: bool = Query(default=True),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> FileResponse:
     enforce_watermark_access(current_user, include_watermark)
     job = load_aplus_job_or_404(session, job_id)
     ensure_job_owner(current_user, job)
@@ -1176,7 +1203,10 @@ def download_aplus_results(
     return FileResponse(archive, media_type="application/zip", filename=f"listingo-aplus-{job.id}.zip")
 
 
-def _current_version(versions: list, current_version_id: str | None):
+def _current_version(
+    versions: Sequence[GenerationVersion | AplusVersion],
+    current_version_id: str | None,
+) -> GenerationVersion | AplusVersion | None:
     if current_version_id:
         current = next((version for version in versions if version.id == current_version_id), None)
         if current:
@@ -1202,7 +1232,7 @@ def ocr_aplus_item_text(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     item = session.scalar(
         select(AplusItem).where(AplusItem.id == item_id).options(selectinload(AplusItem.versions), selectinload(AplusItem.job))
     )
@@ -1227,7 +1257,7 @@ async def create_aplus_text_version(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     item = session.scalar(
         select(AplusItem).where(AplusItem.id == item_id).options(selectinload(AplusItem.versions))
     )
@@ -1271,7 +1301,7 @@ async def create_aplus_version(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     item = session.scalar(
         select(AplusItem).where(AplusItem.id == item_id).options(selectinload(AplusItem.versions))
     )
@@ -1311,7 +1341,7 @@ async def assist_video_copywriting(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     user_prompt = build_video_copywriting_user_prompt(payload)
     try:
         ensure_content_safe(run_local_text_safety_review(user_prompt), "输入内容安全拦截")
@@ -1428,9 +1458,11 @@ async def create_video_job(
     payload: VideoJobCreate,
     background_tasks: BackgroundTasks,
     request: Request,
+    response: Response,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
+    _consume_generation_rate_limit(request, response)
     assets = session.scalars(asset_query_for_user(payload.asset_ids, current_user)).all()
     if len(assets) != len(payload.asset_ids):
         raise HTTPException(status_code=422, detail="存在无效商品图")
@@ -1499,7 +1531,7 @@ async def create_video_job(
 
 
 @router.get("/video-jobs", response_model=list[VideoJobOut])
-def list_video_jobs(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def list_video_jobs(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     query = (
         select(VideoJob)
         .where(VideoJob.is_admin_test.is_(False), *visible_history_job_filters(VideoJob))
@@ -1517,7 +1549,7 @@ def get_video_job(
     job_id: str,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     job = load_video_job(session, job_id)
     ensure_job_owner(current_user, job)
     return serialize_video_job(job)
@@ -1528,7 +1560,7 @@ def cancel_video_generation_job(
     job_id: str,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     job = load_video_job(session, job_id)
     ensure_job_owner(current_user, job)
     return serialize_video_job(cancel_video_job(session, job))
@@ -1540,7 +1572,7 @@ async def retry_failed_video_job(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     job = load_video_job(session, job_id)
     ensure_job_owner(current_user, job)
     if not any(item.status == "failed" for item in job.items):
@@ -1573,7 +1605,7 @@ def download_video_results(
     item_ids: str = Query(min_length=1),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> FileResponse:
     job = load_video_job(session, job_id)
     enforce_watermark_access(current_user, include_watermark=True)
     ensure_job_owner(current_user, job)
@@ -1604,7 +1636,7 @@ async def create_video_version(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     item = session.scalar(
         select(VideoItem).where(VideoItem.id == item_id).options(selectinload(VideoItem.versions))
     )
@@ -1650,7 +1682,7 @@ async def create_video_version(
 
 
 @router.get("/generation-jobs", response_model=list[GenerationJobOut])
-def list_generation_jobs(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def list_generation_jobs(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     batch_generation_ids = select(BatchItem.generation_job_id).where(BatchItem.generation_job_id.is_not(None))
     query = (
         select(GenerationJob)
@@ -1673,7 +1705,7 @@ def get_generation_job(
     job_id: str,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     job = load_job(session, job_id)
     ensure_job_owner(current_user, job)
     return serialize_job(job)
@@ -1684,7 +1716,7 @@ def cancel_generation_job_endpoint(
     job_id: str,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     job = load_job(session, job_id)
     ensure_job_owner(current_user, job)
     return serialize_job(cancel_generation_job(session, job))
@@ -1696,7 +1728,7 @@ async def retry_failed(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     job = load_job(session, job_id)
     ensure_job_owner(current_user, job)
     failed = [item for item in job.items if item.status == "failed"]
@@ -1727,7 +1759,7 @@ async def retry_single_generation_item(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     item = session.get(GenerationItem, item_id)
     if not item:
         raise HTTPException(status_code=404, detail="生成图片不存在")
@@ -1765,7 +1797,7 @@ def download_results(
     include_watermark: bool = Query(default=True),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> FileResponse:
     enforce_watermark_access(current_user, include_watermark)
     job = load_job(session, job_id)
     ensure_job_owner(current_user, job)
@@ -1812,7 +1844,7 @@ def ocr_generation_item_text(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     item = session.scalar(
         select(GenerationItem)
         .where(GenerationItem.id == item_id)
@@ -1839,7 +1871,7 @@ async def create_generation_text_version(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     item = session.scalar(
         select(GenerationItem).where(GenerationItem.id == item_id).options(selectinload(GenerationItem.versions))
     )
@@ -1887,7 +1919,7 @@ async def create_generation_version(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     item = session.scalar(
         select(GenerationItem).where(GenerationItem.id == item_id).options(selectinload(GenerationItem.versions))
     )

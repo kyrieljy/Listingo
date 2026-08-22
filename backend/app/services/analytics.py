@@ -26,7 +26,7 @@ from backend.app.models import (
 )
 from backend.app.services.provider_routing import provider_config
 from backend.app.services.redaction import safe_json
-from backend.app.services.sms import client_ip
+from backend.app.core.rate_limit import client_ip
 
 
 FINAL_STATUSES = {"succeeded", "partial_failed", "failed", "cancelled", "partial_cancelled"}

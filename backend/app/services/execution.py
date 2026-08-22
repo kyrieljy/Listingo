@@ -29,22 +29,6 @@ async def parse_plan_with_one_repair(
             raise ValueError(f"LLM JSON 修复后仍不合法：{repaired_error}") from repaired_error
 
 
-async def run_image_with_fallback(
-    primary_code: str,
-    fallback_code: str,
-    generate_callback: ImageCallback,
-) -> tuple[bytes, str]:
-    try:
-        return await generate_callback(primary_code), primary_code
-    except Exception as primary_error:
-        try:
-            return await generate_callback(fallback_code), fallback_code
-        except Exception as fallback_error:
-            raise RuntimeError(
-                f"默认图片模型 {primary_code} 失败：{primary_error}；备用图片模型 {fallback_code} 失败：{fallback_error}"
-            ) from fallback_error
-
-
 async def run_image_route(
     provider_codes: list[str],
     generate_callback: ImageCallback,

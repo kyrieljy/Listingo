@@ -1,12 +1,29 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _settings_env_file() -> Path:
+    configured = os.getenv("LISTINGO_ENV_FILE", "").strip()
+    if not configured:
+        return PROJECT_ROOT / ".env.local"
+    path = Path(configured).expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+class _EnvFileUnset:
+    pass
+
+
+_ENV_FILE_UNSET = _EnvFileUnset()
 
 
 class Settings(BaseSettings):
@@ -17,7 +34,16 @@ class Settings(BaseSettings):
     testing: bool = False
     global_dry_run: bool = True
     public_asset_base_url: str = ""
+    cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
+    storage_backend: Literal["memory"] = "memory"
+    rate_limit_max_size: int = Field(default=10_000, ge=1)
+    rate_limit_cleanup_interval_seconds: int = Field(default=30, ge=1)
     max_upload_bytes: int = 15 * 1024 * 1024
+    session_ttl_seconds: int = Field(default=60 * 60 * 8, ge=60)
+    refresh_ttl_seconds: int = Field(default=60 * 60 * 24 * 30, ge=60)
+    cookie_secure: bool = False
+    debug_sms_code: str | None = None
+    sms_timeout_seconds: float = Field(default=15, ge=0.1)
     max_job_concurrency: int = Field(default=4, ge=1, le=8)
     max_batch_tasks: int = Field(default=100, ge=1, le=100)
     max_batch_item_assets: int = Field(default=6, ge=1, le=12)
@@ -36,6 +62,18 @@ class Settings(BaseSettings):
     ocr_filter_isolated_cjk: bool = True
     ocr_filter_watermark_text: bool = True
     ocr_use_enhanced_variants: bool = False
+
+    def __init__(
+        self,
+        _env_file: Path | str | None | _EnvFileUnset = _ENV_FILE_UNSET,
+        **values: Any,
+    ) -> None:
+        selected_env_file = _settings_env_file() if isinstance(_env_file, _EnvFileUnset) else _env_file
+        super().__init__(_env_file=selected_env_file, **values)
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     @property
     def resolved_database_url(self) -> str:

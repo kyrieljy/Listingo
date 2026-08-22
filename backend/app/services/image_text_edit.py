@@ -330,11 +330,7 @@ def _create_paddleocr_runner(model_version: str, settings: Settings) -> OcrRunne
 
 
 def _create_rapidocr_runner(settings: Settings) -> OcrRunner:
-    try:
-        from rapidocr_onnxruntime import RapidOCR  # type: ignore
-    except Exception:
-        from rapidocr import RapidOCR  # type: ignore
-
+    from rapidocr_onnxruntime import RapidOCR  # type: ignore
     try:
         runner = RapidOCR(text_score=settings.ocr_text_score_threshold, det_box_thresh=settings.ocr_box_score_threshold)
     except TypeError:
@@ -625,11 +621,6 @@ def detect_text_lines_with_status(
         ImageTextLineOut(id=f"line-{index + 1:03d}", index=index, text=item["text"], confidence=item["confidence"], bbox=item["bbox"])
         for index, item in enumerate(parsed)
     ], warning=warning)
-
-
-def detect_text_lines(image_path: str | Path) -> list[ImageTextLineOut]:
-    return detect_text_lines_with_status(image_path).lines
-
 
 def changed_text_lines(lines: list[ImageTextEditLine]) -> list[ImageTextEditLine]:
     changed: list[ImageTextEditLine] = []

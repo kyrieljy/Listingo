@@ -6,7 +6,7 @@ from cryptography.fernet import Fernet
 
 
 class ApiKeyCipher:
-    def __init__(self, key_path: Path):
+    def __init__(self, key_path: Path) -> None:
         key_path.parent.mkdir(parents=True, exist_ok=True)
         if not key_path.exists():
             key_path.write_bytes(Fernet.generate_key())

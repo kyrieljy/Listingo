@@ -13,13 +13,12 @@ from sqlalchemy.orm import Session
 
 from backend.app.database import get_session
 from backend.app.models import LoginEvent, User, UserSession, utcnow
-from backend.app.services.sms import client_ip, mask_phone, normalize_phone
+from backend.app.core.rate_limit import client_ip
+from backend.app.services.sms import mask_phone, normalize_phone
 
 
 SESSION_COOKIE = "listingo_session"
 REFRESH_COOKIE = "listingo_refresh"
-SESSION_TTL_SECONDS = 60 * 60 * 8
-REFRESH_TTL_SECONDS = 60 * 60 * 24 * 30
 
 password_hasher = PasswordHasher(time_cost=2, memory_cost=65536, parallelism=2)
 
@@ -102,6 +101,7 @@ def record_login_event(
 
 
 def issue_session(session: Session, request: Request, response: Response, user: User) -> None:
+    settings = request.app.state.settings
     session_token = secrets.token_urlsafe(32)
     refresh_token = secrets.token_urlsafe(40)
     now = utcnow()
@@ -109,8 +109,8 @@ def issue_session(session: Session, request: Request, response: Response, user: 
         user_id=user.id,
         session_token_hash=hash_token(session_token),
         refresh_token_hash=hash_token(refresh_token),
-        expires_at=now + timedelta(seconds=SESSION_TTL_SECONDS),
-        refresh_expires_at=now + timedelta(seconds=REFRESH_TTL_SECONDS),
+        expires_at=now + timedelta(seconds=settings.session_ttl_seconds),
+        refresh_expires_at=now + timedelta(seconds=settings.refresh_ttl_seconds),
         ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent", "")[:1000],
     )
@@ -119,26 +119,26 @@ def issue_session(session: Session, request: Request, response: Response, user: 
     response.set_cookie(
         SESSION_COOKIE,
         session_token,
-        max_age=SESSION_TTL_SECONDS,
+        max_age=settings.session_ttl_seconds,
         httponly=True,
-        secure=False,
+        secure=settings.cookie_secure,
         samesite="lax",
         path="/",
     )
     response.set_cookie(
         REFRESH_COOKIE,
         refresh_token,
-        max_age=REFRESH_TTL_SECONDS,
+        max_age=settings.refresh_ttl_seconds,
         httponly=True,
-        secure=False,
+        secure=settings.cookie_secure,
         samesite="lax",
         path="/",
     )
 
 
-def clear_session_cookies(response: Response) -> None:
-    response.delete_cookie(SESSION_COOKIE, path="/")
-    response.delete_cookie(REFRESH_COOKIE, path="/")
+def clear_session_cookies(response: Response, *, secure: bool = False) -> None:
+    response.delete_cookie(SESSION_COOKIE, path="/", secure=secure)
+    response.delete_cookie(REFRESH_COOKIE, path="/", secure=secure)
 
 
 def _testing_user(session: Session, request: Request) -> User | None:

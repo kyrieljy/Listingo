@@ -151,18 +151,6 @@ def provider_display_names_by_code(session: Session, provider_codes: list[str]) 
     return {provider.code: provider_display_name(provider) for provider in providers}
 
 
-def set_provider_route_role(provider: Provider, route_key: str, role: ProviderRouteRole | str | None) -> None:
-    config = provider_config(provider)
-    roles = normalize_route_roles(config.get("route_roles"))
-    normalized_role = normalize_route_role(role)
-    if normalized_role is None:
-        roles.pop(route_key, None)
-    else:
-        roles[route_key] = normalized_role  # type: ignore[assignment]
-    config["route_roles"] = roles
-    write_provider_config(provider, config)
-
-
 def provider_matches_route(provider: Provider, route_key: str, role: ProviderRouteRole | str) -> bool:
     return provider_route_roles(provider).get(route_key) == normalize_route_role(role)
 

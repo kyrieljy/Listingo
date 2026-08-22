@@ -13,6 +13,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Qu
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from backend.app.config import Settings
 from backend.app.database import get_session
 from backend.app.models import (
     ExecutionLog,
@@ -256,7 +257,7 @@ def _normalize_admin_ocr_model(value: Any) -> str:
     return aliases.get(lowered, normalized)
 
 
-def _ocr_settings_dict(settings) -> dict[str, Any]:
+def _ocr_settings_dict(settings: Settings) -> dict[str, Any]:
     return {
         "ocr_engine": settings.ocr_engine,
         "ocr_primary_model": settings.ocr_primary_model,
@@ -382,7 +383,7 @@ def provider_matches_route_definition(provider: Provider, route_key: str, defini
 
 
 @router.get("/providers", response_model=list[ProviderOut])
-def list_providers(request: Request, include_hidden: bool = False, session: Session = Depends(get_session)):
+def list_providers(request: Request, include_hidden: bool = False, session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     providers = session.scalars(select(Provider).order_by(Provider.capability, Provider.is_default.desc())).all()
     return [
         provider_dict(provider, request)
@@ -392,7 +393,7 @@ def list_providers(request: Request, include_hidden: bool = False, session: Sess
 
 
 @router.get("/provider-groups", response_model=list[ProviderGroupOut])
-def list_provider_groups(session: Session = Depends(get_session)):
+def list_provider_groups(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     providers = [
         provider
         for provider in session.scalars(select(Provider)).all()
@@ -423,7 +424,7 @@ def update_provider_route_chain(
     route_key: str,
     payload: ProviderRouteChainUpdate,
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     definition = PROVIDER_ROUTE_DEFINITIONS.get(route_key)
     if not definition:
         raise HTTPException(status_code=404, detail=f"未知模型链路：{route_key}")
@@ -464,7 +465,7 @@ def update_provider_route_chain(
 
 
 @router.get("/runtime-settings")
-def get_runtime_settings(request: Request):
+def get_runtime_settings(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     return {
         "public_asset_base_url": settings.public_asset_base_url,
@@ -473,7 +474,7 @@ def get_runtime_settings(request: Request):
 
 
 @router.patch("/runtime-settings")
-def update_runtime_settings(payload: dict[str, str], request: Request):
+def update_runtime_settings(payload: dict[str, str], request: Request) -> dict[str, Any]:
     value = (payload.get("public_asset_base_url") or "").strip()
     request.app.state.settings.public_asset_base_url = value.rstrip("/")
     return {
@@ -483,12 +484,12 @@ def update_runtime_settings(payload: dict[str, str], request: Request):
 
 
 @router.get("/ocr-settings")
-def get_ocr_settings(request: Request):
+def get_ocr_settings(request: Request) -> dict[str, Any]:
     return _ocr_settings_dict(request.app.state.settings)
 
 
 @router.patch("/ocr-settings")
-def update_ocr_settings(payload: dict[str, Any], request: Request):
+def update_ocr_settings(payload: dict[str, Any], request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     if "ocr_engine" in payload:
         engine = str(payload.get("ocr_engine") or "").strip().lower()
@@ -524,7 +525,7 @@ def update_ocr_settings(payload: dict[str, Any], request: Request):
 
 
 @router.post("/ocr-settings/prewarm")
-def prewarm_ocr_settings(request: Request):
+def prewarm_ocr_settings(request: Request) -> dict[str, Any]:
     try:
         result = prewarm_ocr_engine(request.app.state.settings)
     except RuntimeError as exc:
@@ -533,7 +534,7 @@ def prewarm_ocr_settings(request: Request):
 
 
 @router.post("/ocr-settings/cache/clear")
-def clear_ocr_settings_cache(request: Request):
+def clear_ocr_settings_cache(request: Request) -> dict[str, Any]:
     clear_ocr_engine_cache()
     return _ocr_settings_dict(request.app.state.settings)
 
@@ -544,7 +545,7 @@ def update_provider(
     payload: ProviderUpdate,
     request: Request,
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     provider = session.get(Provider, provider_id)
     if not provider:
         raise HTTPException(status_code=404, detail="Provider 不存在")
@@ -616,7 +617,7 @@ def update_provider(
 
 
 @router.post("/providers/{provider_id}/test", response_model=ProviderTestOut)
-async def test_provider(provider_id: str, request: Request, session: Session = Depends(get_session)):
+async def test_provider(provider_id: str, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
     provider = session.get(Provider, provider_id)
     if not provider:
         raise HTTPException(status_code=404, detail="Provider 不存在")
@@ -704,7 +705,7 @@ async def test_provider(provider_id: str, request: Request, session: Session = D
 
 
 @router.post("/provider-groups/{group_key}/health-check")
-async def health_check_provider_group(group_key: str, request: Request, session: Session = Depends(get_session)):
+async def health_check_provider_group(group_key: str, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
     providers = [
         provider
         for provider in session.scalars(select(Provider)).all()
@@ -747,13 +748,13 @@ async def health_check_provider_group(group_key: str, request: Request, session:
 
 
 @router.get("/users")
-def list_users(session: Session = Depends(get_session)):
+def list_users(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     users = session.scalars(select(User).order_by(User.created_at.desc())).all()
     return [public_user(user) for user in users]
 
 
 @router.patch("/users/{user_id}")
-def update_user(user_id: str, payload: AdminUserUpdate, session: Session = Depends(get_session)):
+def update_user(user_id: str, payload: AdminUserUpdate, session: Session = Depends(get_session)) -> dict[str, Any]:
     user = session.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
@@ -780,12 +781,12 @@ def update_user(user_id: str, payload: AdminUserUpdate, session: Session = Depen
 
 
 @router.get("/subscription-plans")
-def admin_subscription_plans(session: Session = Depends(get_session)):
+def admin_subscription_plans(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     return list_subscription_plans(session, include_internal=True)
 
 
 @router.patch("/subscription-plans/{plan_id}")
-def update_subscription_plan(plan_id: str, payload: AdminPlanUpdate, session: Session = Depends(get_session)):
+def update_subscription_plan(plan_id: str, payload: AdminPlanUpdate, session: Session = Depends(get_session)) -> dict[str, Any]:
     plan = session.get(SubscriptionPlan, plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="套餐不存在")
@@ -800,7 +801,7 @@ def update_subscription_plan(plan_id: str, payload: AdminPlanUpdate, session: Se
 
 
 @router.patch("/quota-rules/{rule_id}")
-def update_quota_rule(rule_id: str, payload: AdminQuotaRuleUpdate, session: Session = Depends(get_session)):
+def update_quota_rule(rule_id: str, payload: AdminQuotaRuleUpdate, session: Session = Depends(get_session)) -> dict[str, Any]:
     rule = session.get(PlanQuotaRule, rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="额度规则不存在")
@@ -813,7 +814,7 @@ def update_quota_rule(rule_id: str, payload: AdminQuotaRuleUpdate, session: Sess
 
 
 @router.get("/payment-orders")
-def list_payment_orders(session: Session = Depends(get_session)):
+def list_payment_orders(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     orders = session.scalars(select(PaymentOrder).order_by(PaymentOrder.created_at.desc()).limit(100)).all()
     return [serialize_order(session, order) for order in orders]
 
@@ -840,12 +841,12 @@ def _sms_settings_dict(config: SmsConfig) -> dict[str, Any]:
 
 
 @router.get("/sms-settings")
-def get_sms_settings(session: Session = Depends(get_session)):
+def get_sms_settings(session: Session = Depends(get_session)) -> dict[str, Any]:
     return _sms_settings_dict(load_sms_config(session))
 
 
 @router.patch("/sms-settings")
-def update_sms_settings(payload: SmsSettingsUpdate, request: Request, session: Session = Depends(get_session)):
+def update_sms_settings(payload: SmsSettingsUpdate, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
     config = load_sms_config(session)
     updates = payload.model_dump(exclude_unset=True)
     secret = updates.pop("access_key_secret", None)
@@ -859,7 +860,7 @@ def update_sms_settings(payload: SmsSettingsUpdate, request: Request, session: S
 
 
 @router.post("/sms-settings/test-send", response_model=SmsSendOut)
-async def test_sms_settings(payload: SmsSendCreate, request: Request, session: Session = Depends(get_session)):
+async def test_sms_settings(payload: SmsSendCreate, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
     result = await send_sms_code(
         session,
         request,
@@ -872,7 +873,7 @@ async def test_sms_settings(payload: SmsSendCreate, request: Request, session: S
 
 
 @router.post("/notifications/broadcast")
-def broadcast_notification(payload: AdminNotificationBroadcastCreate, session: Session = Depends(get_session)):
+def broadcast_notification(payload: AdminNotificationBroadcastCreate, session: Session = Depends(get_session)) -> dict[str, Any]:
     query = select(User).where(User.status == "active")
     if payload.user_ids:
         query = query.where(User.id.in_(payload.user_ids))
@@ -884,7 +885,7 @@ def broadcast_notification(payload: AdminNotificationBroadcastCreate, session: S
 
 
 @router.get("/prompts")
-def list_prompts(session: Session = Depends(get_session)):
+def list_prompts(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     prompts = session.scalars(select(Prompt).options(selectinload(Prompt.versions)).order_by(Prompt.name)).all()
     return [
         {
@@ -901,7 +902,7 @@ def list_prompts(session: Session = Depends(get_session)):
 
 
 @router.get("/prompts/{prompt_id}")
-def get_prompt(prompt_id: str, session: Session = Depends(get_session)):
+def get_prompt(prompt_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
     prompt = session.scalar(select(Prompt).where(Prompt.id == prompt_id).options(selectinload(Prompt.versions)))
     if not prompt:
         raise HTTPException(status_code=404, detail="提示词不存在")
@@ -918,7 +919,7 @@ def get_prompt(prompt_id: str, session: Session = Depends(get_session)):
 
 
 @router.post("/prompts/{prompt_id}/versions", status_code=201)
-def create_prompt_version(prompt_id: str, payload: PromptVersionCreate, session: Session = Depends(get_session)):
+def create_prompt_version(prompt_id: str, payload: PromptVersionCreate, session: Session = Depends(get_session)) -> dict[str, Any]:
     prompt = session.scalar(select(Prompt).where(Prompt.id == prompt_id).options(selectinload(Prompt.versions)))
     if not prompt:
         raise HTTPException(status_code=404, detail="提示词不存在")
@@ -941,7 +942,7 @@ async def upload_prompt_version(
     file: UploadFile,
     change_note: str = Form(default=""),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     prompt = session.scalar(
         select(Prompt).where(Prompt.id == prompt_id).options(selectinload(Prompt.versions))
     )
@@ -978,7 +979,7 @@ def compare_prompt_versions(
     from_version: int = Query(ge=1),
     to_version: int = Query(ge=1),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     versions = session.scalars(select(PromptVersion).where(PromptVersion.prompt_id == prompt_id)).all()
     source = next((version for version in versions if version.version_no == from_version), None)
     target = next((version for version in versions if version.version_no == to_version), None)
@@ -997,7 +998,7 @@ def compare_prompt_versions(
 
 
 @router.post("/prompts/{prompt_id}/versions/{version_id}/activate")
-def activate_prompt_version(prompt_id: str, version_id: str, session: Session = Depends(get_session)):
+def activate_prompt_version(prompt_id: str, version_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
     prompt = session.get(Prompt, prompt_id)
     version = session.get(PromptVersion, version_id)
     if not prompt or not version or version.prompt_id != prompt.id:
@@ -1014,7 +1015,7 @@ async def create_prompt_test_run(
     background_tasks: BackgroundTasks,
     request: Request,
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     prompt = session.get(Prompt, prompt_id)
     if not prompt:
         raise HTTPException(status_code=404, detail="提示词不存在")
@@ -1067,7 +1068,7 @@ async def create_prompt_test_run(
 
 
 @router.get("/prompt-test-runs/{run_id}", response_model=PromptTestRunOut)
-def get_prompt_test_run(run_id: str, session: Session = Depends(get_session)):
+def get_prompt_test_run(run_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
     run = session.get(PromptTestRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="提示词测试记录不存在")
@@ -1082,7 +1083,7 @@ def list_prompt_test_runs(
     prompt_id: str,
     limit: int = Query(default=10, ge=1, le=50),
     session: Session = Depends(get_session),
-):
+) -> list[dict[str, Any]]:
     prompt = session.get(Prompt, prompt_id)
     if not prompt:
         raise HTTPException(status_code=404, detail="提示词不存在")
@@ -1099,7 +1100,7 @@ def list_prompt_test_runs(
 
 
 @router.get("/workflows")
-def list_workflows(session: Session = Depends(get_session)):
+def list_workflows(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     workflows = session.scalars(select(Workflow).options(selectinload(Workflow.versions))).all()
     return [
         {
@@ -1115,7 +1116,7 @@ def list_workflows(session: Session = Depends(get_session)):
 
 
 @router.get("/workflows/{workflow_id}")
-def get_workflow(workflow_id: str, session: Session = Depends(get_session)):
+def get_workflow(workflow_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
     workflow = session.scalar(
         select(Workflow).where(Workflow.id == workflow_id).options(selectinload(Workflow.versions))
     )
@@ -1132,7 +1133,7 @@ def get_workflow(workflow_id: str, session: Session = Depends(get_session)):
 
 
 @router.post("/workflows/{workflow_id}/versions", status_code=201)
-def create_workflow_version(workflow_id: str, payload: WorkflowVersionCreate, session: Session = Depends(get_session)):
+def create_workflow_version(workflow_id: str, payload: WorkflowVersionCreate, session: Session = Depends(get_session)) -> dict[str, Any]:
     workflow = session.scalar(
         select(Workflow).where(Workflow.id == workflow_id).options(selectinload(Workflow.versions))
     )
@@ -1151,7 +1152,7 @@ def create_workflow_version(workflow_id: str, payload: WorkflowVersionCreate, se
 
 
 @router.post("/workflows/{workflow_id}/versions/{version_id}/activate")
-def activate_workflow_version(workflow_id: str, version_id: str, session: Session = Depends(get_session)):
+def activate_workflow_version(workflow_id: str, version_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
     workflow = session.get(Workflow, workflow_id)
     version = session.get(WorkflowVersion, version_id)
     if not workflow or not version or version.workflow_id != workflow.id:
@@ -1165,7 +1166,7 @@ def activate_workflow_version(workflow_id: str, version_id: str, session: Sessio
 
 
 @router.post("/workflows/{workflow_id}/versions/{version_id}/dryrun")
-def dryrun_workflow(workflow_id: str, version_id: str, session: Session = Depends(get_session)):
+def dryrun_workflow(workflow_id: str, version_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
     version = session.get(WorkflowVersion, version_id)
     if not version or version.workflow_id != workflow_id:
         raise HTTPException(status_code=404, detail="Workflow 版本不存在")
@@ -1184,7 +1185,7 @@ def list_logs(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=30, ge=1, le=100),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     conditions = []
     if job_id:
         conditions.append(ExecutionLog.job_id == job_id)

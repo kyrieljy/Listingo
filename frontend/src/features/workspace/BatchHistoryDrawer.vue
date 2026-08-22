@@ -205,7 +205,7 @@ async function createFixtures() {
     await refresh(false)
     if (created[0]) selected.value = await getBatchJob(created[0].id)
     message.success('已生成 Dryrun 验证批次')
-  } catch (error: any) {
+  } catch (error: unknown) {
     message.error(userFacingApiErrorMessage(error) || '验证批次创建失败')
   } finally {
     fixtureLoading.value = false

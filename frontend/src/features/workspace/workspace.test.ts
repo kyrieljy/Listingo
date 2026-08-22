@@ -40,16 +40,22 @@ import {
   extractBatchProductName,
 } from './batch-model'
 import resultGridSource from './ResultGrid.vue?raw'
-import aplusPanelSource from './APlusPhasePanel.vue?raw'
-import batchHistorySource from './BatchHistoryDrawer.vue?raw'
-import batchModalSource from './BatchHostingModal.vue?raw'
+import aplusPanelRawSource from './APlusPhasePanel.vue?raw'
+import batchHistoryRawSource from './BatchHistoryDrawer.vue?raw'
+import batchModalRawSource from './BatchHostingModal.vue?raw'
 import batchTaskCardSource from './BatchTaskCard.vue?raw'
 import imageTextEditPanelSource from './ImageTextEditPanel.vue?raw'
 import watermarkMenuSource from './WatermarkDownloadMenu.vue?raw'
-import videoPanelSource from './VideoPhasePanel.vue?raw'
-import workspaceSource from './WorkspaceView.vue?raw'
+import videoPanelRawSource from './VideoPhasePanel.vue?raw'
+import workspaceRawSource from './WorkspaceView.vue?raw'
 import apiClientSource from '../../api/client.ts?raw'
 
+const normalizeSourceLineEndings = (source: string) => source.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+const aplusPanelSource = normalizeSourceLineEndings(aplusPanelRawSource)
+const batchHistorySource = normalizeSourceLineEndings(batchHistoryRawSource)
+const batchModalSource = normalizeSourceLineEndings(batchModalRawSource)
+const videoPanelSource = normalizeSourceLineEndings(videoPanelRawSource)
+const workspaceSource = normalizeSourceLineEndings(workspaceRawSource)
 const workspaceSuiteCss = readFileSync(new URL('./workspace-suite.css', import.meta.url), 'utf8')
 const workspaceVideoCss = readFileSync(new URL('./workspace-video.css', import.meta.url), 'utf8')
 const frontendNginxConf = readFileSync(new URL('../../../nginx.conf', import.meta.url), 'utf8')
@@ -660,7 +666,9 @@ describe('workspace model', () => {
   it('requires login before home workspace model-backed actions', () => {
     expect(workspaceSource).toContain('function requireAuthForModelAction(): boolean')
     expect(workspaceSource).not.toContain("message.info('请先登录后再使用 AI 生成功能')")
-    expect(workspaceSource).toContain("function openSuiteBatch() {\n  trackSuiteEvent('suite_batch_click', 'click', 'batch_suite')\n  if (requireAuthForModelAction()) return")
+    expect(workspaceSource).toMatch(
+      /function openSuiteBatch\(\)\s*\{\s*trackSuiteEvent\('suite_batch_click', 'click', 'batch_suite'\)\s*if \(requireAuthForModelAction\(\)\) return/,
+    )
     expect(workspaceSource).toContain('@require-auth="requireAuthForModelAction"')
     expect(workspaceSource).toContain('<APlusPhasePanel v-if="phase===\'aplus\'" ref="aplusPanel" @open-pricing="openPricing" @require-auth="requireAuthForModelAction" />')
     expect(workspaceSource).toContain('<VideoPhasePanel v-if="phase===\'video\'" ref="videoPanel" @require-auth="requireAuthForModelAction" />')
@@ -673,7 +681,7 @@ describe('workspace model', () => {
     expect(aplusPanelSource).toContain('@require-auth="emit(\'require-auth\')"')
     expect(videoPanelSource).toContain("const emit = defineEmits<{ 'require-auth': [] }>()")
     expect(batchModalSource).toContain("'require-auth': []")
-    expect(batchModalSource).toContain("emit('update:open', false)\n  emit('require-auth')")
+    expect(batchModalSource).toMatch(/emit\('update:open', false\)\s*emit\('require-auth'\)/)
 
     expect((workspaceSource.match(/if \(requireAuthForModelAction\(\)\) return/g) ?? []).length).toBeGreaterThanOrEqual(8)
     expect((aplusPanelSource.match(/if \(requireAuthForModelAction\(\)\) return/g) ?? []).length).toBeGreaterThanOrEqual(7)
@@ -1022,8 +1030,12 @@ describe('workspace model', () => {
     expect(aplusPanelSource).toContain('<ImageTextEditPanel')
     expect(workspaceSource).toContain(':dirty="textEditDirty"')
     expect(aplusPanelSource).toContain(':dirty="textEditDirty"')
-    expect(workspaceSource).toContain("watch(() => job.value?.id, () => {\n  closeTextEdit()\n})")
-    expect(aplusPanelSource).toContain("watch(() => generationJob.value?.id, () => {\n  closeTextEdit()\n})")
+    expect(workspaceSource).toMatch(
+      /watch\(\(\) => job\.value\?\.id, \(\) => \{\s*closeTextEdit\(\)\s*\}\)/,
+    )
+    expect(aplusPanelSource).toMatch(
+      /watch\(\(\) => generationJob\.value\?\.id, \(\) => \{\s*closeTextEdit\(\)\s*\}\)/,
+    )
     expect(workspaceSource).toContain("async function openHistoryJob(entry: HistoryEntry) {\n  closeTextEdit()")
     expect(aplusPanelSource).toContain("async function openHistoryJob(entry: AplusJob, options: { continuePlan?: boolean } = {}) {\n  closeTextEdit()")
     expect(workspaceSource).toContain("if (!anchor) {\n    closeTextEdit()\n    return\n  }")

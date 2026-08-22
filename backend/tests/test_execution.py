@@ -26,7 +26,7 @@ from backend.app.models import (
     Workflow,
 )
 from backend.app.schemas import ImageTextEditLine
-from backend.app.services.execution import parse_plan_with_one_repair, run_image_route, run_image_with_fallback
+from backend.app.services.execution import parse_plan_with_one_repair, run_image_route
 from backend.app.services import aplus_jobs, image_text_edit
 from backend.app.services import jobs as jobs_service
 from backend.app.services.jobs import _run_live_item, image_provider_route
@@ -81,24 +81,6 @@ def test_parse_plan_stops_after_failed_repair() -> None:
     assert calls == 1
 
 
-def test_image_generation_falls_back_from_nano_to_image2_once() -> None:
-    calls: list[str] = []
-
-    async def generate(provider_code: str) -> bytes:
-        calls.append(provider_code)
-        if provider_code == "yunwu-nano":
-            raise RuntimeError("nano temporary failure")
-        return b"image-bytes"
-
-    result, provider_code = asyncio.run(
-        run_image_with_fallback("yunwu-nano", "yunwu-image-2", generate)
-    )
-
-    assert result == b"image-bytes"
-    assert provider_code == "yunwu-image-2"
-    assert calls == ["yunwu-nano", "yunwu-image-2"]
-
-
 def test_image_route_errors_use_current_provider_display_name() -> None:
     async def generate(provider_code: str) -> bytes:
         raise RuntimeError(f"Provider {provider_code} 不可用")
@@ -146,7 +128,8 @@ def test_image_text_ocr_lines_are_sorted_and_prompt_is_rendered(tmp_path, monkey
     monkeypatch.setattr(image_text_edit, "_load_ocr_engine", lambda _settings=None: StubOcr())
     monkeypatch.setattr(image_text_edit, "_prepare_ocr_variants", lambda path, _settings=None: [(str(path), 1.0, False)])
 
-    lines = image_text_edit.detect_text_lines(image_path)
+    result = image_text_edit.detect_text_lines_with_status(image_path)
+    lines = result.lines
     assert [line.text for line in lines] == ["First", "Second"]
     assert lines[0].bbox.x == 20
 

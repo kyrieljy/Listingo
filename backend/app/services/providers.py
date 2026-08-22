@@ -558,7 +558,7 @@ def file_to_data_url(path: str) -> str:
 
 
 class ProviderClient:
-    def __init__(self, http_client: httpx.AsyncClient | None = None):
+    def __init__(self, http_client: httpx.AsyncClient | None = None) -> None:
         self._external_client = http_client
 
     async def call_llm(

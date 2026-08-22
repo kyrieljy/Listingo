@@ -352,7 +352,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('scroll', updateTextEditPanelPosition, true)
 })
 
-function requestDetail(error: any): string {
+function requestDetail(error: unknown): string {
   return userFacingApiErrorMessage(error)
 }
 
@@ -499,7 +499,7 @@ async function aiWrite() {
     aiSuggestion.value = result.selling_points
     aiSuggestionEditing.value = false
     aiWriteOpen.value = true
-  } catch (error: any) {
+  } catch (error: unknown) {
     message.error(requestDetail(error) || 'AI 转写失败，请检查语言模型配置')
   } finally {
     helping.value = false
@@ -906,7 +906,7 @@ async function generateImages() {
             ? 'A+ 图片任务已部分取消，已完成结果仍可使用'
             : finished.error || 'A+ 图片生成存在失败项',
     )
-  } catch (error: any) {
+  } catch (error: unknown) {
     if (generationJob.value?.id.startsWith('optimistic-aplus-generation-')) {
       const detail = requestDetail(error) || 'A+ 图片生成失败'
       generationJob.value = {
@@ -952,7 +952,7 @@ async function cancelGeneration() {
       planJob.value = preservePendingAplusItems(await cancelAplusPlanJob(activePlan.id), planJob.value)
     }
     message.success('已提交取消请求')
-  } catch (error: any) {
+  } catch (error: unknown) {
     message.error(requestDetail(error) || '取消任务失败')
   } finally {
     if (!planning.value && !generating.value) cancelling.value = false
@@ -975,7 +975,7 @@ async function retryFailedAplus() {
     message[finished.status === 'succeeded' ? 'success' : 'warning'](
       finished.status === 'succeeded' ? 'A+ 失败项已全部重新生成成功' : 'A+ 重试完成，仍有失败项',
     )
-  } catch (error: any) {
+  } catch (error: unknown) {
     const detail = requestDetail(error) || 'A+ 失败项重试失败'
     markAplusItemsFailed(failedIds, detail)
     message.error(detail)
@@ -998,7 +998,7 @@ async function retrySingleAplusItem(item: AplusItem) {
     message[refreshed?.status === 'succeeded' ? 'success' : 'warning'](
       refreshed?.status === 'succeeded' ? 'A+ 单图已重新生成' : 'A+ 单图重试完成，仍未成功',
     )
-  } catch (error: any) {
+  } catch (error: unknown) {
     const detail = requestDetail(error) || 'A+ 单图重试失败'
     markAplusItemsFailed([item.id], detail)
     message.error(detail)
@@ -1106,7 +1106,7 @@ async function openTextEdit(item: AplusItem) {
       : [emptyTextLine(0)]
     if (result.warning) message.warning(result.warning)
     else if (!result.lines.length) message.info('未识别到文字，可手动新增需要替换的文字行')
-  } catch (error: any) {
+  } catch (error: unknown) {
     message.error(requestDetail(error) || 'A+ 文字识别失败')
     textEditLines.value = [emptyTextLine(0)]
   } finally {
@@ -1149,7 +1149,7 @@ async function submitEdit() {
       if (editItemState.value && !editItemState.value.current_version_id) editItemState.value.current_version_id = version.id
     }
     message.success('A+ 已重新生成新版本')
-  } catch (error: any) {
+  } catch (error: unknown) {
     message.error(requestDetail(error) || 'A+ 二次编辑失败')
   } finally {
     editSubmitting.value = false
@@ -1175,7 +1175,7 @@ async function submitTextEdit() {
       if (textEditItem.value && !textEditItem.value.current_version_id) textEditItem.value.current_version_id = version.id
       message.success('A+ 文字已生成新版本')
       closeTextEdit()
-    } catch (error: any) {
+    } catch (error: unknown) {
       message.error(requestDetail(error) || 'A+ 文字编辑失败')
     } finally {
       textEditSubmitting.value = false
@@ -1190,7 +1190,7 @@ async function submitTextEdit() {
     if (textEditItem.value && !textEditItem.value.current_version_id) textEditItem.value.current_version_id = version.id
     message.success('A+ 文字已生成新版本')
     closeTextEdit()
-  } catch (error: any) {
+  } catch (error: unknown) {
     message.error(requestDetail(error) || 'A+ 文字编辑失败')
   } finally {
     textEditSubmitting.value = false

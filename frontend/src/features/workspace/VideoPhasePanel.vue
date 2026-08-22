@@ -13,6 +13,7 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons-vue'
 import {
+  apiErrorStatus,
   assistVideoCopywriting,
   cancelVideoJob,
   createVideoJob,
@@ -122,12 +123,12 @@ watch(() => form.value.platform, () => {
   }
 }, { immediate: true })
 
-function requestDetail(error: any): string {
+function requestDetail(error: unknown): string {
   return userFacingApiErrorMessage(error)
 }
-function handleRequestError(error: any, fallback: string) {
+function handleRequestError(error: unknown, fallback: string) {
   const detail = requestDetail(error) || fallback
-  if (error?.response?.status === 422 && detail.includes('安全拦截')) {
+  if (apiErrorStatus(error) === 422 && detail.includes('安全拦截')) {
     Modal.error({ title: '内容安全拦截', content: detail })
     return
   }
@@ -240,7 +241,7 @@ async function filesSelected(event: Event) {
   try {
     for (const file of files) assets.value.push(await uploadAsset(file))
     message.success('商品图上传成功')
-  } catch (error: any) {
+  } catch (error: unknown) {
     handleRequestError(error, '上传失败')
   } finally {
     uploading.value = false
@@ -255,7 +256,7 @@ async function useSample() {
     clearCopywritingState()
     assets.value = [demoAsset]
     message.success('已载入演示商品')
-  } catch (error: any) {
+  } catch (error: unknown) {
     handleRequestError(error, '载入演示商品失败')
   } finally {
     uploading.value = false
@@ -285,7 +286,7 @@ async function aiWrite() {
     aiSuggestion.value = result.selling_points
     aiSuggestionEditing.value = false
     aiWriteOpen.value = true
-  } catch (error: any) {
+  } catch (error: unknown) {
     handleRequestError(error, 'AI 转写失败')
   } finally {
     helping.value = false
@@ -341,7 +342,7 @@ async function generate() {
             ? '视频任务已部分取消，已完成结果仍可使用'
             : '部分视频生成失败，可查看原因或重试',
     )
-  } catch (error: any) {
+  } catch (error: unknown) {
     if (job.value?.id.startsWith('optimistic-video-')) job.value = null
     handleRequestError(error, '视频任务创建失败')
   } finally {
@@ -365,7 +366,7 @@ async function cancelGeneration() {
   try {
     job.value = await cancelVideoJob(job.value.id)
     message.success('已提交取消请求')
-  } catch (error: any) {
+  } catch (error: unknown) {
     handleRequestError(error, '取消视频任务失败')
   } finally {
     if (!generating.value) cancelling.value = false
@@ -380,7 +381,7 @@ async function retryFailed() {
     await retryFailedVideoItems(job.value.id)
     const finished = await waitForVideoJob(job.value.id)
     selected.value = finished.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
-  } catch (error: any) {
+  } catch (error: unknown) {
     handleRequestError(error, '视频重试失败')
   } finally {
     generating.value = false
@@ -421,7 +422,7 @@ async function submitVideoEdit() {
     editItemState.value = job.value.items.find((item) => item.id === editItemState.value?.id) ?? null
     if (editItemState.value && !editItemState.value.current_version_id) editItemState.value.current_version_id = version.id
     message.success('视频已生成新版本')
-  } catch (error: any) {
+  } catch (error: unknown) {
     handleRequestError(error, '视频二次编辑失败')
   } finally {
     editingVideo.value = false

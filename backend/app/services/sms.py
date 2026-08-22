@@ -6,7 +6,6 @@ import hmac
 import json
 import secrets
 from datetime import timedelta
-from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -16,10 +15,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.models import SmsConfig, SmsVerificationCode, utcnow
+from backend.app.security import ApiKeyCipher
+from backend.app.config import Settings
+from backend.app.core.rate_limit import client_ip
 
 
 SMS_PURPOSES = {"login", "register", "reset_password", "change_phone", "admin"}
-DEBUG_SMS_CODE = "246810"
 PHONE_COUNTRY_RULES = {
     "86": (11, 11),
     "852": (8, 8),
@@ -93,13 +94,6 @@ def load_sms_config(session: Session) -> SmsConfig:
     return config
 
 
-def client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",", 1)[0].strip()[:80]
-    return (request.client.host if request.client else "")[:80]
-
-
 def _purpose_template(config: SmsConfig, purpose: str) -> str:
     if purpose == "register":
         return config.register_template_code or config.login_template_code
@@ -153,7 +147,7 @@ def _assert_send_allowed(
         raise HTTPException(status_code=429, detail="该手机号今日验证码次数已达上限")
 
 
-def _percent_encode(value: Any) -> str:
+def _percent_encode(value: str | int) -> str:
     return quote(str(value), safe="")
 
 
@@ -171,6 +165,7 @@ async def send_aliyun_sms(
     sign_name: str,
     template_code: str,
     code: str,
+    timeout_seconds: float,
 ) -> str:
     params: dict[str, str] = {
         "AccessKeyId": access_key_id,
@@ -191,7 +186,7 @@ async def send_aliyun_sms(
     string_to_sign = "GET&%2F&" + _percent_encode(canonical)
     digest = hmac.new(f"{access_key_secret}&".encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha1).digest()
     params["Signature"] = base64.b64encode(digest).decode("ascii")
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         response = await client.get("https://dysmsapi.aliyuncs.com/", params=params)
         response.raise_for_status()
     body = response.json()
@@ -212,6 +207,7 @@ async def send_aliyun_pnvs_sms(
     code: str,
     valid_seconds: int,
     interval_seconds: int,
+    timeout_seconds: float,
 ) -> str:
     valid_minutes = max(1, (valid_seconds + 59) // 60)
     params: dict[str, str] = {
@@ -242,7 +238,7 @@ async def send_aliyun_pnvs_sms(
     string_to_sign = "GET&%2F&" + _percent_encode(canonical)
     digest = hmac.new(f"{access_key_secret}&".encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha1).digest()
     params["Signature"] = base64.b64encode(digest).decode("ascii")
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         response = await client.get("https://dypnsapi.aliyuncs.com/", params=params)
         response.raise_for_status()
     body = response.json()
@@ -260,18 +256,22 @@ async def send_sms_code(
     *,
     phone: str,
     purpose: str,
-    cipher,
+    cipher: ApiKeyCipher,
     bypass_rate_limit: bool = False,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     normalized_phone = normalize_phone(phone)
     country_code, local_phone = split_phone(normalized_phone)
     config = load_sms_config(session)
+    settings = request.app.state.settings
+    if not isinstance(settings, Settings):
+        settings = Settings()
     ip_address = client_ip(request)
     _assert_send_allowed(session, config, normalized_phone, purpose, ip_address, bypass_rate_limit=bypass_rate_limit)
     if not config.enabled and not config.debug_mode:
         raise HTTPException(status_code=503, detail="短信服务未启用，请联系管理员")
 
-    code = DEBUG_SMS_CODE if config.debug_mode else f"{secrets.randbelow(1_000_000):06d}"
+    configured_debug_code = settings.debug_sms_code.strip() if settings.debug_sms_code else ""
+    code = configured_debug_code if config.debug_mode and configured_debug_code else f"{secrets.randbelow(1_000_000):06d}"
     provider_message = "debug"
     if not config.debug_mode:
         template_code = _purpose_template(config, purpose)
@@ -301,6 +301,7 @@ async def send_sms_code(
                     code=code,
                     valid_seconds=config.code_ttl_seconds,
                     interval_seconds=config.cooldown_seconds,
+                    timeout_seconds=settings.sms_timeout_seconds,
                 )
             else:
                 provider_message = await send_aliyun_sms(
@@ -311,6 +312,7 @@ async def send_sms_code(
                     sign_name=config.sign_name,
                     template_code=template_code,
                     code=code,
+                    timeout_seconds=settings.sms_timeout_seconds,
                 )
         except (httpx.HTTPError, RuntimeError) as exc:
             raise HTTPException(status_code=502, detail=f"短信发送失败：{exc}") from exc

@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.database import get_session
+from backend.app.core.rate_limit import (
+    NONCE_TTL_SECONDS,
+    NonceStatus,
+    RateLimitResult,
+    client_ip,
+    rate_limit_headers,
+)
 from backend.app.models import LoginEvent, Notification, User, UserSession, utcnow
 from backend.app.schemas import (
     AuthMeOut,
@@ -59,6 +67,65 @@ from backend.app.services.subscriptions import (
 
 
 router = APIRouter(prefix="/api/v1", tags=["auth"])
+
+LOGIN_RATE_LIMIT = 20
+LOGIN_RATE_WINDOW_SECONDS = 60
+REQUEST_NONCE_HEADER = "X-Request-Nonce"
+
+
+def _consume_login_rate_limit(request: Request, response: Response) -> RateLimitResult:
+    result = request.app.state.rate_limiter.consume_rate_limit(
+        f"login:{client_ip(request)}",
+        LOGIN_RATE_LIMIT,
+        LOGIN_RATE_WINDOW_SECONDS,
+    )
+    for name, value in rate_limit_headers(result).items():
+        response.headers[name] = value
+    if not result.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="登录尝试过于频繁，请稍后再试",
+            headers=rate_limit_headers(result),
+        )
+    return result
+
+
+def _require_fresh_nonce(request: Request) -> None:
+    result = request.app.state.rate_limiter.consume_nonce(request.headers.get(REQUEST_NONCE_HEADER, ""))
+    if result.status is NonceStatus.ACCEPTED:
+        return
+    if result.status is NonceStatus.DUPLICATE:
+        raise HTTPException(
+            status_code=409,
+            detail="请求已提交，请勿重复操作",
+            headers={"Retry-After": str(result.expires_in_seconds or NONCE_TTL_SECONDS)},
+        )
+    if result.status is NonceStatus.CAPACITY_EXCEEDED:
+        raise HTTPException(status_code=429, detail="请求防重放容量已满，请稍后再试")
+    raise HTTPException(status_code=400, detail="请求缺少有效的一次性随机数")
+
+
+def _record_password_login_failure(
+    session: Session,
+    request: Request,
+    *,
+    user: User | None,
+    identifier: str,
+    message: str,
+) -> None:
+    blocked = request.app.state.rate_limiter.record_failure_and_block(client_ip(request))
+    record_login_event(
+        session,
+        request,
+        user=user,
+        phone=identifier,
+        method="password",
+        status="failed",
+        message=message,
+    )
+    session.commit()
+    if blocked:
+        raise HTTPException(status_code=403, detail="当前 IP 因异常登录行为已被暂时限制")
 
 
 def _avatar_initials(display_name: str) -> str:
@@ -114,7 +181,7 @@ def _create_user(session: Session, *, phone: str, username: str | None = None, p
 
 
 @router.post("/auth/sms/send", response_model=SmsSendOut)
-async def send_sms(payload: SmsSendCreate, request: Request, session: Session = Depends(get_session)):
+async def send_sms(payload: SmsSendCreate, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
     normalized_phone = normalize_phone(payload.phone)
     bypass_rate_limit = False
     if payload.purpose == "admin":
@@ -143,7 +210,7 @@ def login_with_sms(
     request: Request,
     response: Response,
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     purpose = "register" if payload.mode == "register" else "login"
     verify_sms_code(session, phone=payload.phone, purpose=purpose, code=payload.code)
     phone = normalize_phone(payload.phone)
@@ -166,7 +233,7 @@ def register(
     request: Request,
     response: Response,
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     verify_sms_code(session, phone=payload.phone, purpose="register", code=payload.code)
     user = _create_user(session, phone=payload.phone, username=payload.username, password=payload.password)
     issue_session(session, request, response, user)
@@ -181,19 +248,53 @@ def login_with_password(
     request: Request,
     response: Response,
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
+    ip_address = client_ip(request)
+    _consume_login_rate_limit(request, response)
+    # WARNING: process-memory blocks disappear after restart; a CAPTCHA is still needed
+    # before password login can withstand restart-window credential stuffing.
     user = find_user_by_identifier(session, payload.identifier)
     if not user or not verify_password(user.password_hash, payload.password):
-        record_login_event(session, request, user=user, phone=payload.identifier, method="password", status="failed", message="bad_credentials")
-        session.commit()
+        _record_password_login_failure(
+            session,
+            request,
+            user=user,
+            identifier=payload.identifier,
+            message="bad_credentials",
+        )
         raise HTTPException(status_code=401, detail="账号或密码不正确")
     if user.role == "admin":
         if not payload.admin_code:
+            _record_password_login_failure(
+                session,
+                request,
+                user=user,
+                identifier=payload.identifier,
+                message="admin_code_required",
+            )
             raise HTTPException(status_code=422, detail="管理员账号需要短信二次验证")
-        verify_sms_code(session, phone=user.phone, purpose="admin", code=payload.admin_code)
+        try:
+            verify_sms_code(session, phone=user.phone, purpose="admin", code=payload.admin_code)
+        except HTTPException:
+            _record_password_login_failure(
+                session,
+                request,
+                user=user,
+                identifier=payload.identifier,
+                message="admin_code_invalid",
+            )
+            raise
     if user.status != "active":
+        _record_password_login_failure(
+            session,
+            request,
+            user=user,
+            identifier=payload.identifier,
+            message="user_disabled",
+        )
         raise HTTPException(status_code=403, detail="账号已停用，请联系管理员")
     issue_session(session, request, response, user)
+    request.app.state.rate_limiter.clear_login_failures(ip_address)
     record_login_event(session, request, user=user, method="password", status="succeeded")
     session.commit()
     return {"user": public_user(user), "unread_count": unread_count(session, user)}
@@ -204,7 +305,7 @@ def set_first_password(
     payload: FirstPasswordCreate,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     if not current_user.first_password_pending and current_user.password_set:
         raise HTTPException(status_code=409, detail="登录密码已设置")
     current_user.password_hash = hash_password(payload.password)
@@ -222,26 +323,26 @@ def set_first_password(
 
 
 @router.post("/auth/logout")
-def logout(request: Request, response: Response, session: Session = Depends(get_session)):
+def logout(request: Request, response: Response, session: Session = Depends(get_session)) -> dict[str, Any]:
     token = request.cookies.get(SESSION_COOKIE)
     if token:
         auth_session = session.scalar(select(UserSession).where(UserSession.session_token_hash == hash_token(token)))
         if auth_session:
             auth_session.revoked_at = utcnow()
             session.commit()
-    clear_session_cookies(response)
+    clear_session_cookies(response, secure=request.app.state.settings.cookie_secure)
     return {"ok": True}
 
 
 @router.get("/auth/me", response_model=AuthMeOut)
-def me(current_user: User | None = Depends(get_optional_user), session: Session = Depends(get_session)):
+def me(current_user: User | None = Depends(get_optional_user), session: Session = Depends(get_session)) -> dict[str, Any]:
     if not current_user:
         return {"user": None, "unread_count": 0}
     return {"user": public_user(current_user), "unread_count": unread_count(session, current_user)}
 
 
 @router.patch("/account/profile", response_model=AuthMeOut)
-def update_profile(payload: ProfileUpdate, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def update_profile(payload: ProfileUpdate, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> dict[str, Any]:
     updates = payload.model_dump(exclude_unset=True)
     if "display_name" in updates and updates["display_name"] is not None:
         current_user.display_name = updates["display_name"].strip()
@@ -262,7 +363,7 @@ async def change_phone_start(
     request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     result = await send_sms_code(
         session,
         request,
@@ -279,7 +380,7 @@ def change_phone_confirm(
     payload: ChangePhoneConfirmCreate,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     new_phone = normalize_phone(payload.phone)
     existing = session.scalar(select(User).where(User.phone == new_phone, User.id != current_user.id).limit(1))
     if existing:
@@ -294,9 +395,11 @@ def change_phone_confirm(
 @router.post("/account/password", response_model=AuthMeOut)
 def change_password(
     payload: PasswordChangeCreate,
+    request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
+    _require_fresh_nonce(request)
     if current_user.password_set and not verify_password(current_user.password_hash, payload.current_password):
         raise HTTPException(status_code=401, detail="当前密码不正确")
     current_user.password_hash = hash_password(payload.next_password)
@@ -308,7 +411,7 @@ def change_password(
 
 
 @router.get("/account/login-events")
-def login_events(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def login_events(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     rows = session.scalars(
         select(LoginEvent).where(LoginEvent.user_id == current_user.id).order_by(LoginEvent.created_at.desc()).limit(20)
     ).all()
@@ -327,17 +430,17 @@ def login_events(current_user: User = Depends(get_current_user), session: Sessio
 
 
 @router.get("/subscription/plans", response_model=list[SubscriptionPlanOut])
-def subscription_plans(session: Session = Depends(get_session)):
+def subscription_plans(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     return list_subscription_plans(session, include_internal=False)
 
 
 @router.get("/subscription/me", response_model=QuotaSummaryOut)
-def subscription_me(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def subscription_me(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> dict[str, Any]:
     return current_quota_summary(session, current_user)
 
 
 @router.get("/quota/me", response_model=QuotaSummaryOut)
-def quota_me(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def quota_me(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> dict[str, Any]:
     return current_quota_summary(session, current_user)
 
 
@@ -346,7 +449,7 @@ def create_order(
     payload: PaymentOrderCreate,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     order = create_payment_order(session, current_user, plan_code=payload.plan_code, billing_cycle=payload.billing_cycle)
     session.commit()
     return serialize_order(session, order)
@@ -355,16 +458,18 @@ def create_order(
 @router.post("/subscription/orders/{order_id}/mock-pay", response_model=PaymentOrderOut)
 def mock_pay(
     order_id: str,
+    request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
+    _require_fresh_nonce(request)
     order = mock_pay_order(session, current_user, order_id)
     session.commit()
     return serialize_order(session, order)
 
 
 @router.get("/notifications", response_model=list[NotificationOut])
-def notifications(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def notifications(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     return list_user_notifications(session, current_user)
 
 
@@ -373,7 +478,7 @@ def read_notification(
     notification_id: str,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-):
+) -> dict[str, Any]:
     notification = session.get(Notification, notification_id)
     if not notification or notification.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="消息不存在")
@@ -383,7 +488,7 @@ def read_notification(
 
 
 @router.post("/notifications/read-all")
-def read_all_notifications(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def read_all_notifications(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> dict[str, Any]:
     notifications = session.scalars(select(Notification).where(Notification.user_id == current_user.id, Notification.unread.is_(True))).all()
     for notification in notifications:
         mark_notification_read(session, notification)

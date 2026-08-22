@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import or_, select
+from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.models import AplusItem, AplusJob, BatchItem, GenerationItem, GenerationJob, VideoItem, VideoJob, utcnow
@@ -11,6 +11,8 @@ ITEM_OPEN_STATUSES = {"queued", "running", "cancelling"}
 INTERRUPTED_ERROR = "Job was interrupted by service restart; retry failed items."
 CANCELLED_ERROR = "Job cancellation completed after service restart."
 MONITORING_FIXTURE_JOB_ID_PREFIX = "demo-monitor-"
+HistoryJobModel = type[GenerationJob] | type[AplusJob] | type[VideoJob]
+HistoryItemModel = type[GenerationItem] | type[AplusItem] | type[VideoItem]
 
 
 def _status_from_item_statuses(statuses: list[str]) -> str:
@@ -25,7 +27,7 @@ def _status_from_item_statuses(statuses: list[str]) -> str:
     return "failed"
 
 
-def _recover_job(job) -> bool:
+def _recover_job(job: GenerationJob | AplusJob | VideoJob) -> bool:
     if job.status not in OPEN_STATUSES:
         return False
 
@@ -98,7 +100,12 @@ def _recover_video_jobs(session: Session) -> int:
     return sum(1 for job in jobs if _recover_job(job))
 
 
-def _repair_empty_monitoring_fixture_jobs(session: Session, job_model, item_model, *extra_filters) -> int:
+def _repair_empty_monitoring_fixture_jobs(
+    session: Session,
+    job_model: HistoryJobModel,
+    item_model: HistoryItemModel,
+    *extra_filters: ColumnElement[bool],
+) -> int:
     has_items = select(item_model.id).where(item_model.job_id == job_model.id).exists()
     jobs = session.scalars(
         select(job_model).where(

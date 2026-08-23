@@ -92,12 +92,12 @@
 - Alembic 空库验证需同时执行 `upgrade head` 与 `downgrade base`，确保 schema revision 可逆；生产数据 downgrade 不作为回滚手段。
 
 ## 验收标准
-- [ ] 空 PostgreSQL UTF8 数据库 `upgrade head` 后，Alembic autogenerate 对 ORM metadata 无差异，表数为 31。
-- [ ] 当前 SQLite 备份能完整复制到测试 PostgreSQL；除报告列明的 2 条 `execution_log` 失效引用外，31 张表行数和规范化摘要一致。
-- [ ] 目标库所有外键检查通过，旧 `sms_verification_code` 不存在，`alembic_version` 等于新 head。
-- [ ] `backend/tests` 使用外部 PostgreSQL 临时测试库通过，测试结束清理临时库。
-- [ ] `docker compose config` 校验通过，backend 在外部 PostgreSQL 连接检查通过后启动，健康检查返回 ok。
-- [ ] 生产启动不再执行 `Base.metadata.create_all`，数据库缺失或版本落后时启动失败并给出明确错误。
+- [x] 空 PostgreSQL UTF8 数据库 `upgrade head` 后，Alembic autogenerate 对 ORM metadata 无差异，表数为 31。
+- [x] 当前 SQLite 备份能完整复制到测试 PostgreSQL；除报告列明的 2 条 `execution_log` 失效引用外，31 张表行数和规范化摘要一致。
+- [x] 目标库所有外键检查通过，旧 `sms_verification_code` 不存在，`alembic_version` 等于新 head。
+- [x] `backend/tests` 使用外部 PostgreSQL 临时测试库通过，测试结束清理临时库。
+- [FAIL] `docker compose config` 校验通过，backend 在外部 PostgreSQL 连接检查通过后启动，健康检查返回 ok。
+- [x] 生产启动不再执行 `Base.metadata.create_all`，数据库缺失或版本落后时启动失败并给出明确错误。
 
 ## Open Questions
 > 以下为待人工确认的问题。AI 不得自行猜测；必须回答后方可继续 coding。

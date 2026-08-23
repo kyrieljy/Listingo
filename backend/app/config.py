@@ -31,7 +31,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LISTINGO_", extra="ignore")
 
     data_dir: Path = PROJECT_ROOT / "data"
-    database_url: str | None = None
+    database_url: str = ""
+    database_pool_size: int = Field(default=5, ge=1)
+    database_max_overflow: int = Field(default=10, ge=0)
+    database_pool_recycle_seconds: int = Field(default=1800, ge=30)
     testing: bool = False
     global_dry_run: bool = True
     public_asset_base_url: str = ""
@@ -77,6 +80,17 @@ class Settings(BaseSettings):
         selected_env_file = _settings_env_file() if isinstance(_env_file, _EnvFileUnset) else _env_file
         super().__init__(_env_file=selected_env_file, **values)
 
+    @field_validator("database_url")
+    @classmethod
+    def _validate_database_url(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"postgresql", "postgresql+psycopg2"} or not parsed.netloc or not parsed.path.strip("/"):
+            raise ValueError(
+                "LISTINGO_DATABASE_URL must be a postgresql:// or postgresql+psycopg2:// URL "
+                "with a host and database name"
+            )
+        return value
+
     @field_validator("redis_url")
     @classmethod
     def _validate_redis_url(cls, value: str) -> str:
@@ -99,9 +113,8 @@ class Settings(BaseSettings):
 
     @property
     def resolved_database_url(self) -> str:
-        if self.database_url:
-            return self.database_url
-        return f"sqlite:///{(self.data_dir / 'listingo.sqlite3').as_posix()}"
+        # SQLAlchemy 2.0 selects psycopg2 as the default synchronous PostgreSQL driver.
+        return self.database_url.replace("postgresql+psycopg2://", "postgresql://", 1)
 
     @property
     def uploads_dir(self) -> Path:

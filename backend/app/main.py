@@ -2,12 +2,15 @@ from contextlib import asynccontextmanager
 import asyncio
 import logging
 import os
+from pathlib import Path
 from time import monotonic
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
@@ -16,7 +19,6 @@ from backend.app.core.rate_limit import SINGLE_PROCESS_WARNING, create_rate_limi
 from backend.app.core.storage.base import RateLimitStorage, StorageUnavailableError
 from backend.app.database import build_engine, build_session_factory
 from backend.app.middleware.ip_block import IPBlockMiddleware
-from backend.app.models import Base
 from backend.app.seed import seed_database
 from backend.app.security import ApiKeyCipher
 from backend.app.api.auth import router as auth_router
@@ -27,6 +29,7 @@ from backend.app.services.workspace_recovery import recover_interrupted_workspac
 
 
 logger = logging.getLogger(__name__)
+ALEMBIC_CONFIG_PATH = Path(__file__).resolve().parents[2] / "backend" / "alembic.ini"
 
 
 def _validate_single_worker(settings: Settings) -> None:
@@ -61,38 +64,22 @@ async def _wait_for_storage(storage: RateLimitStorage, timeout_seconds: float) -
     raise RuntimeError(f"Redis is unavailable after {timeout_seconds:g}s") from last_error
 
 
-def ensure_runtime_schema(engine: Engine) -> None:
-    if engine.dialect.name != "sqlite":
-        return
+def ensure_database_ready(engine: Engine) -> None:
+    if engine.dialect.name != "postgresql":
+        raise RuntimeError("Listingo requires PostgreSQL; configure LISTINGO_DATABASE_URL")
+
     with engine.begin() as connection:
         inspector = inspect(connection)
-        for table_name in ("generation_job", "video_job", "aplus_job"):
-            if not inspector.has_table(table_name):
-                continue
-            columns = {column["name"] for column in inspector.get_columns(table_name)}
-            if "user_id" not in columns:
-                connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN user_id VARCHAR(36)"))
-                connection.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table_name}_user_id ON {table_name} (user_id)"))
-            if "is_admin_test" not in columns:
-                connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN is_admin_test BOOLEAN NOT NULL DEFAULT 0"))
-        for table_name in ("asset", "batch_job"):
-            if not inspector.has_table(table_name):
-                continue
-            columns = {column["name"] for column in inspector.get_columns(table_name)}
-            if "user_id" not in columns:
-                connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN user_id VARCHAR(36)"))
-                connection.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table_name}_user_id ON {table_name} (user_id)"))
-        if inspector.has_table("execution_log"):
-            columns = {column["name"] for column in inspector.get_columns("execution_log")}
-            if "dry_run" not in columns:
-                connection.execute(text("ALTER TABLE execution_log ADD COLUMN dry_run BOOLEAN NOT NULL DEFAULT 1"))
-        for table_name in ("generation_item", "aplus_item"):
-            if not inspector.has_table(table_name):
-                continue
-            columns = {column["name"] for column in inspector.get_columns(table_name)}
-            if "provider_task_id" not in columns:
-                connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN provider_task_id VARCHAR(160)"))
-                connection.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table_name}_provider_task_id ON {table_name} (provider_task_id)"))
+        if not inspector.has_table("alembic_version"):
+            raise RuntimeError("Database schema is not initialized; run Alembic upgrade head first")
+        version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
+
+    script = ScriptDirectory.from_config(Config(str(ALEMBIC_CONFIG_PATH)))
+    heads = script.get_heads()
+    if len(heads) != 1:
+        raise RuntimeError(f"Alembic has multiple heads: {', '.join(heads)}")
+    if version != heads[0]:
+        raise RuntimeError(f"Database schema is {version!r}; run Alembic upgrade head to reach {heads[0]!r}")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -113,8 +100,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 logger.warning("\033[1;31m%s\033[0m", SINGLE_PROCESS_WARNING)
             if not resolved.testing:
                 rate_limiter.start()
-            Base.metadata.create_all(engine)
-            ensure_runtime_schema(engine)
+            ensure_database_ready(engine)
             with session_factory() as session:
                 seed_database(session)
                 repair_monitoring_fixture_history(session)

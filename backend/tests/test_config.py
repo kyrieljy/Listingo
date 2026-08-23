@@ -34,6 +34,7 @@ def test_settings_selects_env_file_from_environment(tmp_path: Path, monkeypatch)
     env_file.write_text(
         "\n".join(
             [
+                "LISTINGO_DATABASE_URL=postgresql://postgres:secret@localhost:5432/listingo",
                 "LISTINGO_CORS_ORIGINS=https://api.example.com, https://console.example.com",
                 "LISTINGO_DEBUG_SMS_CODE=135790",
                 "LISTINGO_SMS_TIMEOUT_SECONDS=17.5",
@@ -66,7 +67,9 @@ def test_default_and_production_env_files_keep_expected_modes(monkeypatch) -> No
 
 
 def test_settings_validate_and_normalize_redis_configuration() -> None:
+    database_url = "postgresql://postgres:secret@localhost:5432/listingo"
     settings = Settings(
+        database_url=database_url,
         redis_url="rediss://default:secret@redis.example.com:6380/2",
         redis_key_prefix=" Listingo_prod ",
         _env_file=None,
@@ -77,16 +80,34 @@ def test_settings_validate_and_normalize_redis_configuration() -> None:
     assert settings.redis_key_prefix == "Listingo_prod"
 
     with pytest.raises(ValidationError, match="LISTINGO_REDIS_URL"):
-        Settings(redis_url="mysql://redis.invalid:6379/0", _env_file=None)
+        Settings(database_url=database_url, redis_url="mysql://redis.invalid:6379/0", _env_file=None)
 
     with pytest.raises(ValidationError, match="LISTINGO_REDIS_KEY_PREFIX"):
-        Settings(redis_key_prefix="bad prefix", _env_file=None)
+        Settings(database_url=database_url, redis_key_prefix="bad prefix", _env_file=None)
 
 
-def test_cors_middleware_uses_settings_origins(tmp_path: Path) -> None:
+def test_settings_require_postgresql_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LISTINGO_DATABASE_URL", raising=False)
+    with pytest.raises(ValidationError, match="LISTINGO_DATABASE_URL"):
+        Settings(_env_file=None)
+
+    with pytest.raises(ValidationError, match="LISTINGO_DATABASE_URL"):
+        Settings(database_url="sqlite:///data/listingo.sqlite3", _env_file=None)
+
+    settings = Settings(
+        database_url="postgresql+psycopg2://postgres:secret@localhost:5432/listingo",
+        _env_file=None,
+    )
+    assert settings.resolved_database_url == "postgresql://postgres:secret@localhost:5432/listingo"
+
+
+def test_cors_middleware_uses_settings_origins(
+    tmp_path: Path,
+    postgres_database_url: str,
+) -> None:
     settings = Settings(
         data_dir=tmp_path / "data",
-        database_url=f"sqlite:///{(tmp_path / 'data' / 'test.sqlite3').as_posix()}",
+        database_url=postgres_database_url,
         cors_origins="https://console.example.com",
         storage_backend="memory",
         _env_file=None,
@@ -104,6 +125,7 @@ def test_cors_middleware_uses_settings_origins(tmp_path: Path) -> None:
 
 def test_issue_session_uses_configured_ttl_and_secure_cookie() -> None:
     settings = Settings(
+        database_url="postgresql://postgres:secret@localhost:5432/listingo",
         session_ttl_seconds=120,
         refresh_ttl_seconds=600,
         cookie_secure=True,

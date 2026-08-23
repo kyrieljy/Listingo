@@ -11,8 +11,22 @@ from backend.app.config import Settings
 
 
 def build_engine(settings: Settings) -> Engine:
-    connect_args = {"check_same_thread": False} if settings.resolved_database_url.startswith("sqlite") else {}
-    return create_engine(settings.resolved_database_url, connect_args=connect_args, future=True)
+    return create_engine(
+        settings.resolved_database_url,
+        connect_args={
+            "application_name": "listingo",
+            "connect_timeout": 10,
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        },
+        pool_pre_ping=True,
+        pool_recycle=settings.database_pool_recycle_seconds,
+        pool_size=settings.database_pool_size,
+        max_overflow=settings.database_max_overflow,
+        future=True,
+    )
 
 
 def build_session_factory(engine: Engine) -> sessionmaker[Session]:

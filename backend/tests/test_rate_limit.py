@@ -23,10 +23,10 @@ from backend.app.core.storage.base import StorageUnavailableError
 from backend.app.main import create_app
 
 
-def make_settings(tmp_path: Path) -> Settings:
+def make_settings(tmp_path: Path, database_url: str) -> Settings:
     return Settings(
         data_dir=tmp_path / "data",
-        database_url=f"sqlite:///{(tmp_path / 'data' / 'test.sqlite3').as_posix()}",
+        database_url=database_url,
         testing=True,
         storage_backend="memory",
         _env_file=None,
@@ -37,7 +37,7 @@ def app_client(settings: Settings) -> TestClient:
     return TestClient(create_app(settings))
 
 
-def redis_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def redis_app(tmp_path: Path, database_url: str, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     fake_redis = FakeRedis(decode_responses=True)
 
     def fake_factory(**_kwargs: object) -> RedisStorage:
@@ -50,7 +50,7 @@ def redis_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(rate_limit_module, "RedisStorage", fake_factory)
     settings = Settings(
         data_dir=tmp_path / "data",
-        database_url=f"sqlite:///{(tmp_path / 'data' / 'test.sqlite3').as_posix()}",
+        database_url=database_url,
         testing=True,
         storage_backend="redis",
         redis_startup_timeout_seconds=0.5,
@@ -183,9 +183,10 @@ def test_five_password_failures_block_subsequent_requests(client: TestClient) ->
 
 def test_redis_backend_preserves_generation_nonce_and_block_behavior(
     tmp_path: Path,
+    postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with redis_app(tmp_path, monkeypatch) as client:
+    with redis_app(tmp_path, postgres_database_url, monkeypatch) as client:
         suite_payload = {
             "asset_ids": ["missing-asset"],
             "platform": "Amazon",
@@ -248,8 +249,8 @@ def test_sensitive_endpoints_require_and_reject_nonce(client: TestClient) -> Non
     assert duplicate.status_code == 409
 
 
-def test_full_nonce_capacity_returns_429(tmp_path: Path) -> None:
-    settings = make_settings(tmp_path)
+def test_full_nonce_capacity_returns_429(tmp_path: Path, postgres_database_url: str) -> None:
+    settings = make_settings(tmp_path, postgres_database_url)
     settings.rate_limit_max_size = 1
     with app_client(settings) as client:
         first = client.post(
@@ -267,8 +268,12 @@ def test_full_nonce_capacity_returns_429(tmp_path: Path) -> None:
         assert second.status_code == 429
 
 
-def test_web_concurrency_above_one_fails_outside_testing(monkeypatch, tmp_path: Path) -> None:
-    settings = make_settings(tmp_path)
+def test_web_concurrency_above_one_fails_outside_testing(
+    monkeypatch,
+    tmp_path: Path,
+    postgres_database_url: str,
+) -> None:
+    settings = make_settings(tmp_path, postgres_database_url)
     settings.testing = False
     monkeypatch.setenv("WEB_CONCURRENCY", "2")
 
@@ -276,15 +281,20 @@ def test_web_concurrency_above_one_fails_outside_testing(monkeypatch, tmp_path: 
         create_app(settings)
 
 
-def test_redis_backend_allows_multiple_workers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_redis_backend_allows_multiple_workers(
+    tmp_path: Path,
+    postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("WEB_CONCURRENCY", "4")
 
-    with redis_app(tmp_path, monkeypatch) as client:
+    with redis_app(tmp_path, postgres_database_url, monkeypatch) as client:
         assert client.get("/api/v1/health").status_code == 200
 
 
 def test_redis_startup_failure_does_not_fallback_to_memory(
     tmp_path: Path,
+    postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_redis = FakeRedis(decode_responses=True)
@@ -301,7 +311,7 @@ def test_redis_startup_failure_does_not_fallback_to_memory(
     monkeypatch.setattr(rate_limit_module, "RedisStorage", lambda **_kwargs: failing_storage)
     settings = Settings(
         data_dir=tmp_path / "data",
-        database_url=f"sqlite:///{(tmp_path / 'data' / 'test.sqlite3').as_posix()}",
+        database_url=postgres_database_url,
         testing=False,
         storage_backend="redis",
         redis_startup_timeout_seconds=0.5,
@@ -324,22 +334,27 @@ def test_storage_unavailable_returns_503(client: TestClient, monkeypatch: pytest
     assert response.status_code == 503
 
 
-def test_non_testing_lifespan_starts_and_stops_cleanup(caplog, tmp_path: Path) -> None:
-    settings = make_settings(tmp_path)
+def test_non_testing_lifespan_starts_memory_cleanup(
+    tmp_path: Path,
+    postgres_database_url: str,
+) -> None:
+    settings = make_settings(tmp_path, postgres_database_url)
     settings.testing = False
     app = create_app(settings)
-    with caplog.at_level("WARNING", logger="backend.app.main"):
-        with TestClient(app) as client:
-            storage = client.app.state.rate_limiter.storage
-            thread = storage._cleanup_thread
-            assert thread is not None and thread.is_alive()
-            assert "WARNING: Rate limiting is running in MEMORY mode." in caplog.text
+    with TestClient(app) as client:
+        storage = client.app.state.rate_limiter.storage
+        thread = storage._cleanup_thread
+        assert thread is not None and thread.is_alive()
+        assert isinstance(storage, MemoryStorage)
 
+        storage.close()
+        thread.join(timeout=1)
+        assert storage._stop_event.is_set()
         assert thread is not None and not thread.is_alive()
 
 
-def test_rate_limiter_uses_configured_capacity(tmp_path: Path) -> None:
-    settings = make_settings(tmp_path)
+def test_rate_limiter_uses_configured_capacity(tmp_path: Path, postgres_database_url: str) -> None:
+    settings = make_settings(tmp_path, postgres_database_url)
     settings.rate_limit_max_size = 2
     limiter = create_rate_limiter(settings)
 

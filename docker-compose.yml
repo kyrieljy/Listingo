@@ -3,13 +3,19 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    env_file:
+      - ${LISTINGO_ENV_FILE:-.env.local}
     volumes:
       - ./data:/app/data
     environment:
-      LISTINGO_DATABASE_URL: sqlite:////app/data/listingo.sqlite3
+      LISTINGO_DATABASE_URL: ${LISTINGO_DATABASE_URL:?LISTINGO_DATABASE_URL must point to the external PostgreSQL database}
       LISTINGO_DATA_DIR: /app/data
+      LISTINGO_REDIS_URL: ${LISTINGO_REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      redis:
+        condition: service_healthy
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${LISTINGO_PORT:-8000}:${LISTINGO_PORT:-8000}"
     restart: unless-stopped
 
   frontend:
@@ -18,7 +24,27 @@ services:
       dockerfile: Dockerfile
     depends_on:
       - backend
+    environment:
+      LISTINGO_PORT: ${LISTINGO_PORT:-8000}
     ports:
       - "127.0.0.1:5173:80"
     restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  redis-data:
 

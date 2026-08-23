@@ -25,6 +25,7 @@ from backend.app.models import (
     utcnow,
 )
 from backend.app.services.provider_routing import provider_config
+from backend.app.services.metrics import realtime_metrics
 from backend.app.services.redaction import safe_json
 from backend.app.core.rate_limit import client_ip
 
@@ -129,6 +130,15 @@ METRIC_DEFINITIONS = {
         "denominator": "无",
         "unit": "个",
         "notes": "用于判断积压和卡住的任务。",
+    },
+    "realtime_events": {
+        "label": "今日实时事件",
+        "formula": "Redis 当日埋点事件计数",
+        "source": "analytics_event + redis daily counters",
+        "numerator": "当日新增埋点事件",
+        "denominator": "无",
+        "unit": "次",
+        "notes": "PostgreSQL 保留完整审计事实；Redis 计数用于实时展示，异常时回退为 0。",
     },
     "provider_health": {
         "label": "中转站健康",
@@ -312,9 +322,11 @@ def build_ops_monitoring(
     p95 = _p95(durations)
     critical_providers = sum(1 for row in provider_rows if row["tone"] == "danger")
     warning_providers = sum(1 for row in provider_rows if row["tone"] == "warning")
+    realtime = realtime_metrics(session)
 
     return {
         "window": _window_dict(start_at, end_at, granularity),
+        "realtime_metrics": realtime,
         "metric_definitions": _metric_definitions(
             [
                 "total_calls",
@@ -323,6 +335,7 @@ def build_ops_monitoring(
                 "p95_latency",
                 "timeout_rate",
                 "queue",
+                "realtime_events",
                 "provider_health",
             ]
         ),
@@ -381,6 +394,15 @@ def build_ops_monitoring(
                 "numeric": open_count,
                 "tone": "danger" if open_count >= 20 else "warning" if open_count >= 8 else "good",
                 "helper": "queued / running / cancelling",
+            },
+            {
+                "key": "realtime_events",
+                "definition_key": "realtime_events",
+                "label": "今日实时事件",
+                "value": str(realtime["total"]),
+                "numeric": realtime["total"],
+                "tone": "neutral",
+                "helper": f"{realtime['date']} 埋点计数",
             },
             {
                 "key": "provider_health",
@@ -456,6 +478,7 @@ def build_business_metrics(
     ).all()
     jobs = _business_job_records(session, start_at, end_at)
     users_by_id = {user.id: user for user in users}
+    realtime = realtime_metrics(session)
 
     active_users = {
         value
@@ -490,6 +513,7 @@ def build_business_metrics(
     top_feature_ctr = max((row["ctr"] for row in feature_rows), default=0)
     return {
         "window": _window_dict(start_at, end_at, granularity),
+        "realtime_metrics": realtime,
         "metric_definitions": _metric_definitions(
             [
                 "active_users",

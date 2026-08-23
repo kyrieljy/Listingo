@@ -16,6 +16,7 @@ from backend.app.core.rate_limit import (
     client_ip,
     rate_limit_headers,
 )
+from backend.app.core.storage.keys import session_cache_key
 from backend.app.models import LoginEvent, Notification, User, UserSession, utcnow
 from backend.app.schemas import (
     AuthMeOut,
@@ -330,6 +331,9 @@ def logout(request: Request, response: Response, session: Session = Depends(get_
         if auth_session:
             auth_session.revoked_at = utcnow()
             session.commit()
+            runtime = getattr(request.app.state, "runtime_state", None)
+            if runtime is not None:
+                runtime.delete_best_effort(session_cache_key(hash_token(token)))
     clear_session_cookies(response, secure=request.app.state.settings.cookie_secure)
     return {"ok": True}
 

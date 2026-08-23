@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import shutil
 import tempfile
@@ -12,26 +13,30 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.config import Settings
+from backend.app.core.runtime import RuntimeStateService, default_runtime
+from backend.app.core.storage.keys import cache_key
 from backend.app.models import (
     AplusItem,
     AplusVersion,
     ExecutionLog,
     GenerationItem,
     GenerationVersion,
-    Prompt,
     PromptVersion,
-    Provider,
 )
 from backend.app.schemas import ImageTextEditLine, ImageTextLineOut
 from backend.app.security import ApiKeyCipher
 from backend.app.services.content_safety import ensure_content_safe, run_local_text_safety_review
 from backend.app.services.execution import run_image_route
 from backend.app.services.provider_limiter import provider_slot
-from backend.app.services.provider_routing import provider_display_names_by_code, route_provider_codes
+from backend.app.services.provider_routing import (
+    cached_provider_by_code,
+    provider_display_names_by_code,
+    route_provider_codes,
+)
+from backend.app.services.runtime_cache import active_prompt_version_id
 from backend.app.services.providers import ProviderClient, provider_requires_public_urls, requested_image_size
 from backend.app.services.redaction import safe_json
 from backend.app.services.storage import public_file_url
@@ -590,6 +595,61 @@ def _dedupe_ocr_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return parsed
 
 
+def _ocr_cache_key(path: Path, settings: Settings, language_hint: str | None) -> str:
+    stat = path.stat()
+    identity = {
+        "path": str(path.resolve()),
+        "mtime_ns": stat.st_mtime_ns,
+        "size": stat.st_size,
+        "language": language_hint or "",
+        "engine": settings.ocr_engine,
+        "primary_model": settings.ocr_primary_model,
+        "fallback_model": settings.ocr_fallback_model,
+        "device": settings.ocr_device,
+        "text_score": settings.ocr_text_score_threshold,
+        "box_score": settings.ocr_box_score_threshold,
+        "short_text_score": settings.ocr_short_text_score_threshold,
+        "min_width": settings.ocr_min_box_width,
+        "min_height": settings.ocr_min_box_height,
+        "min_area": settings.ocr_min_box_area,
+        "filter_isolated_cjk": settings.ocr_filter_isolated_cjk,
+        "filter_watermark": settings.ocr_filter_watermark_text,
+        "enhanced_variants": settings.ocr_use_enhanced_variants,
+    }
+    fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return cache_key("ocr-result", fingerprint)
+
+
+def _cached_ocr_result(key: str, runtime: RuntimeStateService | None) -> OcrDetectionResult | None:
+    if runtime is None:
+        return None
+    cached = runtime.get_json_best_effort(key)
+    if not isinstance(cached, dict) or not isinstance(cached.get("lines"), list):
+        return None
+    try:
+        return OcrDetectionResult(
+            lines=[ImageTextLineOut.model_validate(line) for line in cached["lines"]],
+            warning=None,
+        )
+    except ValueError:
+        runtime.delete_best_effort(key)
+        return None
+
+
+def _store_ocr_result(
+    key: str,
+    result: OcrDetectionResult,
+    runtime: RuntimeStateService | None,
+) -> None:
+    if runtime is None or result.warning is not None:
+        return
+    runtime.set_json_best_effort(
+        key,
+        {"lines": [line.model_dump() for line in result.lines]},
+        runtime.ttls.ocr,
+    )
+
+
 def detect_text_lines_with_status(
     image_path: str | Path,
     settings: Settings | None = None,
@@ -599,6 +659,11 @@ def detect_text_lines_with_status(
     if not path.exists():
         raise ValueError("Current image file does not exist")
     resolved = settings or Settings()
+    runtime = default_runtime()
+    result_cache_key = _ocr_cache_key(path, resolved, language_hint)
+    cached_result = _cached_ocr_result(result_cache_key, runtime)
+    if cached_result is not None:
+        return cached_result
     engine = _load_ocr_engine(resolved)
     if engine is None:
         return OcrDetectionResult(lines=[], warning=_LAST_OCR_ERROR or "OCR engine unavailable")
@@ -622,10 +687,12 @@ def detect_text_lines_with_status(
             Path(temp_path).unlink(missing_ok=True)
     parsed = _dedupe_ocr_rows(rows)
     warning = getattr(engine, "warning", None) or _LAST_OCR_WARNING
-    return OcrDetectionResult(lines=[
+    result = OcrDetectionResult(lines=[
         ImageTextLineOut(id=f"line-{index + 1:03d}", index=index, text=item["text"], confidence=item["confidence"], bbox=item["bbox"])
         for index, item in enumerate(parsed)
     ], warning=warning)
+    _store_ocr_result(result_cache_key, result, runtime)
+    return result
 
 def changed_text_lines(lines: list[ImageTextEditLine]) -> list[ImageTextEditLine]:
     changed: list[ImageTextEditLine] = []
@@ -662,11 +729,12 @@ def render_text_edit_prompt(template: str, lines: list[ImageTextEditLine], conte
     return prompt
 
 
-def _active_text_edit_prompt(session: Session) -> Prompt:
-    prompt = session.scalar(select(Prompt).where(Prompt.code == IMAGE_TEXT_EDIT_PROMPT_CODE))
-    if not prompt or not prompt.active_version_id:
+def _active_text_edit_prompt(session: Session) -> PromptVersion:
+    version_id = active_prompt_version_id(session, IMAGE_TEXT_EDIT_PROMPT_CODE)
+    prompt_version = session.get(PromptVersion, version_id)
+    if not prompt_version:
         raise RuntimeError("Image text edit Prompt is not enabled")
-    return prompt
+    return prompt_version
 
 
 def create_dryrun_generation_text_version(
@@ -744,8 +812,7 @@ async def _run_live_text_edit(
     cipher: ApiKeyCipher,
 ) -> tuple[bytes, str, str, list[ImageTextEditLine]]:
     changed = changed_text_lines(lines)
-    prompt = _active_text_edit_prompt(session)
-    prompt_version = session.get(PromptVersion, prompt.active_version_id)
+    prompt_version = _active_text_edit_prompt(session)
     if not prompt_version:
         raise RuntimeError("Image text edit Prompt active version does not exist")
     edit_prompt = render_text_edit_prompt(
@@ -760,7 +827,7 @@ async def _run_live_text_edit(
     input_paths = [current_file_path]
 
     async def generate(provider_code: str) -> bytes:
-        provider = session.scalar(select(Provider).where(Provider.code == provider_code))
+        provider = cached_provider_by_code(session, provider_code)
         if not provider or not provider.encrypted_api_key:
             raise RuntimeError(f"Provider {provider_code} is unavailable")
         input_urls = (
@@ -835,7 +902,7 @@ async def create_live_generation_text_version(
     session.add(version)
     session.flush()
     item.current_version_id = version.id
-    provider = session.scalar(select(Provider).where(Provider.code == used_code))
+    provider = cached_provider_by_code(session, used_code)
     item.provider_id = provider.id if provider else item.provider_id
     session.add(
         ExecutionLog(
@@ -904,7 +971,7 @@ async def create_live_aplus_text_version(
     session.add(version)
     session.flush()
     item.current_version_id = version.id
-    provider = session.scalar(select(Provider).where(Provider.code == used_code))
+    provider = cached_provider_by_code(session, used_code)
     item.provider_id = provider.id if provider else item.provider_id
     session.add(
         ExecutionLog(

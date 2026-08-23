@@ -61,6 +61,7 @@ from backend.app.services.notifications import create_notification
 from backend.app.services.provider_routing import (
     PROVIDER_ROUTE_DEFINITIONS,
     VALID_PROVIDER_ROUTE_ROLES,
+    invalidate_provider_cache,
     normalize_route_roles,
     provider_display_name,
     provider_config,
@@ -89,6 +90,11 @@ from backend.app.services.prompt_testing import (
     run_aplus_full_chain_prompt_test,
 )
 from backend.app.services.video_jobs import run_video_job
+from backend.app.services.runtime_cache import (
+    invalidate_prompt_cache,
+    invalidate_subscription_cache,
+    invalidate_workflow_cache,
+)
 from backend.app.services.sms import load_sms_config, send_sms_code
 from backend.app.services.subscriptions import (
     list_subscription_plans,
@@ -461,6 +467,7 @@ def update_provider_route_chain(
         config["route_roles"] = roles
         write_provider_config(provider, config)
     session.commit()
+    invalidate_provider_cache()
     return {"route_key": route_key, "provider_codes": provider_codes[: len(ROUTE_SLOT_ORDER)]}
 
 
@@ -612,6 +619,7 @@ def update_provider(
     apply_provider_parameter_values(config, parameter_values)
     provider.config_json = json.dumps(provider_admin_config(provider, config), ensure_ascii=False)
     session.commit()
+    invalidate_provider_cache()
     session.refresh(provider)
     return provider_dict(provider, request)
 
@@ -636,6 +644,7 @@ async def test_provider(provider_id: str, request: Request, session: Session = D
         }
         write_provider_config(provider, provider_admin_config(provider, config))
         session.commit()
+        invalidate_provider_cache()
         return ProviderTestOut(
             ok=bool(result.get("ok")),
             status=str(result.get("status") or "unknown"),  # type: ignore[arg-type]
@@ -744,6 +753,7 @@ async def health_check_provider_group(group_key: str, request: Request, session:
             }
         )
     session.commit()
+    invalidate_provider_cache()
     return {"group_key": group_key, "results": results}
 
 
@@ -797,6 +807,7 @@ def update_subscription_plan(plan_id: str, payload: AdminPlanUpdate, session: Se
     if updates.get("features") is not None:
         plan.features_json = json.dumps(updates["features"], ensure_ascii=False)
     session.commit()
+    invalidate_subscription_cache()
     return serialize_plan(session, plan, include_internal=True)
 
 
@@ -810,6 +821,7 @@ def update_quota_rule(rule_id: str, payload: AdminQuotaRuleUpdate, session: Sess
         if key in updates:
             setattr(rule, key, updates[key])
     session.commit()
+    invalidate_subscription_cache()
     return serialize_quota_rule(rule)
 
 
@@ -1005,6 +1017,7 @@ def activate_prompt_version(prompt_id: str, version_id: str, session: Session = 
         raise HTTPException(status_code=404, detail="提示词或版本不存在")
     prompt.active_version_id = version.id
     session.commit()
+    invalidate_prompt_cache()
     return {"id": prompt.id, "active_version_id": prompt.active_version_id}
 
 
@@ -1162,6 +1175,7 @@ def activate_workflow_version(workflow_id: str, version_id: str, session: Sessio
         raise HTTPException(status_code=422, detail={"message": "Workflow 校验失败", "errors": errors})
     workflow.active_version_id = version.id
     session.commit()
+    invalidate_workflow_cache()
     return {"id": workflow.id, "active_version_id": workflow.active_version_id}
 
 

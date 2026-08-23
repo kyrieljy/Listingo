@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from uuid import uuid4
 from datetime import timedelta
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
+from backend.app.core.runtime import RuntimeStateService, default_runtime
+from backend.app.core.storage.base import StorageUnavailableError
+from backend.app.core.storage.keys import lock_key
 from backend.app.models import (
     PaymentOrder,
     PlanPrice,
@@ -20,6 +24,47 @@ from backend.app.models import (
     utcnow,
 )
 from backend.app.services.notifications import create_notification
+from backend.app.services.runtime_cache import cached_subscription_payload
+
+
+logger = logging.getLogger(__name__)
+
+
+class RuntimeLockBusyError(RuntimeError):
+    """Raised when another request owns a correctness lock."""
+
+
+def _release_session_locks(session: Session, *_transaction_args: object) -> None:
+    locks = session.info.pop("_listingo_runtime_locks", [])
+    for key, token, service in locks:
+        try:
+            service.release_lock(key, token)
+        except StorageUnavailableError:
+            logger.warning("Runtime lock release failed; TTL will reclaim it", exc_info=True)
+
+
+event.listen(Session, "after_commit", _release_session_locks)
+event.listen(Session, "after_soft_rollback", _release_session_locks)
+
+
+def _lock_for_session(
+    session: Session,
+    scope: str,
+    identifier: str,
+    runtime: RuntimeStateService | None = None,
+) -> None:
+    """Bind a token lock to the DB transaction so it survives until commit."""
+    service = runtime or default_runtime()
+    if service is None:
+        return
+    key = lock_key(scope, identifier)
+    locks = session.info.setdefault("_listingo_runtime_locks", [])
+    if any(existing_key == key for existing_key, _, _ in locks):
+        return
+    token = service.acquire_lock(key, service.ttls.lock)
+    if token is None:
+        raise RuntimeLockBusyError(f"Operation is already in progress: {scope}")
+    locks.append((key, token, service))
 
 
 QUOTA_ACTIONS = [
@@ -227,36 +272,39 @@ def user_plan(session: Session, user: User) -> SubscriptionPlan:
 
 
 def serialize_plan(session: Session, plan: SubscriptionPlan, *, include_internal: bool = False) -> dict[str, Any]:
-    prices = session.scalars(select(PlanPrice).where(PlanPrice.plan_id == plan.id).order_by(PlanPrice.sort_order)).all()
-    rules = session.scalars(select(PlanQuotaRule).where(PlanQuotaRule.plan_id == plan.id).order_by(PlanQuotaRule.action_key)).all()
-    return {
-        "id": plan.id,
-        "code": plan.code,
-        "name": plan.name,
-        "description": plan.description,
-        "badge": plan.badge,
-        "cta": plan.cta,
-        "enabled": plan.enabled,
-        "visible": plan.visible,
-        "is_internal": plan.is_internal,
-        "is_enterprise": plan.is_enterprise,
-        "features": _json_list(plan.features_json),
-        "contact_text": plan.contact_text,
-        "contact_phone": plan.contact_phone,
-        "prices": [
-            {
-                "id": price.id,
-                "billing_cycle": price.billing_cycle,
-                "amount_cents": price.amount_cents,
-                "currency": price.currency,
-                "price_label": price.price_label,
-                "period_label": price.period_label,
-            }
-            for price in prices
-        ],
-        "quota_rules": [serialize_quota_rule(rule) for rule in rules],
-        "sort_order": plan.sort_order,
-    }
+    def produce() -> dict[str, Any]:
+        prices = session.scalars(select(PlanPrice).where(PlanPrice.plan_id == plan.id).order_by(PlanPrice.sort_order)).all()
+        rules = session.scalars(select(PlanQuotaRule).where(PlanQuotaRule.plan_id == plan.id).order_by(PlanQuotaRule.action_key)).all()
+        return {
+            "id": plan.id,
+            "code": plan.code,
+            "name": plan.name,
+            "description": plan.description,
+            "badge": plan.badge,
+            "cta": plan.cta,
+            "enabled": plan.enabled,
+            "visible": plan.visible,
+            "is_internal": plan.is_internal,
+            "is_enterprise": plan.is_enterprise,
+            "features": _json_list(plan.features_json),
+            "contact_text": plan.contact_text,
+            "contact_phone": plan.contact_phone,
+            "prices": [
+                {
+                    "id": price.id,
+                    "billing_cycle": price.billing_cycle,
+                    "amount_cents": price.amount_cents,
+                    "currency": price.currency,
+                    "price_label": price.price_label,
+                    "period_label": price.period_label,
+                }
+                for price in prices
+            ],
+            "quota_rules": [serialize_quota_rule(rule) for rule in rules],
+            "sort_order": plan.sort_order,
+        }
+
+    return cached_subscription_payload(f"plan:{plan.id}", produce)
 
 
 def serialize_quota_rule(rule: PlanQuotaRule) -> dict[str, Any]:
@@ -298,16 +346,23 @@ def quota_used(session: Session, user_id: str, action_key: str, period: str | No
 
 def current_quota_summary(session: Session, user: User) -> dict[str, Any]:
     plan = user_plan(session, user)
-    rules = session.scalars(select(PlanQuotaRule).where(PlanQuotaRule.plan_id == plan.id, PlanQuotaRule.enabled.is_(True))).all()
+    conditions = [PlanQuotaRule.plan_id == plan.id, PlanQuotaRule.enabled.is_(True)]
+
+    def produce_rules() -> list[dict[str, Any]]:
+        rules = session.scalars(select(PlanQuotaRule).where(*conditions).order_by(PlanQuotaRule.action_key)).all()
+        return [serialize_quota_rule(rule) for rule in rules]
+
+    rules = cached_subscription_payload(f"rules:{plan.id}:enabled", produce_rules)
     period = quota_period()
     rows = []
     for rule in rules:
-        used = 0 if rule.monthly_limit is None else quota_used(session, user.id, rule.action_key, period)
+        monthly_limit = rule["monthly_limit"]
+        used = 0 if monthly_limit is None else quota_used(session, user.id, rule["action_key"], period)
         rows.append(
             {
-                **serialize_quota_rule(rule),
+                **rule,
                 "used": used,
-                "remaining": None if rule.monthly_limit is None else max(0, rule.monthly_limit - used),
+                "remaining": None if monthly_limit is None else max(0, monthly_limit - used),
                 "period": period,
             }
         )
@@ -326,26 +381,35 @@ def reserve_quota(
 ) -> QuotaLedger | None:
     if amount <= 0:
         return None
+    period = quota_period()
+    try:
+        _lock_for_session(session, "quota", f"{user.id}:{action_key}:{period}")
+    except RuntimeLockBusyError as exc:
+        raise HTTPException(status_code=409, detail="额度操作正在处理中，请稍后重试") from exc
     plan = user_plan(session, user)
     if plan.is_internal:
         return None
-    rule = session.scalar(
-        select(PlanQuotaRule).where(
-            PlanQuotaRule.plan_id == plan.id,
-            PlanQuotaRule.action_key == action_key,
-            PlanQuotaRule.enabled.is_(True),
+
+    def produce_rule() -> dict[str, Any] | None:
+        rule = session.scalar(
+            select(PlanQuotaRule).where(
+                PlanQuotaRule.plan_id == plan.id,
+                PlanQuotaRule.action_key == action_key,
+                PlanQuotaRule.enabled.is_(True),
+            ).limit(1)
         )
-    )
+        return serialize_quota_rule(rule) if rule else None
+
+    rule = cached_subscription_payload(f"rule:{plan.id}:{action_key}", produce_rule)
     if not rule:
         raise HTTPException(status_code=402, detail="当前套餐未开放该能力")
-    cost = amount * max(1, rule.cost_multiplier)
-    period = quota_period()
-    if rule.monthly_limit is not None:
+    cost = amount * max(1, rule["cost_multiplier"])
+    if rule["monthly_limit"] is not None:
         used = quota_used(session, user.id, action_key, period)
-        if used + cost > rule.monthly_limit:
+        if used + cost > rule["monthly_limit"]:
             raise HTTPException(
                 status_code=402,
-                detail=f"{rule.action_label}额度不足：剩余 {max(0, rule.monthly_limit - used)} {rule.unit}",
+                detail=f"{rule['action_label']}额度不足：剩余 {max(0, rule['monthly_limit'] - used)} {rule['unit']}",
             )
     ledger = QuotaLedger(
         user_id=user.id,
@@ -359,15 +423,15 @@ def reserve_quota(
     )
     session.add(ledger)
     session.flush()
-    if rule.monthly_limit is not None:
+    if rule["monthly_limit"] is not None:
         used_after = quota_used(session, user.id, action_key, period)
-        threshold = max(0, min(100, rule.warning_threshold))
-        if rule.monthly_limit > 0 and used_after * 100 >= rule.monthly_limit * threshold:
+        threshold = max(0, min(100, rule["warning_threshold"]))
+        if rule["monthly_limit"] > 0 and used_after * 100 >= rule["monthly_limit"] * threshold:
             create_notification(
                 session,
                 user.id,
                 title="额度告急提醒",
-                body=f"{rule.action_label} 本月额度已使用 {used_after}/{rule.monthly_limit} {rule.unit}，请及时调整套餐或联系管理员。",
+                body=f"{rule['action_label']} 本月额度已使用 {used_after}/{rule['monthly_limit']} {rule['unit']}，请及时调整套餐或联系管理员。",
                 category="quota",
                 metadata={"action_key": action_key, "period": period},
             )
@@ -399,6 +463,10 @@ def _price_for_cycle(session: Session, plan: SubscriptionPlan, billing_cycle: st
 
 
 def create_payment_order(session: Session, user: User, *, plan_code: str, billing_cycle: str) -> PaymentOrder:
+    try:
+        _lock_for_session(session, "order-create", user.id)
+    except RuntimeLockBusyError as exc:
+        raise HTTPException(status_code=409, detail="订单正在创建中，请稍后重试") from exc
     plan = plan_by_code(session, plan_code)
     if not plan or not plan.enabled or plan.is_internal:
         raise HTTPException(status_code=404, detail="套餐不存在")
@@ -434,6 +502,15 @@ def mock_pay_order(session: Session, user: User, order_id: str) -> PaymentOrder:
     order = session.get(PaymentOrder, order_id)
     if not order or order.user_id != user.id:
         raise HTTPException(status_code=404, detail="订单不存在")
+    # Preserve paid-order idempotency before taking a payment lock: a request
+    # racing the successful payer must return the committed result, not 409.
+    if order.status == "paid":
+        return order
+    try:
+        _lock_for_session(session, "order-pay", order_id)
+    except RuntimeLockBusyError as exc:
+        raise HTTPException(status_code=409, detail="订单支付正在处理中，请稍后重试") from exc
+    session.refresh(order)
     if order.status == "paid":
         return order
     plan = session.get(SubscriptionPlan, order.plan_id)

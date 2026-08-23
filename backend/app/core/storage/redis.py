@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from redis import Redis as RedisClient
+from redis.connection import ConnectionPool
 from redis.exceptions import RedisError, WatchError
 
 from backend.app.core.storage.base import (
@@ -23,17 +24,31 @@ class RedisStorage(RateLimitStorage):
         key_prefix: str = "listingo",
         connect_timeout_seconds: float = 2.0,
         socket_timeout_seconds: float = 2.0,
+        max_connections: int = 50,
+        health_check_interval_seconds: int = 30,
         client: RedisClient | None = None,
     ) -> None:
         if not key_prefix or any(char.isspace() for char in key_prefix):
             raise ValueError("Redis key prefix must not be empty or contain whitespace")
+        if max_connections < 1:
+            raise ValueError("Redis max_connections must be at least 1")
+        if health_check_interval_seconds < 0:
+            raise ValueError("Redis health_check_interval_seconds must not be negative")
         self._prefix = key_prefix
-        self._client = client or RedisClient.from_url(
-            url,
-            decode_responses=True,
-            socket_connect_timeout=connect_timeout_seconds,
-            socket_timeout=socket_timeout_seconds,
-        )
+        if client is not None:
+            # 测试或外部注入的客户端（如 FakeRedis）直接复用，跳过连接池构建。
+            self._client = client
+        else:
+            # 显式构建连接池，固定上限与空闲健康检查，避免连接无限增长与僵死连接。
+            pool = ConnectionPool.from_url(
+                url,
+                decode_responses=True,
+                socket_connect_timeout=connect_timeout_seconds,
+                socket_timeout=socket_timeout_seconds,
+                max_connections=max_connections,
+                health_check_interval=health_check_interval_seconds,
+            )
+            self._client = RedisClient(connection_pool=pool)
 
     @property
     def client(self) -> RedisClient:

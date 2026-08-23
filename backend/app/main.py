@@ -16,6 +16,12 @@ from sqlalchemy.engine import Engine
 
 from backend.app.config import Settings
 from backend.app.core.rate_limit import SINGLE_PROCESS_WARNING, create_rate_limiter
+from backend.app.core.runtime import (
+    RuntimeStateService,
+    RuntimeTTLs,
+    configure_default_runtime,
+    reset_default_runtime,
+)
 from backend.app.core.storage.base import RateLimitStorage, StorageUnavailableError
 from backend.app.database import build_engine, build_session_factory
 from backend.app.middleware.ip_block import IPBlockMiddleware
@@ -25,6 +31,12 @@ from backend.app.api.auth import router as auth_router
 from backend.app.api.public import router as public_router
 from backend.app.api.admin import router as admin_router
 from backend.app.services.batch_scheduler import BatchScheduler
+from backend.app.services.provider_routing import invalidate_provider_cache
+from backend.app.services.runtime_cache import (
+    invalidate_prompt_cache,
+    invalidate_subscription_cache,
+    invalidate_workflow_cache,
+)
 from backend.app.services.workspace_recovery import recover_interrupted_workspace_jobs, repair_monitoring_fixture_history
 
 
@@ -87,6 +99,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _validate_single_worker(resolved)
     resolved.ensure_directories()
     rate_limiter = create_rate_limiter(resolved)
+    runtime_state = RuntimeStateService(
+        rate_limiter.storage,
+        ttls=RuntimeTTLs(
+            cache=resolved.redis_cache_ttl_seconds,
+            cache_version=resolved.redis_cache_version_ttl_seconds,
+            session=resolved.redis_session_cache_ttl_seconds,
+            batch_status=resolved.redis_batch_status_ttl_seconds,
+            lock=resolved.redis_lock_ttl_seconds,
+            metric=resolved.redis_metric_ttl_seconds,
+            ocr=resolved.redis_ocr_cache_ttl_seconds,
+        ),
+    )
     engine = build_engine(resolved)
     session_factory = build_session_factory(engine)
 
@@ -105,7 +129,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 seed_database(session)
                 repair_monitoring_fixture_history(session)
                 recover_interrupted_workspace_jobs(session)
-            scheduler = BatchScheduler(session_factory, resolved, application.state.cipher)
+            invalidate_provider_cache(runtime_state)
+            invalidate_prompt_cache(runtime_state)
+            invalidate_workflow_cache(runtime_state)
+            invalidate_subscription_cache(runtime_state)
+            scheduler = BatchScheduler(
+                session_factory,
+                resolved,
+                application.state.cipher,
+                runtime_state=application.state.runtime_state,
+            )
             application.state.batch_scheduler = scheduler
             if not resolved.testing:
                 await scheduler.start()
@@ -113,6 +146,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             if not resolved.testing and "scheduler" in locals():
                 await scheduler.stop()
+            reset_default_runtime(runtime_state)
             try:
                 rate_limiter.close()
             except StorageUnavailableError:
@@ -125,6 +159,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.session_factory = session_factory
     application.state.cipher = ApiKeyCipher(resolved.secret_key_path)
     application.state.rate_limiter = rate_limiter
+    application.state.runtime_state = runtime_state
+    configure_default_runtime(runtime_state)
     @application.exception_handler(StorageUnavailableError)
     async def storage_unavailable_handler(_: Request, __: StorageUnavailableError) -> JSONResponse:
         return JSONResponse(status_code=503, content={"detail": "防护存储暂不可用，请稍后再试"})

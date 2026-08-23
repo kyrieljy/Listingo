@@ -47,3 +47,10 @@
 - 为 RapidOCR 构造补充 `det_model_path=None`，兼容当前已安装 1.2.x 在传入 `det_*` 参数时必须存在 `model_path` 键的行为。
 - 保留已配置的 `text_score` 与 `det_box_thresh`，新增构造参数单测和真实 RapidOCR 预热回归。
 - 管理端 OCR 预热恢复成功；专项测试、全量后端测试与 `pip check` 均通过。
+
+### 008-redis-usage-optimization — 2026-08-23
+
+- 优化现有安全态 Redis 使用（不引入新场景，维持 fail-closed 503 降级）：`config.py` 新增 7 项 `LISTINGO_REDIS_*` 配置（nonce_ttl / login_fail_window / login_block / sms_daily_window / sms_max_attempts / max_connections / health_check_interval）。
+- 新增 `core/storage/keys.py` 集中键构造器（rate/nonce/login_*/sms:*），消除散落 f-string 字面量；`rate_limit.py` 与 `sms.py` 的 TTL/阈值改读 Settings，DB `SmsConfig` 仍 per-phone 覆盖优先。
+- `redis.py` 支持显式 `max_connections` / `health_check_interval` 连接池配置；`docker-compose.yml` redis 新增 `--maxmemory-policy volatile-lru`（AOF 沿用）。
+- 新增 `docs/REDIS_KEYS.md` 键清单/命名规范并纳入 `CONTEXT_SUMMARY` 索引；新增 7 项单测 + 受影响既有 43 项全绿，无回归。

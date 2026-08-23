@@ -45,6 +45,23 @@ class Settings(BaseSettings):
     redis_connect_timeout_seconds: float = Field(default=2.0, ge=0.1)
     redis_socket_timeout_seconds: float = Field(default=2.0, ge=0.1)
     redis_startup_timeout_seconds: float = Field(default=5.0, ge=0.5)
+    # 安全态 Redis 的差异化 TTL / 阈值（运维可调，无需改代码）。
+    redis_nonce_ttl_seconds: int = Field(default=60, ge=1)
+    redis_login_fail_window_seconds: int = Field(default=60, ge=1)
+    redis_login_block_seconds: int = Field(default=1800, ge=1)
+    redis_sms_daily_window_seconds: int = Field(default=24 * 60 * 60, ge=1)
+    redis_sms_max_attempts: int = Field(default=5, ge=1)
+    # 连接池调优：上限与空闲健康检查间隔。
+    redis_max_connections: int = Field(default=50, ge=1)
+    redis_health_check_interval_seconds: int = Field(default=30, ge=0)
+    # Redis 派生态 TTL：热点缓存 / 会话元数据 / 批量状态 / 锁 / 实时计数 / OCR 结果。
+    redis_cache_ttl_seconds: int = Field(default=300, ge=1)
+    redis_cache_version_ttl_seconds: int = Field(default=7 * 24 * 60 * 60, ge=60)
+    redis_session_cache_ttl_seconds: int = Field(default=300, ge=1)
+    redis_batch_status_ttl_seconds: int = Field(default=3, ge=1)
+    redis_lock_ttl_seconds: int = Field(default=30, ge=1)
+    redis_metric_ttl_seconds: int = Field(default=2 * 24 * 60 * 60, ge=1)
+    redis_ocr_cache_ttl_seconds: int = Field(default=3600, ge=1)
     rate_limit_max_size: int = Field(default=10_000, ge=1)
     rate_limit_cleanup_interval_seconds: int = Field(default=30, ge=1)
     max_upload_bytes: int = 15 * 1024 * 1024

@@ -26,6 +26,7 @@ SINGLE_PROCESS_WARNING = (
 class _MemoryEntry:
     value: str
     expires_at: float | None
+    evictable: bool = True
 
 
 @dataclass
@@ -127,10 +128,14 @@ class MemoryStorage(RateLimitStorage):
         self._remove_expired_locked()
         if key in self._items or len(self._items) < self._max_size:
             return True
-        if not allow_eviction:
-            return False
-        self._items.popitem(last=False)
-        return True
+        # Correctness keys (nonce, locks) opt out of LRU; only derived-state
+        # entries may surrender their slot. The new entry still records whether
+        # it can be evicted by a later derived-state write.
+        for candidate, entry in self._items.items():
+            if entry.evictable:
+                del self._items[candidate]
+                return True
+        return False
 
     def incr(self, key: str, ttl: int) -> IncrementResult:
         self._ttl(ttl)
@@ -166,7 +171,7 @@ class MemoryStorage(RateLimitStorage):
             if not self._make_room(key, allow_eviction=allow_eviction):
                 return WriteResult(success=False)
             expires_at = self._clock() + ttl
-            self._items[key] = _MemoryEntry(value=value, expires_at=expires_at)
+            self._items[key] = _MemoryEntry(value=value, expires_at=expires_at, evictable=allow_eviction)
             return WriteResult(success=True, expires_in_seconds=self._entry_ttl(self._items[key]))
 
     def get(self, key: str) -> StorageItem | None:
@@ -207,7 +212,7 @@ class MemoryStorage(RateLimitStorage):
                 return WriteResult(success=False)
             if self._live_entry(key) is not None:
                 return WriteResult(success=False)
-            self._items[key] = _MemoryEntry(value=value, expires_at=self._clock() + ttl)
+            self._items[key] = _MemoryEntry(value=value, expires_at=self._clock() + ttl, evictable=allow_eviction)
             return WriteResult(success=True, expires_in_seconds=self._entry_ttl(self._items[key]))
 
     def _reserve_sliding_window_locked(

@@ -19,6 +19,7 @@
 | `开发计划.md` | 现行 | 四期实施计划、已交付阶段、运行原则、验收范围 |
 | `design-qa.md` | 现行 | 设计 QA 验收标准 |
 | `docs/CONTEXT_SUMMARY.md` | **本文件** | 语义索引（模块 → 职责 → 路径） |
+| `docs/REDIS_KEYS.md` | 现行 | Redis 键命名规范与清单（安全态临时键） |
 | `SPEC.md` | 已删除 | 原业务逻辑规格书（保留于 HEAD，不再作为工作树事实） |
 | `README.md` | 已删除 | 原项目说明（保留于 HEAD，不再作为工作树事实） |
 
@@ -33,6 +34,7 @@
 | 应用装配 | FastAPI 实例、 lifespan、挂载 `auth`/`public`/`admin` 三个路由 | `main.py` |
 | 配置 | 环境变量、运行时配置、并发/上传/OCR 参数 | `config.py` |
 | 限流防刷与临时安全状态 | Redis/Memory 存储适配器、固定窗口限流、Nonce 防重放、登录失败 IP 封禁、短信验证码哈希/尝试/冷却/滚动日限额 | `core/storage/`、`core/rate_limit.py`、`middleware/ip_block.py`、`services/sms.py` |
+| 运行时派生状态（RuntimeStateService） | 热点配置/激活版本/套餐规则缓存、会话元数据、批量状态快照、分布式锁与实时计数；包装 `RateLimitStorage` 提供 JSON 缓存/版本失效/锁/计数，应用级默认实例装配于 `app.state.runtime_state` | `core/runtime.py`、`services/runtime_cache.py`、`services/metrics.py` |
 | 数据库 | 同步 SQLAlchemy + psycopg2 PostgreSQL 引擎、连接池、会话、Base | `database.py` |
 | 数据模型 | 全部 ORM 表（见 §4） | `models.py` |
 | 请求/响应契约 | Pydantic Schema | `schemas.py` |
@@ -114,8 +116,10 @@
 | 日期 | 变更 | 来源 |
 |---|---|---|
 | 2026-08-22 | 建立 `docs/CONTEXT_SUMMARY.md` 语义索引（响应 `/doc-update`）；确认 `SPEC.md`/`README.md` 保持删除，权威文档收敛为 `TASKS.md`/`TECH_STACK.md`/`开发计划.md` | doc-update |
+| 2026-08-23 | `changes/009-redis-scenario-expansion`：落地 `redis-analysis.md` 第二节六类 Redis 场景——热点缓存（Provider/Prompt/Workflow/套餐/规则）、任务状态缓存、会话缓存、分布式锁（批量认领/额度预留/订单创建/模拟支付）、实时计数与 OCR 结果缓存；新增 `core/runtime.py`（`RuntimeStateService`）、`services/runtime_cache.py`、`services/metrics.py`，`keys.py` 扩展 cache/session/batch/lock/metric 构造器，`config.py` 新增 7 项 TTL 配置，`main.py` 装配 `app.state.runtime_state`；约束演进为「PostgreSQL 事实 + Redis 派生态」，缓存/计数 fail-open、锁 fail-closed | changes |
 | 2026-08-23 | `changes/006-redis-rate-limit-verification`：新增 Compose Redis、`LISTINGO_REDIS_URL`、Redis 存储适配器；限流/Nonce/封禁与短信验证码临时状态迁往 Redis，删除 SQLite `sms_verification_code` 表 | changes |
 | 2026-08-23 | `changes/007-sqlite-to-postgresql-migration`：切换为外部 PostgreSQL-only 配置、Alembic schema 对齐、SQLite 数据迁移脚本、PostgreSQL 临时测试库与启动版本校验；SQLite 在迁移后弃用 | changes |
+| 2026-08-23 | `archive/008-redis-usage-optimization`：安全态 Redis 使用优化——7 项 `LISTINGO_REDIS_*` 配置可配置化、集中键构造器 `keys.py`、显式连接池（`max_connections`/`health_check_interval`）、`docker-compose` 增 `volatile-lru`、新增 `docs/REDIS_KEYS.md`；维持 fail-closed 503，未引入新场景 | archive |
 | 2026-08-22 | `archive/005-rapidocr-model-path-fix`：补充 RapidOCR `det_model_path=None` 兼容参数，管理端 OCR 预热与真实包回归恢复通过 | archive |
 | 2026-08-22 | `archive/004-memory-rate-limit`：新增进程内存限流防刷适配器、套图/视频共享限流、Nonce 防重放、登录失败 IP 封禁与 Nginx 客户端 IP 透传 | archive |
 | 2026-08-22 | `archive/001-report-driven-safe-optimizations`：后端目标链路补齐参数/返回类型，Workspace 请求错误收紧为 `unknown`，Provider 动态 JSON 具体类型化；拒绝 AsyncSession 全量迁移 | archive |

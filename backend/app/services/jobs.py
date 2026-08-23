@@ -40,7 +40,9 @@ from backend.app.services.prompt_contract import (
 )
 from backend.app.services.content_safety import ContentSafetyBlocked, ensure_content_safe, run_content_safety_review
 from backend.app.services.provider_routing import (
+    ProviderRecord,
     enabled_provider_for_route,
+    cached_provider_by_code,
     provider_config,
     provider_display_names_by_code,
     provider_is_route_eligible,
@@ -133,7 +135,7 @@ def generation_prompt_from_item(item: GenerationItem) -> str:
     )
 
 
-def provider_can_regenerate_for_route(provider: Provider | None, route_key: str) -> bool:
+def provider_can_regenerate_for_route(provider: ProviderRecord | None, route_key: str) -> bool:
     if not provider or not provider.enabled or not provider.encrypted_api_key:
         return False
     if provider_config(provider).get("hidden_legacy"):
@@ -432,14 +434,14 @@ async def run_generation_job(
     await _run_live_job(job_id, session_factory, settings, cipher)
 
 
-def _enabled_provider(session: Session, capability: str, relation: str) -> Provider:
+def _enabled_provider(session: Session, capability: str, relation: str) -> ProviderRecord:
     route_key = "llm" if capability == "llm" else "video" if capability == "video" else ""
     if route_key:
         try:
             provider_codes = route_provider_codes(session, route_key)
             provider_code = provider_codes[0] if relation == "default" or len(provider_codes) == 1 else provider_codes[1]
-            provider = session.scalar(select(Provider).where(Provider.code == provider_code, Provider.enabled.is_(True)))
-            if provider and provider.encrypted_api_key:
+            provider = cached_provider_by_code(session, provider_code)
+            if provider and provider.enabled and provider.encrypted_api_key:
                 return provider
         except RuntimeError:
             # Compatibility for tests and older databases that still only mark global default/fallback flags.
@@ -452,15 +454,13 @@ def _enabled_provider(session: Session, capability: str, relation: str) -> Provi
             Provider.enabled.is_(True),
         )
     )
-    if not provider or not provider.encrypted_api_key:
+    if not provider or not provider.enabled or not provider.encrypted_api_key:
         raise RuntimeError(f"{capability} {relation} Provider 未启用或缺少 API Key")
     return provider
 
 
-def _enabled_provider_by_code(session: Session, code: str) -> Provider:
-    provider = session.scalar(
-        select(Provider).where(Provider.code == code, Provider.enabled.is_(True))
-    )
+def _enabled_provider_by_code(session: Session, code: str) -> ProviderRecord:
+    provider = cached_provider_by_code(session, code)
     if not provider or not provider.encrypted_api_key:
         raise RuntimeError(f"图片 Provider {code} 未启用或缺少 API Key")
     return provider
@@ -468,15 +468,15 @@ def _enabled_provider_by_code(session: Session, code: str) -> Provider:
 
 async def _call_llm_with_fallback(
     client: ProviderClient,
-    default_provider: Provider,
-    fallback_provider: Provider,
+    default_provider: ProviderRecord,
+    fallback_provider: ProviderRecord,
     cipher: ApiKeyCipher,
     system_prompt: str,
     user_prompt: str,
     image_paths: list[str] | None = None,
     response_format: str | None = "json_object",
 ) -> tuple[str, Provider]:
-    providers: list[Provider] = []
+    providers: list[ProviderRecord] = []
     seen: set[str] = set()
     for provider in (default_provider, fallback_provider):
         if provider.code in seen:
@@ -958,7 +958,7 @@ async def _run_live_item(
             job = session.get(GenerationJob, item.job_id) if item else None
             if not item or not job or job.status in CANCEL_REQUESTED_STATUSES:
                 raise RuntimeError(USER_CANCELLED_ERROR)
-            provider = session.scalar(select(Provider).where(Provider.code == provider_code))
+            provider = cached_provider_by_code(session, provider_code)
             if not provider or not provider.encrypted_api_key:
                 raise RuntimeError(f"Provider {provider_code} 不可用")
             input_urls = (
@@ -1063,7 +1063,7 @@ async def _run_live_item(
             return
         with session_factory() as session:
             item = session.get(GenerationItem, item_id)
-            provider = session.scalar(select(Provider).where(Provider.code == used_code))
+            provider = cached_provider_by_code(session, used_code)
             version = GenerationVersion(
                 item_id=item.id,
                 version_no=1,
@@ -1178,8 +1178,8 @@ async def create_live_regenerated_child_version(
     settings: Settings,
     cipher: ApiKeyCipher,
     client: ProviderClient,
-    llm_default: Provider,
-    llm_fallback: Provider,
+    llm_default: ProviderRecord,
+    llm_fallback: ProviderRecord,
     safety_prompt: PromptVersion,
 ) -> GenerationVersion:
     aspect_ratio = str(params.get("aspect_ratio") or "1:1")
@@ -1189,7 +1189,7 @@ async def create_live_regenerated_child_version(
     prompt = generation_prompt_from_item(item)
 
     async def generate(provider_code: str) -> bytes:
-        provider = session.scalar(select(Provider).where(Provider.code == provider_code))
+        provider = cached_provider_by_code(session, provider_code)
         if not provider or not provider.encrypted_api_key:
             raise RuntimeError(f"Provider {provider_code} is unavailable")
         input_urls = (
@@ -1285,7 +1285,7 @@ async def create_live_regenerated_child_version(
     session.add(version)
     session.flush()
     item.current_version_id = version.id
-    provider = session.scalar(select(Provider).where(Provider.code == used_code))
+    provider = cached_provider_by_code(session, used_code)
     item.provider_id = provider.id if provider else item.provider_id
     session.add(
         ExecutionLog(
@@ -1380,7 +1380,7 @@ async def create_live_child_version(
     except Exception:
         prompt = rewritten
     async def generate(provider_code: str) -> bytes:
-        provider = session.scalar(select(Provider).where(Provider.code == provider_code))
+        provider = cached_provider_by_code(session, provider_code)
         if not provider or not provider.encrypted_api_key:
             raise RuntimeError(f"Provider {provider_code} 不可用")
         input_urls = (
@@ -1465,7 +1465,7 @@ async def create_live_child_version(
     session.add(version)
     session.flush()
     item.current_version_id = version.id
-    provider = session.scalar(select(Provider).where(Provider.code == used_code))
+    provider = cached_provider_by_code(session, used_code)
     item.provider_id = provider.id if provider else item.provider_id
     session.add(
         ExecutionLog(

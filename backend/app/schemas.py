@@ -574,6 +574,7 @@ class BatchItemOut(BaseModel):
 
 class BatchJobOut(BaseModel):
     id: str
+    user_id: str | None = None
     business_type: str
     status: str
     global_params: dict[str, Any]

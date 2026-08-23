@@ -98,8 +98,10 @@ from backend.app.services.image_text_edit import (
 )
 from backend.app.services.batch_jobs import (
     cancel_batch_job,
+    cached_batch_job_payload,
     create_batch_job_record,
     create_validation_fixture_batches,
+    invalidate_batch_status,
     load_batch_job,
     mark_validation_fixture_partial_failed,
     retry_failed_batch_job,
@@ -107,6 +109,7 @@ from backend.app.services.batch_jobs import (
     write_batch_selection_export,
     write_batch_zip,
 )
+from backend.app.services.metrics import increment_analytics_event_counters
 from backend.app.services.content_safety import (
     ContentSafetyBlocked,
     ensure_content_safe,
@@ -239,6 +242,7 @@ def create_analytics_event(
         user_id=current_user.id if current_user else None,
     )
     session.commit()
+    increment_analytics_event_counters(event, getattr(request.app.state, "runtime_state", None))
     return {"ok": True, "event": analytics_event_dict(event)}
 
 
@@ -478,6 +482,7 @@ async def create_batch_job(
         session.rollback()
         raise
     session.commit()
+    invalidate_batch_status(batch.id, getattr(request.app.state, "runtime_state", None))
     batch = load_batch_job(session, batch.id)
     if not settings.testing and hasattr(request.app.state, "batch_scheduler"):
         await request.app.state.batch_scheduler.tick(wait=False)
@@ -514,6 +519,8 @@ async def create_batch_validation_fixtures_endpoint(
         session.rollback()
         raise_task_creation_error(exc)
     session.commit()
+    for batch_id in batch_ids:
+        invalidate_batch_status(batch_id, getattr(request.app.state, "runtime_state", None))
 
     if hasattr(request.app.state, "batch_scheduler"):
         await request.app.state.batch_scheduler.tick(wait=True)
@@ -524,6 +531,7 @@ async def create_batch_validation_fixtures_endpoint(
         if partial:
             mark_validation_fixture_partial_failed(session, partial)
             session.commit()
+            invalidate_batch_status(partial.id, getattr(request.app.state, "runtime_state", None))
             session.expire_all()
 
     jobs = [load_batch_job(session, batch_id) for batch_id in batch_ids]
@@ -573,6 +581,7 @@ def download_batch_selection_results(
 @router.get("/batch-jobs/{batch_id}", response_model=BatchJobOut)
 def get_batch_job(
     batch_id: str,
+    request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
@@ -580,7 +589,7 @@ def get_batch_job(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch job does not exist")
     ensure_job_owner(current_user, batch)
-    return serialize_batch_job(session, batch)
+    return cached_batch_job_payload(session, batch, runtime=getattr(request.app.state, "runtime_state", None))
 
 
 @router.post("/batch-jobs/{batch_id}/cancel", response_model=BatchJobOut)

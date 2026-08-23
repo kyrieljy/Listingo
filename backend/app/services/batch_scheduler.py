@@ -7,6 +7,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker, selectinload
 
 from backend.app.config import Settings
+from backend.app.core.runtime import RuntimeStateService
+from backend.app.core.storage.keys import lock_key
 from backend.app.models import AplusJob, BatchItem, BatchJob, GenerationItem, GenerationJob, utcnow
 from backend.app.security import ApiKeyCipher
 from backend.app.services.aplus_jobs import (
@@ -19,6 +21,7 @@ from backend.app.services.batch_jobs import (
     FINAL_STATUSES,
     aggregate_batch_job,
     create_aplus_generation_for_batch_item,
+    invalidate_batch_status,
     sync_batch_item_from_children,
 )
 from backend.app.services.jobs import retry_failed_live_items, run_generation_job
@@ -32,11 +35,13 @@ class BatchScheduler:
         cipher: ApiKeyCipher,
         *,
         poll_interval_seconds: float = 2.0,
+        runtime_state: RuntimeStateService | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._cipher = cipher
         self._poll_interval_seconds = poll_interval_seconds
+        self._runtime_state = runtime_state
         self._loop_task: asyncio.Task[None] | None = None
         self._workers: set[asyncio.Task[None]] = set()
         self._stopping = asyncio.Event()
@@ -73,10 +78,22 @@ class BatchScheduler:
                             item.status = "queued"
                 aggregate_batch_job(session, batch)
             session.commit()
+            for batch in batches:
+                invalidate_batch_status(batch.id, self._runtime_state)
 
     async def tick(self, *, wait: bool = True) -> None:
         while True:
-            await self._claim_available()
+            claim_token: str | None = None
+            claim_lock = lock_key("batch-scheduler", "claim")
+            if self._runtime_state is not None:
+                claim_token = self._runtime_state.acquire_lock(claim_lock, self._runtime_state.ttls.lock)
+                if claim_token is None:
+                    return
+            try:
+                await self._claim_available()
+            finally:
+                if claim_token is not None:
+                    self._runtime_state.release_lock(claim_lock, claim_token)
             if not wait:
                 return
             if self._workers:
@@ -101,10 +118,15 @@ class BatchScheduler:
     async def _claim_available(self) -> None:
         with self._session_factory() as session:
             self._sync_open_batches(session)
+            open_batch_ids = session.scalars(
+                select(BatchJob.id).where(BatchJob.status.not_in(FINAL_STATUSES))
+            ).all()
             db_running = int(session.scalar(select(func.count()).select_from(BatchItem).where(BatchItem.status == "running")) or 0)
             capacity = max(0, self._settings.max_active_batch_items - db_running - len(self._workers))
             if capacity <= 0:
                 session.commit()
+                for batch_id in open_batch_ids:
+                    invalidate_batch_status(batch_id, self._runtime_state)
                 return
             items = session.scalars(
                 select(BatchItem)
@@ -125,6 +147,10 @@ class BatchScheduler:
                 batch.started_at = batch.started_at or utcnow()
                 item_ids.append(item.id)
             session.commit()
+            for batch_id in open_batch_ids:
+                invalidate_batch_status(batch_id, self._runtime_state)
+            for item in items:
+                invalidate_batch_status(item.batch_job_id, self._runtime_state)
 
         for item_id in item_ids:
             task = asyncio.create_task(self._run_item(item_id))
@@ -154,6 +180,7 @@ class BatchScheduler:
                     item.error = "Batch is cancelling"
                     item.completed_at = utcnow()
                     session.commit()
+                    invalidate_batch_status(batch.id if batch else item.batch_job_id, self._runtime_state)
                     return
                 business_type = batch.business_type
                 generation_job_id = item.generation_job_id
@@ -181,6 +208,7 @@ class BatchScheduler:
                 if batch:
                     aggregate_batch_job(session, batch)
                 session.commit()
+                invalidate_batch_status(batch.id if batch else item.batch_job_id, self._runtime_state)
         except Exception as exc:
             with self._session_factory() as session:
                 item = session.get(BatchItem, item_id)
@@ -194,6 +222,7 @@ class BatchScheduler:
                     if batch:
                         aggregate_batch_job(session, batch)
                     session.commit()
+                    invalidate_batch_status(batch.id if batch else item.batch_job_id, self._runtime_state)
 
     async def _run_suite_item(self, generation_job_id: str | None) -> None:
         if not generation_job_id:
@@ -248,6 +277,7 @@ class BatchScheduler:
                 generation_job = create_aplus_generation_for_batch_item(session, item)
                 generation_job_id = generation_job.id
                 session.commit()
+                invalidate_batch_status(item.batch_job_id, self._runtime_state)
         with self._session_factory() as session:
             generation_job = session.get(AplusJob, generation_job_id)
             if not generation_job:

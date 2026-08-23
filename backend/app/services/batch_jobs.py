@@ -15,6 +15,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.config import Settings
+from backend.app.core.runtime import RuntimeStateService, default_runtime
+from backend.app.core.storage.keys import batch_status_key
 from backend.app.models import (
     Asset,
     AplusItem,
@@ -447,6 +449,7 @@ def serialize_batch_job(session: Session, batch: BatchJob, *, include_children: 
         )
     return {
         "id": batch.id,
+        "user_id": batch.user_id,
         "business_type": batch.business_type,
         "status": batch.status,
         "global_params": _json_loads(batch.global_params_json, {}),
@@ -462,6 +465,30 @@ def serialize_batch_job(session: Session, batch: BatchJob, *, include_children: 
         "updated_at": batch.updated_at,
         "items": serialized_items,
     }
+
+
+def invalidate_batch_status(batch_id: str, runtime: RuntimeStateService | None = None) -> None:
+    """Drop a mutable progress snapshot after its PostgreSQL facts commit."""
+    service = runtime or default_runtime()
+    if service is not None:
+        service.delete_best_effort(batch_status_key(batch_id))
+
+
+def cached_batch_job_payload(
+    session: Session,
+    batch: BatchJob,
+    *,
+    include_children: bool = True,
+    runtime: RuntimeStateService | None = None,
+) -> dict[str, Any]:
+    service = runtime or default_runtime()
+    if service is None:
+        return serialize_batch_job(session, batch, include_children=include_children)
+    return service.cached(
+        batch_status_key(batch.id),
+        service.ttls.batch_status,
+        lambda: serialize_batch_job(session, batch, include_children=include_children),
+    )
 
 
 def cancel_batch_job(session: Session, batch: BatchJob) -> BatchJob:
@@ -492,6 +519,7 @@ def cancel_batch_job(session: Session, batch: BatchJob) -> BatchJob:
     aggregate_batch_job(session, batch)
     session.commit()
     session.refresh(batch)
+    invalidate_batch_status(batch.id)
     return batch
 
 
@@ -527,6 +555,7 @@ def retry_failed_batch_job(session: Session, batch: BatchJob) -> BatchJob:
     aggregate_batch_job(session, batch)
     session.commit()
     session.refresh(batch)
+    invalidate_batch_status(batch.id)
     return batch
 
 

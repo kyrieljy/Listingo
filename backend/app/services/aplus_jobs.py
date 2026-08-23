@@ -15,12 +15,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from backend.app.config import Settings
-from backend.app.models import AplusItem, AplusJob, AplusVersion, Asset, PromptVersion, Provider, utcnow
+from backend.app.models import AplusItem, AplusJob, AplusVersion, Asset, PromptVersion, utcnow
 from backend.app.schemas import A_PLUS_MODULE_TOTAL_LIMIT
 from backend.app.security import ApiKeyCipher
 from backend.app.services.execution import run_image_route
 from backend.app.services.jobs import _call_llm_with_fallback, _enabled_provider, validate_generated_image_bytes
-from backend.app.services.provider_routing import provider_display_names_by_code, route_provider_codes
+from backend.app.services.provider_routing import (
+    ProviderSnapshot,
+    cached_provider_by_code,
+    provider_display_names_by_code,
+    route_provider_codes,
+)
 from backend.app.services.provider_limiter import provider_slot
 from backend.app.services.prompt_contract import parse_product_facts
 from backend.app.services.providers import ProviderClient, provider_requires_public_urls, requested_image_size
@@ -634,7 +639,7 @@ async def create_live_aplus_child_version(
     client = ProviderClient()
 
     async def generate(provider_code: str) -> bytes:
-        provider = session.scalar(select(Provider).where(Provider.code == provider_code))
+        provider = cached_provider_by_code(session, provider_code)
         if not provider or not provider.encrypted_api_key:
             raise RuntimeError(f"Provider {provider_code} 不可用")
         input_urls = (
@@ -673,7 +678,7 @@ async def create_live_aplus_child_version(
     session.add(version)
     session.flush()
     item.current_version_id = version.id
-    provider = session.scalar(select(Provider).where(Provider.code == used_code))
+    provider = cached_provider_by_code(session, used_code)
     item.provider_id = provider.id if provider else item.provider_id
     session.commit()
     session.refresh(version)
@@ -987,9 +992,9 @@ def _aplus_atlas_provider_code(output_mode: str) -> str:
     return A_PLUS_ATLAS_MOBILE_PROVIDER_CODE if output_mode == "amazon_aplus_advanced_mobile" else A_PLUS_ATLAS_DETAIL_PROVIDER_CODE
 
 
-def _enabled_aplus_atlas_provider(session: Session, provider_code: str) -> Provider:
-    provider = session.scalar(select(Provider).where(Provider.code == provider_code, Provider.enabled.is_(True)))
-    if not provider or not provider.encrypted_api_key:
+def _enabled_aplus_atlas_provider(session: Session, provider_code: str) -> ProviderSnapshot:
+    provider = cached_provider_by_code(session, provider_code)
+    if not provider or not provider.enabled or not provider.encrypted_api_key:
         raise RuntimeError(f"A+ Atlas Provider {provider_code} 未启用或缺少 API Key")
     return provider
 
@@ -1198,7 +1203,7 @@ async def _run_generation_item(
         destination.write_bytes(image_bytes)
         with session_factory() as session:
             item = session.get(AplusItem, item_id)
-            provider = session.scalar(select(Provider).where(Provider.code == used_code))
+            provider = cached_provider_by_code(session, used_code)
             version = AplusVersion(
                 item_id=item.id,
                 version_no=1,

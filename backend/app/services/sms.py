@@ -21,6 +21,12 @@ from backend.app.core.storage.base import (
     RateLimitStorage,
     StorageUnavailableError,
 )
+from backend.app.core.storage.keys import (
+    sms_attempts_key,
+    sms_code_key,
+    sms_cooldown_key,
+    sms_daily_key,
+)
 
 
 SMS_PURPOSES = {"login", "register", "reset_password", "change_phone", "admin"}
@@ -140,6 +146,7 @@ def _reserve_send_quota(
     config: SmsConfig,
     *,
     bypass_rate_limit: bool,
+    daily_window_seconds: int = SMS_DAILY_WINDOW_SECONDS,
 ) -> str:
     reservation_token = uuid4().hex
     if bypass_rate_limit:
@@ -147,28 +154,28 @@ def _reserve_send_quota(
 
     try:
         if not storage.reserve_sliding_window(
-            f"sms:daily:{identity}",
+            sms_daily_key(identity),
             reservation_token,
             config.daily_limit_per_phone,
-            SMS_DAILY_WINDOW_SECONDS,
+            daily_window_seconds,
         ):
             raise HTTPException(status_code=429, detail="该手机号今日验证码次数已达上限")
 
         if config.cooldown_seconds > 0:
             cooldown = storage.set_if_absent(
-                f"sms:cooldown:{identity}",
+                sms_cooldown_key(identity),
                 reservation_token,
                 config.cooldown_seconds,
                 allow_eviction=False,
             )
             if not cooldown.success:
-                storage.release_sliding_window(f"sms:daily:{identity}", reservation_token)
+                storage.release_sliding_window(sms_daily_key(identity), reservation_token)
                 raise HTTPException(
                     status_code=429,
                     detail=f"验证码发送过于频繁，请 {config.cooldown_seconds} 秒后再试",
                 )
     except StorageUnavailableError:
-        storage.release_sliding_window(f"sms:daily:{identity}", reservation_token)
+        storage.release_sliding_window(sms_daily_key(identity), reservation_token)
         raise
     return reservation_token
 
@@ -183,13 +190,13 @@ def _store_verification_code(
     ttl: int,
 ) -> bool:
     stored = storage.setex(
-        f"sms:code:{identity}",
+        sms_code_key(identity),
         sms_code_hash(phone, purpose, code),
         ttl,
     )
     if not stored.success:
         return False
-    storage.delete(f"sms:attempts:{identity}")
+    storage.delete(sms_attempts_key(identity))
     return True
 
 
@@ -199,9 +206,9 @@ def _release_send_quota(
     config: SmsConfig,
     reservation_token: str,
 ) -> None:
-    storage.release_sliding_window(f"sms:daily:{identity}", reservation_token)
+    storage.release_sliding_window(sms_daily_key(identity), reservation_token)
     if config.cooldown_seconds > 0:
-        storage.delete_if_equal(f"sms:cooldown:{identity}", reservation_token)
+        storage.delete_if_equal(sms_cooldown_key(identity), reservation_token)
 
 
 def _percent_encode(value: str | int) -> str:
@@ -332,6 +339,7 @@ async def send_sms_code(
         identity,
         config,
         bypass_rate_limit=bypass_rate_limit,
+        daily_window_seconds=settings.redis_sms_daily_window_seconds,
     )
 
     configured_debug_code = settings.debug_sms_code.strip() if settings.debug_sms_code else ""
@@ -405,17 +413,21 @@ async def send_sms_code(
 def verify_sms_code(request: Request, *, phone: str, purpose: str, code: str) -> None:
     normalized_phone = normalize_phone(phone)
     storage = request.app.state.rate_limiter.storage
+    settings = request.app.state.settings
+    if not isinstance(settings, Settings):
+        settings = Settings()
+    max_attempts = settings.redis_sms_max_attempts
     identity = _sms_identity(normalized_phone, purpose)
-    code_key = f"sms:code:{identity}"
+    code_key = sms_code_key(identity)
     stored_code = storage.get(code_key)
     if stored_code is None:
         raise HTTPException(status_code=422, detail="验证码不存在或已过期")
     status = storage.consume_hash_once(
         code_key,
-        f"sms:attempts:{identity}",
+        sms_attempts_key(identity),
         sms_code_hash(normalized_phone, purpose, code.strip()),
         ttl=stored_code.expires_in_seconds or 60,
-        max_attempts=SMS_MAX_CODE_ATTEMPTS,
+        max_attempts=max_attempts,
     )
     if status is HashConsumeStatus.MISSING:
         raise HTTPException(status_code=422, detail="验证码不存在或已过期")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from argon2 import PasswordHasher
@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session
 from backend.app.database import get_session
 from backend.app.models import LoginEvent, User, UserSession, utcnow
 from backend.app.core.rate_limit import client_ip
+from backend.app.core.runtime import RuntimeStateService
+from backend.app.core.storage.keys import session_cache_key
 from backend.app.services.sms import mask_phone, normalize_phone
 
 
@@ -150,9 +152,55 @@ def _testing_user(session: Session, request: Request) -> User | None:
     )
 
 
+def _cached_session_metadata(token: str, runtime: RuntimeStateService | None) -> dict[str, str] | None:
+    if runtime is None:
+        return None
+    key = session_cache_key(hash_token(token))
+    cached = runtime.get_json_best_effort(key)
+    if not isinstance(cached, dict):
+        return None
+    if not all(isinstance(cached.get(field), str) for field in ("session_id", "user_id", "expires_at")):
+        runtime.delete_best_effort(key)
+        return None
+    return cached
+
+
+def _cache_session_metadata(token: str, auth_session: UserSession, runtime: RuntimeStateService | None) -> None:
+    if runtime is None:
+        return
+    remaining = int((auth_session.expires_at - utcnow()).total_seconds())
+    if remaining < 1:
+        return
+    runtime.set_json_best_effort(
+        session_cache_key(hash_token(token)),
+        {
+            "session_id": auth_session.id,
+            "user_id": auth_session.user_id,
+            "expires_at": auth_session.expires_at.isoformat(),
+        },
+        max(1, min(runtime.ttls.session, remaining)),
+    )
+
+
 def current_user_from_request(session: Session, request: Request) -> User | None:
     token = request.cookies.get(SESSION_COOKIE)
     if token:
+        runtime = getattr(request.app.state, "runtime_state", None)
+        key = session_cache_key(hash_token(token))
+        cached = _cached_session_metadata(token, runtime)
+        if cached:
+            try:
+                expires_at = datetime.fromisoformat(cached["expires_at"])
+            except ValueError:
+                expires_at = None
+            if expires_at is not None and expires_at > utcnow():
+                user = session.get(User, cached["user_id"])
+                if user:
+                    ensure_active_user(user)
+                    return user
+            runtime.delete_best_effort(key)
+            return None
+
         auth_session = session.scalar(
             select(UserSession).where(
                 UserSession.session_token_hash == hash_token(token),
@@ -160,7 +208,10 @@ def current_user_from_request(session: Session, request: Request) -> User | None
                 UserSession.expires_at > utcnow(),
             )
         )
+        if not auth_session and runtime is not None:
+            runtime.delete_best_effort(key)
         if auth_session:
+            _cache_session_metadata(token, auth_session, runtime)
             user = session.get(User, auth_session.user_id)
             if user:
                 ensure_active_user(user)

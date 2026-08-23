@@ -6,12 +6,18 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from backend.app.models import AplusJob, Asset, GenerationJob, Prompt, PromptVersion, Provider, Workflow
+from backend.app.models import AplusJob, Asset, GenerationJob, PromptVersion
 from backend.app.schemas import AplusGenerationJobCreate, AplusPlanJobCreate, GenerationJobCreate
 from backend.app.services.aplus_jobs import create_aplus_generation_job_from_plan, load_aplus_job
 from backend.app.services.content_safety import ContentSafetyBlocked, ensure_content_safe, run_local_text_safety_review
 from backend.app.services.jobs import _enabled_provider, image_provider_route
-from backend.app.services.provider_routing import provider_config, route_provider_codes
+from backend.app.services.provider_routing import (
+    ProviderSnapshot,
+    cached_provider_by_code,
+    provider_config,
+    route_provider_codes,
+)
+from backend.app.services.runtime_cache import active_prompt_version_id, active_workflow_version_id
 
 
 class TaskCreationError(Exception):
@@ -42,10 +48,8 @@ def _ensure_assets(
 def _ensure_provider_reference_capacity(session: Session, provider_codes: list[str], asset_count: int) -> None:
     if asset_count <= 0:
         return
-    providers = session.scalars(select(Provider).where(Provider.code.in_(provider_codes))).all()
-    by_code = {provider.code: provider for provider in providers}
     for provider_code in provider_codes:
-        provider = by_code.get(provider_code)
+        provider: ProviderSnapshot | None = cached_provider_by_code(session, provider_code)
         if not provider:
             continue
         config = provider_config(provider)
@@ -83,13 +87,13 @@ def create_generation_job_record(
         except RuntimeError as exc:
             raise TaskCreationError(409, str(exc)) from exc
 
-    prompt = session.scalar(select(Prompt).where(Prompt.code == "ecommerce-meta"))
-    workflow = session.scalar(select(Workflow).where(Workflow.code == "product-suite-v1"))
-    if not prompt or not prompt.active_version_id or not workflow or not workflow.active_version_id:
+    prompt_version_id = active_prompt_version_id(session, "ecommerce-meta")
+    workflow_version_id = active_workflow_version_id(session, "product-suite-v1")
+    if not prompt_version_id or not workflow_version_id:
         raise TaskCreationError(500, "Core Prompt or Workflow is not enabled")
     auxiliary_codes = ("product-vision", "copywriting-assist", "edit-rewrite", "image-text-edit", "content-safety-review")
-    auxiliary_prompts = session.scalars(select(Prompt).where(Prompt.code.in_(auxiliary_codes))).all()
-    prompt_versions = {item.code: item.active_version_id for item in auxiliary_prompts if item.active_version_id}
+    prompt_versions = {code: active_prompt_version_id(session, code) for code in auxiliary_codes}
+    prompt_versions = {code: version_id for code, version_id in prompt_versions.items() if version_id}
     if len(prompt_versions) != len(auxiliary_codes):
         raise TaskCreationError(500, "Auxiliary Prompt assets are incomplete")
 
@@ -105,8 +109,8 @@ def create_generation_job_record(
         asset_ids_json=json.dumps(payload.asset_ids),
         count=payload.count,
         progress=0,
-        prompt_version_id=prompt.active_version_id,
-        workflow_version_id=workflow.active_version_id,
+        prompt_version_id=prompt_version_id,
+        workflow_version_id=workflow_version_id,
     )
     session.add(job)
     session.flush()
@@ -130,14 +134,8 @@ def create_aplus_plan_job_record(
         except RuntimeError as exc:
             raise TaskCreationError(409, str(exc)) from exc
 
-    prompt = session.scalar(select(Prompt).where(Prompt.code == "aplus-meta"))
-    prompt_version = session.get(PromptVersion, prompt.active_version_id) if prompt and prompt.active_version_id else None
-    product_vision = session.scalar(select(Prompt).where(Prompt.code == "product-vision"))
-    product_vision_version = (
-        session.get(PromptVersion, product_vision.active_version_id)
-        if product_vision and product_vision.active_version_id
-        else None
-    )
+    prompt_version = session.get(PromptVersion, active_prompt_version_id(session, "aplus-meta"))
+    product_vision_version = session.get(PromptVersion, active_prompt_version_id(session, "product-vision"))
     if not prompt_version or not product_vision_version:
         raise TaskCreationError(500, "A+ Prompt assets are incomplete")
 
@@ -194,8 +192,11 @@ def create_aplus_generation_job_record(
         except RuntimeError as exc:
             raise TaskCreationError(409, str(exc)) from exc
 
-    prompt = session.scalar(select(Prompt).where(Prompt.code == "aplus-meta"))
-    locked_prompt_version_id = prompt_version_id or plan_job.prompt_version_id or (prompt.active_version_id if prompt else None)
+    locked_prompt_version_id = (
+        prompt_version_id
+        or plan_job.prompt_version_id
+        or active_prompt_version_id(session, "aplus-meta")
+    )
     if not locked_prompt_version_id:
         raise TaskCreationError(500, "A+ Meta Prompt is not enabled")
     job = create_aplus_generation_job_from_plan(session, plan_job, payload, locked_prompt_version_id)

@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.config import Settings
-from backend.app.models import Asset, ExecutionLog, Prompt, PromptVersion, Provider, VideoItem, VideoJob, VideoVersion, utcnow
+from backend.app.models import Asset, ExecutionLog, PromptVersion, Provider, VideoItem, VideoJob, VideoVersion, utcnow
 from backend.app.security import ApiKeyCipher
 from backend.app.services.content_safety import (
     ensure_content_safe,
@@ -18,7 +18,15 @@ from backend.app.services.content_safety import (
     run_local_text_safety_review,
 )
 from backend.app.services.jobs import _call_llm_with_fallback
-from backend.app.services.provider_routing import enabled_provider_for_route, provider_display_names_by_code, route_provider_codes
+from backend.app.services.provider_routing import (
+    ProviderRecord,
+    ProviderSnapshot,
+    cached_provider_by_code,
+    enabled_provider_for_route,
+    provider_display_names_by_code,
+    route_provider_codes,
+)
+from backend.app.services.runtime_cache import active_prompt_version_id
 from backend.app.services.providers import HELLOBABYGO_VIDEO_ADAPTER, ProviderClient
 from backend.app.services.redaction import safe_json
 from backend.app.services.storage import public_file_url
@@ -246,13 +254,13 @@ def extract_error_message(data: dict[str, Any]) -> str:
     return "上游任务失败"
 
 
-def _enabled_provider(session: Session, capability: str, relation: str = "default") -> Provider:
+def _enabled_provider(session: Session, capability: str, relation: str = "default") -> ProviderRecord:
     route_key = "llm" if capability == "llm" else "video" if capability == "video" else ""
     if route_key:
         try:
             provider_codes = route_provider_codes(session, route_key)
             provider_code = provider_codes[0] if relation == "default" or len(provider_codes) == 1 else provider_codes[1]
-            provider = session.scalar(select(Provider).where(Provider.code == provider_code, Provider.enabled.is_(True)))
+            provider = cached_provider_by_code(session, provider_code)
             if provider and provider.encrypted_api_key:
                 return provider
         except RuntimeError:
@@ -422,11 +430,9 @@ async def _run_video_job(
         llm_default = _enabled_provider(session, "llm", "default") if not job.dry_run else None
         llm_fallback = _enabled_provider(session, "llm", "fallback") if not job.dry_run else None
         video_provider_codes = route_provider_codes(session, "video") if not job.dry_run else []
-        safety_prompt_model = session.scalar(select(Prompt).where(Prompt.code == "content-safety-review")) if not job.dry_run else None
+        safety_version_id = active_prompt_version_id(session, "content-safety-review") if not job.dry_run else None
         safety_prompt = (
-            session.get(PromptVersion, safety_prompt_model.active_version_id)
-            if safety_prompt_model and safety_prompt_model.active_version_id
-            else None
+            session.get(PromptVersion, safety_version_id) if safety_version_id else None
         )
         if not job.dry_run and not safety_prompt:
             raise RuntimeError("内容安全审计 Prompt 未启用")
@@ -531,8 +537,8 @@ async def _run_video_item(
     params: dict[str, Any],
     image_urls: list[str],
     prompt_content: str,
-    llm_default: Provider | None,
-    llm_fallback: Provider | None,
+        llm_default: ProviderRecord | None,
+        llm_fallback: ProviderRecord | None,
     video_provider_codes: list[str],
     session_factory: sessionmaker[Session],
     settings: Settings,
@@ -613,7 +619,7 @@ async def _run_video_item(
         errors: list[str] = []
         with session_factory() as session:
             provider_display_names = provider_display_names_by_code(session, video_provider_codes)
-        used_provider: Provider | None = None
+        used_provider: ProviderSnapshot | None = None
         used_api_key = ""
         request_id = ""
         response: dict[str, Any] = {}
@@ -621,7 +627,9 @@ async def _run_video_item(
         for provider_code in video_provider_codes:
             submit_started = perf_counter()
             with session_factory() as session:
-                candidate = session.scalar(select(Provider).where(Provider.code == provider_code, Provider.enabled.is_(True)))
+                candidate = cached_provider_by_code(session, provider_code)
+                if candidate is not None and not candidate.enabled:
+                    candidate = None
                 if not candidate or not candidate.encrypted_api_key:
                     errors.append(f"{provider_display_names.get(provider_code, provider_code)}: 未启用或缺少 API Key")
                     continue
@@ -739,13 +747,15 @@ async def create_live_video_child_version(
     image_urls = [public_asset_url(settings, asset) for asset in ordered_assets if asset]
     client = ProviderClient()
     errors: list[str] = []
-    used_provider: Provider | None = None
+    used_provider: ProviderSnapshot | None = None
     used_api_key = ""
     request_id = ""
     remote_url = ""
     response: dict[str, Any] = {}
     for provider_code in video_provider_codes:
-        video_provider = session.scalar(select(Provider).where(Provider.code == provider_code, Provider.enabled.is_(True)))
+        video_provider = cached_provider_by_code(session, provider_code)
+        if video_provider is not None and not video_provider.enabled:
+            video_provider = None
         if not video_provider or not video_provider.encrypted_api_key:
             errors.append(f"{provider_display_names.get(provider_code, provider_code)}: 未启用或缺少 API Key")
             continue
@@ -822,7 +832,7 @@ async def create_live_video_child_version(
 
 async def poll_video_completion(
     client: ProviderClient,
-    provider: Provider,
+    provider: ProviderRecord,
     api_key: str,
     request_id: str,
     job_id: str,

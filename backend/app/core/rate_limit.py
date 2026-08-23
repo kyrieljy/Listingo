@@ -12,6 +12,7 @@ from fastapi import Request
 from backend.app.config import Settings
 from backend.app.core.storage.base import RateLimitStorage
 from backend.app.core.storage.memory import MemoryStorage, SINGLE_PROCESS_WARNING
+from backend.app.core.storage.redis import RedisStorage
 
 
 NONCE_TTL_SECONDS = 60
@@ -147,13 +148,21 @@ def rate_limit_headers(result: RateLimitResult) -> dict[str, str]:
 
 
 def create_rate_limiter(settings: Settings) -> RateLimitService:
-    if settings.storage_backend != "memory":
+    if settings.storage_backend == "redis":
+        storage: RateLimitStorage = RedisStorage(
+            url=settings.redis_url,
+            key_prefix=settings.redis_key_prefix,
+            connect_timeout_seconds=settings.redis_connect_timeout_seconds,
+            socket_timeout_seconds=settings.redis_socket_timeout_seconds,
+        )
+    elif settings.storage_backend == "memory":
+        storage = MemoryStorage(
+            max_size=settings.rate_limit_max_size,
+            cleanup_interval_seconds=settings.rate_limit_cleanup_interval_seconds,
+            start_cleanup_thread=False,
+        )
+    else:
         raise ValueError(f"Unsupported rate-limit storage backend: {settings.storage_backend}")
-    storage: RateLimitStorage = MemoryStorage(
-        max_size=settings.rate_limit_max_size,
-        cleanup_interval_seconds=settings.rate_limit_cleanup_interval_seconds,
-        start_cleanup_thread=False,
-    )
     return RateLimitService(storage)
 
 
@@ -163,7 +172,7 @@ _default_service: RateLimitService | None = None
 def _default_rate_limiter() -> RateLimitService:
     global _default_service
     if _default_service is None:
-        _default_service = RateLimitService(MemoryStorage())
+        raise RuntimeError("Rate limiter has not been initialized with configured storage")
     return _default_service
 
 

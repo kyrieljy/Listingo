@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Callable
 
-from backend.app.core.storage.base import IncrementResult, RateLimitStorage, StorageItem, WriteResult
+from backend.app.core.storage.base import (
+    HashConsumeStatus,
+    IncrementResult,
+    RateLimitStorage,
+    StorageItem,
+    WriteResult,
+)
 
 
 SINGLE_PROCESS_WARNING = (
@@ -20,6 +26,11 @@ SINGLE_PROCESS_WARNING = (
 class _MemoryEntry:
     value: str
     expires_at: float | None
+
+
+@dataclass
+class _SlidingWindowEntry:
+    expires_at: float
 
 
 class MemoryStorage(RateLimitStorage):
@@ -45,6 +56,7 @@ class MemoryStorage(RateLimitStorage):
         self._cleanup_interval = cleanup_interval_seconds
         self._clock = clock
         self._items: OrderedDict[str, _MemoryEntry] = OrderedDict()
+        self._sliding_windows: OrderedDict[str, OrderedDict[str, _SlidingWindowEntry]] = OrderedDict()
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._cleanup_thread: threading.Thread | None = None
@@ -101,7 +113,15 @@ class MemoryStorage(RateLimitStorage):
         ]
         for key in expired:
             del self._items[key]
-        return len(expired)
+        expired_windows = 0
+        for key, entries in list(self._sliding_windows.items()):
+            window_expired = [token for token, entry in entries.items() if entry.expires_at <= now]
+            for token in window_expired:
+                del entries[token]
+                expired_windows += 1
+            if not entries:
+                del self._sliding_windows[key]
+        return len(expired) + expired_windows
 
     def _make_room(self, key: str, *, allow_eviction: bool) -> bool:
         self._remove_expired_locked()
@@ -189,6 +209,81 @@ class MemoryStorage(RateLimitStorage):
                 return WriteResult(success=False)
             self._items[key] = _MemoryEntry(value=value, expires_at=self._clock() + ttl)
             return WriteResult(success=True, expires_in_seconds=self._entry_ttl(self._items[key]))
+
+    def _reserve_sliding_window_locked(
+        self,
+        key: str,
+        reservation_token: str,
+        limit: int,
+        window: int,
+    ) -> bool:
+        self._ttl(window)
+        if limit < 1:
+            raise ValueError("Sliding-window limit must be positive")
+        if key not in self._sliding_windows:
+            self._sliding_windows[key] = OrderedDict[str, _SlidingWindowEntry]()
+        entries = self._sliding_windows[key]
+        now = self._clock()
+        expired = [token for token, entry in entries.items() if entry.expires_at <= now]
+        for token in expired:
+            del entries[token]
+        if len(entries) >= limit:
+            return False
+        entries[reservation_token] = _SlidingWindowEntry(expires_at=now + window)
+        return True
+
+    def reserve_sliding_window(
+        self,
+        key: str,
+        reservation_token: str,
+        limit: int,
+        window: int,
+    ) -> bool:
+        with self._lock:
+            return self._reserve_sliding_window_locked(key, reservation_token, limit, window)
+
+    def release_sliding_window(self, key: str, reservation_token: str) -> bool:
+        with self._lock:
+            entries = self._sliding_windows.get(key)
+            return entries.pop(reservation_token, None) is not None
+
+    def delete_if_equal(self, key: str, expected_value: str) -> bool:
+        with self._lock:
+            self._remove_expired_locked()
+            entry = self._live_entry(key)
+            if entry is None or entry.value != expected_value:
+                return False
+            del self._items[key]
+            return True
+
+    def consume_hash_once(
+        self,
+        key: str,
+        attempts_key: str,
+        expected_value: str,
+        ttl: int,
+        max_attempts: int,
+    ) -> HashConsumeStatus:
+        self._ttl(ttl)
+        if max_attempts < 1:
+            raise ValueError("Maximum hash attempts must be positive")
+        with self._lock:
+            code = self._live_entry(key)
+            if code is None:
+                return HashConsumeStatus.MISSING
+            attempts = self._live_entry(attempts_key)
+            attempt_count = int(attempts.value) if attempts is not None else 0
+            if attempt_count >= max_attempts:
+                return HashConsumeStatus.LIMIT_EXCEEDED
+            if code.value != expected_value:
+                self._items[attempts_key] = _MemoryEntry(
+                    value=str(attempt_count + 1),
+                    expires_at=self._clock() + ttl,
+                )
+                return HashConsumeStatus.MISMATCH
+            del self._items[key]
+            self._items.pop(attempts_key, None)
+            return HashConsumeStatus.ACCEPTED
 
     def cleanup_expired(self) -> int:
         with self._lock:

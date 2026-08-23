@@ -5,6 +5,8 @@ from typing import Any
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from backend.app.core.storage.base import StorageUnavailableError
+
 class IPBlockMiddleware:
     """Reject requests from process-local blocked IP records before routing."""
 
@@ -18,7 +20,18 @@ class IPBlockMiddleware:
 
         application = scope.get("app")
         limiter = getattr(getattr(application, "state", None), "rate_limiter", None)
-        if limiter is not None and limiter.is_ip_blocked(client_ip_from_scope(scope)):
+        try:
+            blocked = limiter.is_ip_blocked(client_ip_from_scope(scope)) if limiter is not None else False
+        except StorageUnavailableError:
+            blocked = False
+            response: Any = JSONResponse(
+                status_code=503,
+                content={"detail": "防护存储暂不可用，请稍后再试"},
+            )
+            await response(scope, receive, send)
+            return
+
+        if blocked:
             response: Any = JSONResponse(
                 status_code=403,
                 content={"detail": "当前 IP 因异常登录行为已被暂时限制"},

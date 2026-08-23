@@ -1,5 +1,9 @@
+from time import sleep
+
+from sqlalchemy import inspect
+
 from backend.app.models import SmsConfig
-from backend.app.services.sms import mask_phone, normalize_phone, split_phone
+from backend.app.services.sms import _sms_identity, mask_phone, normalize_phone, sms_code_hash, split_phone
 
 
 def test_mainland_phone_normalization_stays_backward_compatible() -> None:
@@ -41,3 +45,122 @@ def test_debug_sms_code_comes_from_settings(client) -> None:
 
     assert response.status_code == 200
     assert response.json()["debug_code"] == "654321"
+
+
+def _configure_debug_sms(client, *, cooldown_seconds: int = 0, code_ttl_seconds: int = 300) -> None:
+    session_factory = client.app.state.session_factory
+    with session_factory() as session:
+        config = session.query(SmsConfig).first()
+        config.enabled = True
+        config.debug_mode = True
+        config.cooldown_seconds = cooldown_seconds
+        config.code_ttl_seconds = code_ttl_seconds
+        config.daily_limit_per_phone = 10
+        session.commit()
+    client.app.state.settings.debug_sms_code = "654321"
+
+
+def test_sms_code_is_hashed_consumed_once_and_reset_by_resend(client) -> None:
+    _configure_debug_sms(client)
+    phone = "13800138001"
+    identity = _sms_identity(phone, "register")
+    storage = client.app.state.rate_limiter.storage
+
+    sent = client.post("/api/v1/auth/sms/send", json={"phone": phone, "purpose": "register"})
+    code = sent.json()["debug_code"]
+    stored = storage.get(f"sms:code:{identity}")
+
+    assert sent.status_code == 200
+    assert stored is not None
+    assert stored.value == sms_code_hash(phone, "register", code)
+    assert stored.value != code
+
+    for _ in range(4):
+        wrong = client.post("/api/v1/auth/sms/login", json={"phone": phone, "mode": "register", "code": "000000"})
+        assert wrong.status_code == 422
+    assert storage.get(f"sms:attempts:{identity}") is not None
+
+    resent = client.post("/api/v1/auth/sms/send", json={"phone": phone, "purpose": "register"})
+    accepted = client.post(
+        "/api/v1/auth/sms/login",
+        json={"phone": phone, "mode": "register", "code": resent.json()["debug_code"]},
+    )
+    repeated = client.post(
+        "/api/v1/auth/sms/login",
+        json={"phone": phone, "mode": "register", "code": resent.json()["debug_code"]},
+    )
+
+    assert accepted.status_code == 200
+    assert repeated.status_code == 422
+    assert storage.get(f"sms:code:{identity}") is None
+    assert storage.get(f"sms:attempts:{identity}") is None
+
+
+def test_sms_code_rejects_after_five_wrong_attempts(client) -> None:
+    _configure_debug_sms(client)
+    phone = "13800138002"
+    sent = client.post("/api/v1/auth/sms/send", json={"phone": phone, "purpose": "register"})
+    assert sent.status_code == 200
+
+    statuses = [
+        client.post("/api/v1/auth/sms/login", json={"phone": phone, "mode": "register", "code": "000000"}).status_code
+        for _ in range(5)
+    ]
+    blocked = client.post(
+        "/api/v1/auth/sms/login",
+        json={"phone": phone, "mode": "register", "code": sent.json()["debug_code"]},
+    )
+
+    assert statuses == [422, 422, 422, 422, 422]
+    assert blocked.status_code == 429
+
+
+def test_sms_cooldown_is_enforced_between_sends(client) -> None:
+    _configure_debug_sms(client, cooldown_seconds=60)
+    payload = {"phone": "13800138004", "purpose": "register"}
+
+    first = client.post("/api/v1/auth/sms/send", json=payload)
+    second = client.post("/api/v1/auth/sms/send", json=payload)
+
+    assert (first.status_code, second.status_code) == (200, 429)
+
+
+def test_sms_code_expires_after_configured_ttl(client) -> None:
+    _configure_debug_sms(client, code_ttl_seconds=1)
+    phone = "13800138005"
+    sent = client.post("/api/v1/auth/sms/send", json={"phone": phone, "purpose": "register"})
+
+    sleep(1.1)
+    expired = client.post(
+        "/api/v1/auth/sms/login",
+        json={"phone": phone, "mode": "register", "code": sent.json()["debug_code"]},
+    )
+
+    assert sent.status_code == 200
+    assert expired.status_code == 422
+
+
+def test_sms_table_is_removed_from_runtime_database(client) -> None:
+    assert not inspect(client.app.state.engine).has_table("sms_verification_code")
+
+
+def test_failed_sms_send_releases_cooldown_reservation(client) -> None:
+    session_factory = client.app.state.session_factory
+    with session_factory() as session:
+        config = session.query(SmsConfig).first()
+        config.enabled = True
+        config.debug_mode = False
+        config.cooldown_seconds = 60
+        config.daily_limit_per_phone = 10
+        config.login_template_code = ""
+        session.commit()
+
+    phone = "13800138003"
+    identity = _sms_identity(phone, "login")
+    response = client.post("/api/v1/auth/sms/send", json={"phone": phone, "purpose": "login"})
+
+    assert response.status_code == 503
+    assert client.app.state.rate_limiter.storage.get(f"sms:cooldown:{identity}") is None
+    assert client.app.state.rate_limiter.storage.reserve_sliding_window(
+        f"sms:daily:{identity}", "probe-token", 10, 86_400
+    )

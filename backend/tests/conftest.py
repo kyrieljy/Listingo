@@ -16,6 +16,7 @@ def client(tmp_path: Path) -> Generator[TestClient, None, None]:
         data_dir=tmp_path / "data",
         database_url=f"sqlite:///{(tmp_path / 'data' / 'test.sqlite3').as_posix()}",
         testing=True,
+        storage_backend="memory",
     )
     app = create_app(settings)
     with TestClient(app) as test_client:

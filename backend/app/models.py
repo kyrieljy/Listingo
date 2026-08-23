@@ -113,20 +113,6 @@ class SmsConfig(Base, TimestampMixin):
     daily_limit_per_phone: Mapped[int] = mapped_column(Integer, default=10)
 
 
-class SmsVerificationCode(Base, TimestampMixin):
-    __tablename__ = "sms_verification_code"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    phone: Mapped[str] = mapped_column(String(32), index=True)
-    purpose: Mapped[str] = mapped_column(String(30), index=True)
-    code_hash: Mapped[str] = mapped_column(String(64))
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    attempts: Mapped[int] = mapped_column(Integer, default=0)
-    send_ip: Mapped[str] = mapped_column(String(80), default="")
-    provider_message: Mapped[str] = mapped_column(Text, default="")
-
-
 class SubscriptionPlan(Base, TimestampMixin):
     __tablename__ = "subscription_plan"
 

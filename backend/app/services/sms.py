@@ -5,19 +5,22 @@ import hashlib
 import hmac
 import json
 import secrets
-from datetime import timedelta
 from urllib.parse import quote
 from uuid import uuid4
 
 import httpx
 from fastapi import HTTPException, Request
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.models import SmsConfig, SmsVerificationCode, utcnow
+from backend.app.models import SmsConfig, utcnow
 from backend.app.security import ApiKeyCipher
 from backend.app.config import Settings
-from backend.app.core.rate_limit import client_ip
+from backend.app.core.storage.base import (
+    HashConsumeStatus,
+    RateLimitStorage,
+    StorageUnavailableError,
+)
 
 
 SMS_PURPOSES = {"login", "register", "reset_password", "change_phone", "admin"}
@@ -35,6 +38,8 @@ PHONE_COUNTRY_RULES = {
     "61": (9, 9),
 }
 PHONE_COUNTRY_CODES = tuple(sorted(PHONE_COUNTRY_RULES, key=len, reverse=True))
+SMS_DAILY_WINDOW_SECONDS = 24 * 60 * 60
+SMS_MAX_CODE_ATTEMPTS = 5
 
 
 def normalize_phone(phone: str) -> str:
@@ -105,11 +110,9 @@ def _purpose_template(config: SmsConfig, purpose: str) -> str:
 
 
 def _assert_send_allowed(
-    session: Session,
     config: SmsConfig,
     phone: str,
     purpose: str,
-    ip_address: str,
     *,
     bypass_rate_limit: bool = False,
 ) -> None:
@@ -122,29 +125,83 @@ def _assert_send_allowed(
     min_length, max_length = phone_rule
     if not (min_length <= len(local_phone) <= max_length):
         raise HTTPException(status_code=422, detail="请输入有效的手机号")
+    if config.code_ttl_seconds < 1 or config.cooldown_seconds < 0 or config.daily_limit_per_phone < 1:
+        raise HTTPException(status_code=503, detail="短信验证码配置无效，请联系管理员")
+
+
+def _sms_identity(phone: str, purpose: str) -> str:
+    normalized_phone = normalize_phone(phone)
+    return hashlib.sha256(f"{normalized_phone}:{purpose}".encode("utf-8")).hexdigest()
+
+
+def _reserve_send_quota(
+    storage: RateLimitStorage,
+    identity: str,
+    config: SmsConfig,
+    *,
+    bypass_rate_limit: bool,
+) -> str:
+    reservation_token = uuid4().hex
     if bypass_rate_limit:
-        return
-    now = utcnow()
-    recent = session.scalar(
-        select(SmsVerificationCode)
-        .where(
-            SmsVerificationCode.phone == phone,
-            SmsVerificationCode.purpose == purpose,
-            SmsVerificationCode.created_at >= now - timedelta(seconds=config.cooldown_seconds),
-        )
-        .order_by(SmsVerificationCode.created_at.desc())
-        .limit(1)
+        return reservation_token
+
+    try:
+        if not storage.reserve_sliding_window(
+            f"sms:daily:{identity}",
+            reservation_token,
+            config.daily_limit_per_phone,
+            SMS_DAILY_WINDOW_SECONDS,
+        ):
+            raise HTTPException(status_code=429, detail="该手机号今日验证码次数已达上限")
+
+        if config.cooldown_seconds > 0:
+            cooldown = storage.set_if_absent(
+                f"sms:cooldown:{identity}",
+                reservation_token,
+                config.cooldown_seconds,
+                allow_eviction=False,
+            )
+            if not cooldown.success:
+                storage.release_sliding_window(f"sms:daily:{identity}", reservation_token)
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"验证码发送过于频繁，请 {config.cooldown_seconds} 秒后再试",
+                )
+    except StorageUnavailableError:
+        storage.release_sliding_window(f"sms:daily:{identity}", reservation_token)
+        raise
+    return reservation_token
+
+
+def _store_verification_code(
+    storage: RateLimitStorage,
+    identity: str,
+    *,
+    phone: str,
+    purpose: str,
+    code: str,
+    ttl: int,
+) -> bool:
+    stored = storage.setex(
+        f"sms:code:{identity}",
+        sms_code_hash(phone, purpose, code),
+        ttl,
     )
-    if recent:
-        raise HTTPException(status_code=429, detail=f"验证码发送过于频繁，请 {config.cooldown_seconds} 秒后再试")
-    sent_today = session.scalar(
-        select(func.count(SmsVerificationCode.id)).where(
-            SmsVerificationCode.phone == phone,
-            SmsVerificationCode.created_at >= now - timedelta(hours=24),
-        )
-    ) or 0
-    if sent_today >= config.daily_limit_per_phone:
-        raise HTTPException(status_code=429, detail="该手机号今日验证码次数已达上限")
+    if not stored.success:
+        return False
+    storage.delete(f"sms:attempts:{identity}")
+    return True
+
+
+def _release_send_quota(
+    storage: RateLimitStorage,
+    identity: str,
+    config: SmsConfig,
+    reservation_token: str,
+) -> None:
+    storage.release_sliding_window(f"sms:daily:{identity}", reservation_token)
+    if config.cooldown_seconds > 0:
+        storage.delete_if_equal(f"sms:cooldown:{identity}", reservation_token)
 
 
 def _percent_encode(value: str | int) -> str:
@@ -265,32 +322,38 @@ async def send_sms_code(
     settings = request.app.state.settings
     if not isinstance(settings, Settings):
         settings = Settings()
-    ip_address = client_ip(request)
-    _assert_send_allowed(session, config, normalized_phone, purpose, ip_address, bypass_rate_limit=bypass_rate_limit)
+    _assert_send_allowed(config, normalized_phone, purpose, bypass_rate_limit=bypass_rate_limit)
     if not config.enabled and not config.debug_mode:
         raise HTTPException(status_code=503, detail="短信服务未启用，请联系管理员")
+    storage = request.app.state.rate_limiter.storage
+    identity = _sms_identity(normalized_phone, purpose)
+    reservation_token = _reserve_send_quota(
+        storage,
+        identity,
+        config,
+        bypass_rate_limit=bypass_rate_limit,
+    )
 
     configured_debug_code = settings.debug_sms_code.strip() if settings.debug_sms_code else ""
     code = configured_debug_code if config.debug_mode and configured_debug_code else f"{secrets.randbelow(1_000_000):06d}"
-    provider_message = "debug"
-    if not config.debug_mode:
-        template_code = _purpose_template(config, purpose)
-        secret = cipher.decrypt(config.encrypted_access_key_secret) if config.encrypted_access_key_secret else ""
-        missing = []
-        if not config.access_key_id:
-            missing.append("AccessKey ID")
-        if not secret:
-            missing.append("AccessKey Secret")
-        if not config.sign_name:
-            missing.append("SignName 短信签名")
-        if not template_code:
-            missing.append("TemplateCode 短信模板")
-        if missing:
-            raise HTTPException(status_code=503, detail=f"短信服务参数未配置完整：请配置 {', '.join(missing)}")
-        try:
+    try:
+        if not config.debug_mode:
+            template_code = _purpose_template(config, purpose)
+            secret = cipher.decrypt(config.encrypted_access_key_secret) if config.encrypted_access_key_secret else ""
+            missing = []
+            if not config.access_key_id:
+                missing.append("AccessKey ID")
+            if not secret:
+                missing.append("AccessKey Secret")
+            if not config.sign_name:
+                missing.append("SignName 短信签名")
+            if not template_code:
+                missing.append("TemplateCode 短信模板")
+            if missing:
+                raise HTTPException(status_code=503, detail=f"短信服务参数未配置完整：请配置 {', '.join(missing)}")
             provider = sms_provider(config)
             if provider == "aliyun_pnvs":
-                provider_message = await send_aliyun_pnvs_sms(
+                await send_aliyun_pnvs_sms(
                     access_key_id=config.access_key_id,
                     access_key_secret=secret,
                     region_id=config.region_id,
@@ -304,7 +367,7 @@ async def send_sms_code(
                     timeout_seconds=settings.sms_timeout_seconds,
                 )
             else:
-                provider_message = await send_aliyun_sms(
+                await send_aliyun_sms(
                     access_key_id=config.access_key_id,
                     access_key_secret=secret,
                     region_id=config.region_id,
@@ -314,19 +377,23 @@ async def send_sms_code(
                     code=code,
                     timeout_seconds=settings.sms_timeout_seconds,
                 )
-        except (httpx.HTTPError, RuntimeError) as exc:
+        if not _store_verification_code(
+            storage,
+            identity,
+            phone=normalized_phone,
+            purpose=purpose,
+            code=code,
+            ttl=config.code_ttl_seconds,
+        ):
+            raise HTTPException(status_code=503, detail="验证码存储暂不可用，请稍后再试")
+    except (httpx.HTTPError, RuntimeError, HTTPException, StorageUnavailableError) as exc:
+        _release_send_quota(storage, identity, config, reservation_token)
+        if isinstance(exc, httpx.HTTPError):
             raise HTTPException(status_code=502, detail=f"短信发送失败：{exc}") from exc
+        if isinstance(exc, RuntimeError):
+            raise HTTPException(status_code=502, detail=f"短信发送失败：{exc}") from exc
+        raise
 
-    verification = SmsVerificationCode(
-        phone=normalized_phone,
-        purpose=purpose,
-        code_hash=sms_code_hash(normalized_phone, purpose, code),
-        expires_at=utcnow() + timedelta(seconds=config.code_ttl_seconds),
-        send_ip=ip_address,
-        provider_message=provider_message,
-    )
-    session.add(verification)
-    session.flush()
     return {
         "ok": True,
         "expires_in": config.code_ttl_seconds,
@@ -335,24 +402,24 @@ async def send_sms_code(
     }
 
 
-def verify_sms_code(session: Session, *, phone: str, purpose: str, code: str) -> None:
+def verify_sms_code(request: Request, *, phone: str, purpose: str, code: str) -> None:
     normalized_phone = normalize_phone(phone)
-    verification = session.scalar(
-        select(SmsVerificationCode)
-        .where(
-            SmsVerificationCode.phone == normalized_phone,
-            SmsVerificationCode.purpose == purpose,
-            SmsVerificationCode.consumed_at.is_(None),
-            SmsVerificationCode.expires_at > utcnow(),
-        )
-        .order_by(SmsVerificationCode.created_at.desc())
-        .limit(1)
-    )
-    if not verification:
+    storage = request.app.state.rate_limiter.storage
+    identity = _sms_identity(normalized_phone, purpose)
+    code_key = f"sms:code:{identity}"
+    stored_code = storage.get(code_key)
+    if stored_code is None:
         raise HTTPException(status_code=422, detail="验证码不存在或已过期")
-    if verification.attempts >= 5:
+    status = storage.consume_hash_once(
+        code_key,
+        f"sms:attempts:{identity}",
+        sms_code_hash(normalized_phone, purpose, code.strip()),
+        ttl=stored_code.expires_in_seconds or 60,
+        max_attempts=SMS_MAX_CODE_ATTEMPTS,
+    )
+    if status is HashConsumeStatus.MISSING:
+        raise HTTPException(status_code=422, detail="验证码不存在或已过期")
+    if status is HashConsumeStatus.LIMIT_EXCEEDED:
         raise HTTPException(status_code=429, detail="验证码尝试次数过多，请重新获取")
-    verification.attempts += 1
-    if verification.code_hash != sms_code_hash(normalized_phone, purpose, code.strip()):
+    if status is HashConsumeStatus.MISMATCH:
         raise HTTPException(status_code=422, detail="验证码不正确")
-    verification.consumed_at = utcnow()

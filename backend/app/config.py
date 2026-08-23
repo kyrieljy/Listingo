@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,7 +36,12 @@ class Settings(BaseSettings):
     global_dry_run: bool = True
     public_asset_base_url: str = ""
     cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
-    storage_backend: Literal["memory"] = "memory"
+    storage_backend: Literal["redis", "memory"] = "redis"
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    redis_key_prefix: str = "listingo"
+    redis_connect_timeout_seconds: float = Field(default=2.0, ge=0.1)
+    redis_socket_timeout_seconds: float = Field(default=2.0, ge=0.1)
+    redis_startup_timeout_seconds: float = Field(default=5.0, ge=0.5)
     rate_limit_max_size: int = Field(default=10_000, ge=1)
     rate_limit_cleanup_interval_seconds: int = Field(default=30, ge=1)
     max_upload_bytes: int = 15 * 1024 * 1024
@@ -70,6 +76,22 @@ class Settings(BaseSettings):
     ) -> None:
         selected_env_file = _settings_env_file() if isinstance(_env_file, _EnvFileUnset) else _env_file
         super().__init__(_env_file=selected_env_file, **values)
+
+    @field_validator("redis_url")
+    @classmethod
+    def _validate_redis_url(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"redis", "rediss"} or not parsed.netloc:
+            raise ValueError("LISTINGO_REDIS_URL must be a redis:// or rediss:// URL")
+        return value
+
+    @field_validator("redis_key_prefix")
+    @classmethod
+    def _validate_redis_key_prefix(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or any(not char.isalnum() and char not in {".", "_", "-"} for char in normalized):
+            raise ValueError("LISTINGO_REDIS_KEY_PREFIX may only contain letters, numbers, dot, underscore, and hyphen")
+        return normalized
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -1,8 +1,10 @@
 import asyncio
 import base64
 import json
+import sys
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -229,6 +231,55 @@ def test_paddleocr_runtime_falls_back_from_v6_to_v5(tmp_path, monkeypatch) -> No
     assert calls == ["PP-OCRv6", "PP-OCRv5"]
     assert result.warning and "PP-OCRv6 OCR failed" in result.warning
     assert "using PaddleOCR PP-OCRv5" in result.warning
+
+
+def test_rapidocr_constructor_supplies_legacy_model_path(monkeypatch) -> None:
+    captured_kwargs: dict[str, Any] = {}
+
+    class RapidOCRStub:
+        def __init__(self, **kwargs: Any) -> None:
+            captured_kwargs.update(kwargs)
+
+        def __call__(self, _: str) -> list[Any]:
+            return []
+
+    monkeypatch.setitem(sys.modules, "rapidocr_onnxruntime", SimpleNamespace(RapidOCR=RapidOCRStub))
+
+    runner = image_text_edit._create_rapidocr_runner(
+        Settings(testing=True, ocr_text_score_threshold=0.72, ocr_box_score_threshold=0.58)
+    )
+
+    assert captured_kwargs == {
+        "text_score": 0.72,
+        "det_box_thresh": 0.58,
+        "det_model_path": None,
+    }
+    assert runner.code == "RapidOCR"
+    assert runner.model == "PP-OCRv4-onnx"
+
+
+def test_rapidocr_prewarm_uses_installed_package(monkeypatch) -> None:
+    monkeypatch.setattr(image_text_edit, "_OCR_RUNNER_CACHE", {})
+    try:
+        result = image_text_edit.prewarm_ocr_engine(
+            Settings(testing=True, ocr_engine="rapidocr", ocr_text_score_threshold=0.72, ocr_box_score_threshold=0.58)
+        )
+    finally:
+        image_text_edit.clear_ocr_engine_cache()
+
+    assert result["ok"] is True
+    assert result["active_engine"] == "RapidOCR"
+    assert result["active_model"] == "PP-OCRv4-onnx"
+    assert result["warmed"] == [
+        {
+            "engine": "RapidOCR",
+            "model": "PP-OCRv4-onnx",
+            "ok": True,
+            "elapsed_ms": result["warmed"][0]["elapsed_ms"],
+            "result_count": result["warmed"][0]["result_count"],
+        }
+    ]
+    assert result["warning"] is None
 
 
 def test_paddleocr_primary_success_does_not_initialize_fallback(tmp_path, monkeypatch) -> None:

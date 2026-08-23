@@ -5,7 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from starlette.responses import Response
 
 from backend.app.config import Settings
@@ -63,11 +65,30 @@ def test_default_and_production_env_files_keep_expected_modes(monkeypatch) -> No
     assert production.global_dry_run is False
 
 
+def test_settings_validate_and_normalize_redis_configuration() -> None:
+    settings = Settings(
+        redis_url="rediss://default:secret@redis.example.com:6380/2",
+        redis_key_prefix=" Listingo_prod ",
+        _env_file=None,
+    )
+
+    assert settings.storage_backend == "redis"
+    assert settings.redis_url == "rediss://default:secret@redis.example.com:6380/2"
+    assert settings.redis_key_prefix == "Listingo_prod"
+
+    with pytest.raises(ValidationError, match="LISTINGO_REDIS_URL"):
+        Settings(redis_url="mysql://redis.invalid:6379/0", _env_file=None)
+
+    with pytest.raises(ValidationError, match="LISTINGO_REDIS_KEY_PREFIX"):
+        Settings(redis_key_prefix="bad prefix", _env_file=None)
+
+
 def test_cors_middleware_uses_settings_origins(tmp_path: Path) -> None:
     settings = Settings(
         data_dir=tmp_path / "data",
         database_url=f"sqlite:///{(tmp_path / 'data' / 'test.sqlite3').as_posix()}",
         cors_origins="https://console.example.com",
+        storage_backend="memory",
         _env_file=None,
     )
     client = TestClient(create_app(settings))

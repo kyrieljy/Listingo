@@ -1,15 +1,19 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import os
+from time import monotonic
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
 from backend.app.config import Settings
 from backend.app.core.rate_limit import SINGLE_PROCESS_WARNING, create_rate_limiter
+from backend.app.core.storage.base import RateLimitStorage, StorageUnavailableError
 from backend.app.database import build_engine, build_session_factory
 from backend.app.middleware.ip_block import IPBlockMiddleware
 from backend.app.models import Base
@@ -26,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 
 def _validate_single_worker(settings: Settings) -> None:
+    if settings.storage_backend != "memory":
+        return
     raw_concurrency = os.getenv("WEB_CONCURRENCY")
     if raw_concurrency is None or not raw_concurrency.strip():
         return
@@ -40,6 +46,19 @@ def _validate_single_worker(settings: Settings) -> None:
             "WEB_CONCURRENCY > 1 is incompatible with memory rate limiting. "
             "Use one worker and one instance, or configure a distributed storage backend."
         )
+
+
+async def _wait_for_storage(storage: RateLimitStorage, timeout_seconds: float) -> None:
+    deadline = monotonic() + timeout_seconds
+    last_error: StorageUnavailableError | None = None
+    while monotonic() < deadline:
+        try:
+            storage.ping()
+            return
+        except StorageUnavailableError as exc:
+            last_error = exc
+            await asyncio.sleep(min(0.25, max(0.01, deadline - monotonic())))
+    raise RuntimeError(f"Redis is unavailable after {timeout_seconds:g}s") from last_error
 
 
 def ensure_runtime_schema(engine: Engine) -> None:
@@ -87,7 +106,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> None:
         try:
-            logger.warning("\033[1;31m%s\033[0m", SINGLE_PROCESS_WARNING)
+            if resolved.storage_backend == "redis":
+                await _wait_for_storage(rate_limiter.storage, resolved.redis_startup_timeout_seconds)
+                logger.info("Rate limiting is using Redis with prefix %s", resolved.redis_key_prefix)
+            else:
+                logger.warning("\033[1;31m%s\033[0m", SINGLE_PROCESS_WARNING)
             if not resolved.testing:
                 rate_limiter.start()
             Base.metadata.create_all(engine)
@@ -104,7 +127,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             if not resolved.testing and "scheduler" in locals():
                 await scheduler.stop()
-            rate_limiter.close()
+            try:
+                rate_limiter.close()
+            except StorageUnavailableError:
+                logger.warning("Rate-limit storage could not be closed cleanly")
             engine.dispose()
 
     application = FastAPI(title="Listingo API", version="0.1.0", lifespan=lifespan)
@@ -113,6 +139,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.session_factory = session_factory
     application.state.cipher = ApiKeyCipher(resolved.secret_key_path)
     application.state.rate_limiter = rate_limiter
+    @application.exception_handler(StorageUnavailableError)
+    async def storage_unavailable_handler(_: Request, __: StorageUnavailableError) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": "防护存储暂不可用，请稍后再试"})
     # IP blocking must sit inside CORS so browsers still receive CORS headers on 403.
     application.add_middleware(IPBlockMiddleware)
     application.add_middleware(

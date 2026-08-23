@@ -332,7 +332,12 @@ def _create_paddleocr_runner(model_version: str, settings: Settings) -> OcrRunne
 def _create_rapidocr_runner(settings: Settings) -> OcrRunner:
     from rapidocr_onnxruntime import RapidOCR  # type: ignore
     try:
-        runner = RapidOCR(text_score=settings.ocr_text_score_threshold, det_box_thresh=settings.ocr_box_score_threshold)
+        runner = RapidOCR(
+            text_score=settings.ocr_text_score_threshold,
+            det_box_thresh=settings.ocr_box_score_threshold,
+            # RapidOCR 1.2.x requires det_model_path whenever a det_* option is supplied.
+            det_model_path=None,
+        )
     except TypeError:
         runner = RapidOCR()
     return OcrRunner(code="RapidOCR", model="PP-OCRv4-onnx", runner=runner)

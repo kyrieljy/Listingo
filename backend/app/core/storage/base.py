@@ -2,6 +2,18 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import Enum
+
+
+class StorageUnavailableError(RuntimeError):
+    """Raised when a runtime storage backend cannot service a request."""
+
+
+class HashConsumeStatus(str, Enum):
+    ACCEPTED = "accepted"
+    MISSING = "missing"
+    LIMIT_EXCEEDED = "limit_exceeded"
+    MISMATCH = "mismatch"
 
 
 @dataclass(frozen=True)
@@ -78,3 +90,32 @@ class RateLimitStorage(ABC):
     @abstractmethod
     def close(self) -> None:
         """Release background resources owned by the adapter."""
+
+    @abstractmethod
+    def reserve_sliding_window(
+        self,
+        key: str,
+        reservation_token: str,
+        limit: int,
+        window: int,
+    ) -> bool:
+        """Atomically reserve one slot in a rolling time window."""
+
+    @abstractmethod
+    def release_sliding_window(self, key: str, reservation_token: str) -> bool:
+        """Release a rolling-window reservation without affecting others."""
+
+    @abstractmethod
+    def delete_if_equal(self, key: str, expected_value: str) -> bool:
+        """Delete a live key only when its current value matches."""
+
+    @abstractmethod
+    def consume_hash_once(
+        self,
+        key: str,
+        attempts_key: str,
+        expected_value: str,
+        ttl: int,
+        max_attempts: int,
+    ) -> HashConsumeStatus:
+        """Atomically compare a hash and enforce its attempt budget."""

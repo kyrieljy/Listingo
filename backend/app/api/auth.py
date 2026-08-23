@@ -212,7 +212,7 @@ def login_with_sms(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     purpose = "register" if payload.mode == "register" else "login"
-    verify_sms_code(session, phone=payload.phone, purpose=purpose, code=payload.code)
+    verify_sms_code(request, phone=payload.phone, purpose=purpose, code=payload.code)
     phone = normalize_phone(payload.phone)
     user = session.scalar(select(User).where(User.phone == phone).limit(1))
     if not user:
@@ -234,7 +234,7 @@ def register(
     response: Response,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    verify_sms_code(session, phone=payload.phone, purpose="register", code=payload.code)
+    verify_sms_code(request, phone=payload.phone, purpose="register", code=payload.code)
     user = _create_user(session, phone=payload.phone, username=payload.username, password=payload.password)
     issue_session(session, request, response, user)
     record_login_event(session, request, user=user, method="register", status="succeeded")
@@ -274,7 +274,7 @@ def login_with_password(
             )
             raise HTTPException(status_code=422, detail="管理员账号需要短信二次验证")
         try:
-            verify_sms_code(session, phone=user.phone, purpose="admin", code=payload.admin_code)
+            verify_sms_code(request, phone=user.phone, purpose="admin", code=payload.admin_code)
         except HTTPException:
             _record_password_login_failure(
                 session,
@@ -378,6 +378,7 @@ async def change_phone_start(
 @router.post("/account/change-phone/confirm", response_model=AuthMeOut)
 def change_phone_confirm(
     payload: ChangePhoneConfirmCreate,
+    request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
@@ -385,7 +386,7 @@ def change_phone_confirm(
     existing = session.scalar(select(User).where(User.phone == new_phone, User.id != current_user.id).limit(1))
     if existing:
         raise HTTPException(status_code=409, detail="手机号已被其他账号绑定")
-    verify_sms_code(session, phone=new_phone, purpose="change_phone", code=payload.code)
+    verify_sms_code(request, phone=new_phone, purpose="change_phone", code=payload.code)
     current_user.phone = new_phone
     create_notification(session, current_user.id, title="手机号已换绑", body="你的登录手机号已完成换绑。", category="security")
     session.commit()

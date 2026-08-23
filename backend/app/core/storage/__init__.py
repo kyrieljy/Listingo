@@ -7,10 +7,12 @@ from backend.app.core.storage.base import (
     WriteResult,
 )
 from backend.app.core.storage.memory import MemoryStorage
+from backend.app.core.storage.redis import RedisStorage
 
 __all__ = [
     "IncrementResult",
     "MemoryStorage",
+    "RedisStorage",
     "RateLimitStorage",
     "StorageItem",
     "WriteResult",

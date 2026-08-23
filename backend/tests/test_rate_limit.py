@@ -5,9 +5,11 @@ from pathlib import Path
 import threading
 
 import pytest
+from fakeredis import FakeRedis
 from fastapi.testclient import TestClient
 
 from backend.app.config import Settings
+from backend.app.core import rate_limit as rate_limit_module
 from backend.app.core.rate_limit import (
     NONCE_TTL_SECONDS,
     NonceStatus,
@@ -16,6 +18,8 @@ from backend.app.core.rate_limit import (
     rate_limit_headers,
 )
 from backend.app.core.storage.memory import MemoryStorage
+from backend.app.core.storage.redis import RedisStorage
+from backend.app.core.storage.base import StorageUnavailableError
 from backend.app.main import create_app
 
 
@@ -24,11 +28,34 @@ def make_settings(tmp_path: Path) -> Settings:
         data_dir=tmp_path / "data",
         database_url=f"sqlite:///{(tmp_path / 'data' / 'test.sqlite3').as_posix()}",
         testing=True,
+        storage_backend="memory",
         _env_file=None,
     )
 
 
 def app_client(settings: Settings) -> TestClient:
+    return TestClient(create_app(settings))
+
+
+def redis_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    fake_redis = FakeRedis(decode_responses=True)
+
+    def fake_factory(**_kwargs: object) -> RedisStorage:
+        return RedisStorage(
+            url="redis://localhost:6379/0",
+            key_prefix="listingo-test",
+            client=fake_redis,
+        )
+
+    monkeypatch.setattr(rate_limit_module, "RedisStorage", fake_factory)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        database_url=f"sqlite:///{(tmp_path / 'data' / 'test.sqlite3').as_posix()}",
+        testing=True,
+        storage_backend="redis",
+        redis_startup_timeout_seconds=0.5,
+        _env_file=None,
+    )
     return TestClient(create_app(settings))
 
 
@@ -154,6 +181,49 @@ def test_five_password_failures_block_subsequent_requests(client: TestClient) ->
     assert blocked.headers["access-control-allow-origin"] == "http://localhost:5173"
 
 
+def test_redis_backend_preserves_generation_nonce_and_block_behavior(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with redis_app(tmp_path, monkeypatch) as client:
+        suite_payload = {
+            "asset_ids": ["missing-asset"],
+            "platform": "Amazon",
+            "market": "美国",
+            "language": "English",
+            "aspect_ratio": "1:1",
+            "selling_points": "双层保温",
+            "dry_run": True,
+        }
+        for _ in range(20):
+            assert client.post("/api/v1/generation-jobs", json=suite_payload).status_code == 422
+        limited = client.post("/api/v1/generation-jobs", json=suite_payload)
+        assert limited.status_code == 429
+        assert limited.headers["X-RateLimit-Limit"] == "20"
+
+        accepted = client.post(
+            "/api/v1/account/password",
+            headers={"X-Request-Nonce": "1234567890abcdef"},
+            json={"current_password": "old", "next_password": "new-password"},
+        )
+        duplicate = client.post(
+            "/api/v1/account/password",
+            headers={"X-Request-Nonce": "1234567890abcdef"},
+            json={"current_password": "old", "next_password": "new-password"},
+        )
+        assert (accepted.status_code, duplicate.status_code) == (200, 409)
+
+        login_headers = {"X-Forwarded-For": "198.51.100.8"}
+        login = {"identifier": "redis-user", "password": "wrong-password"}
+        statuses = [
+            client.post("/api/v1/auth/password/login", json=login, headers=login_headers).status_code
+            for _ in range(5)
+        ]
+        assert statuses == [401, 401, 401, 401, 403]
+        assert client.get("/api/v1/health", headers=login_headers).status_code == 403
+        assert client.app.state.rate_limiter.block_ttl_seconds("198.51.100.8") == 1800
+
+
 def test_sensitive_endpoints_require_and_reject_nonce(client: TestClient) -> None:
     missing = client.post("/api/v1/account/password", json={"current_password": "old", "next_password": "new-password"})
     invalid = client.post(
@@ -204,6 +274,54 @@ def test_web_concurrency_above_one_fails_outside_testing(monkeypatch, tmp_path: 
 
     with pytest.raises(RuntimeError, match="memory rate limiting"):
         create_app(settings)
+
+
+def test_redis_backend_allows_multiple_workers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+
+    with redis_app(tmp_path, monkeypatch) as client:
+        assert client.get("/api/v1/health").status_code == 200
+
+
+def test_redis_startup_failure_does_not_fallback_to_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = FakeRedis(decode_responses=True)
+    failing_storage = RedisStorage(
+        url="redis://localhost:6379/0",
+        key_prefix="listingo-test",
+        client=fake_redis,
+    )
+
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        raise StorageUnavailableError("redis is offline")
+
+    monkeypatch.setattr(failing_storage, "ping", unavailable)
+    monkeypatch.setattr(rate_limit_module, "RedisStorage", lambda **_kwargs: failing_storage)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        database_url=f"sqlite:///{(tmp_path / 'data' / 'test.sqlite3').as_posix()}",
+        testing=False,
+        storage_backend="redis",
+        redis_startup_timeout_seconds=0.5,
+        _env_file=None,
+    )
+
+    with pytest.raises(RuntimeError, match="Redis is unavailable"):
+        with TestClient(create_app(settings)):
+            pass
+
+
+def test_storage_unavailable_returns_503(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    def unavailable(*_args: object, **_kwargs: object) -> bool:
+        raise StorageUnavailableError("redis is offline")
+
+    monkeypatch.setattr(client.app.state.rate_limiter, "is_ip_blocked", unavailable)
+
+    response = client.get("/api/v1/health")
+
+    assert response.status_code == 503
 
 
 def test_non_testing_lifespan_starts_and_stops_cleanup(caplog, tmp_path: Path) -> None:

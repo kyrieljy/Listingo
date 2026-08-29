@@ -1,8 +1,10 @@
 from time import sleep
 
-from sqlalchemy import inspect
+from sqlalchemy import func, inspect, select
+from sqlalchemy.exc import IntegrityError
 
-from backend.app.models import SmsConfig
+from backend.app import api
+from backend.app.models import LoginEvent, Notification, SmsConfig, User, UserSession
 from backend.app.services.sms import _sms_identity, mask_phone, normalize_phone, sms_code_hash, split_phone
 
 
@@ -45,6 +47,105 @@ def test_debug_sms_code_comes_from_settings(client) -> None:
 
     assert response.status_code == 200
     assert response.json()["debug_code"] == "654321"
+
+
+def test_sms_login_auto_creates_and_reuses_user(client) -> None:
+    _configure_debug_sms(client)
+    phone = "13800138006"
+
+    sent = client.post("/api/v1/auth/sms/send", json={"phone": phone, "purpose": "login"})
+    first = client.post("/api/v1/auth/sms/login", json={"phone": phone, "code": sent.json()["debug_code"]})
+    repeated = client.post("/api/v1/auth/sms/login", json={"phone": phone, "code": sent.json()["debug_code"]})
+
+    assert sent.status_code == 200
+    assert first.status_code == 200
+    assert repeated.status_code == 422
+
+    session_factory = client.app.state.session_factory
+    with session_factory() as session:
+        users = list(session.scalars(select(User).where(User.phone == phone)))
+        assert len(users) == 1
+        user = users[0]
+        assert user.id == first.json()["user"]["id"]
+        assert user.status == "active"
+        assert user.current_plan_code == "free"
+        assert user.username == phone
+        assert session.scalar(select(func.count()).select_from(UserSession).where(UserSession.user_id == user.id)) == 1
+        assert session.scalar(
+            select(func.count()).select_from(Notification).where(
+                Notification.user_id == user.id,
+                Notification.category == "register",
+            )
+        ) == 1
+        assert session.scalar(
+            select(func.count()).select_from(LoginEvent).where(
+                LoginEvent.user_id == user.id,
+                LoginEvent.method == "sms",
+                LoginEvent.status == "succeeded",
+            )
+        ) == 1
+
+    fresh = client.post("/api/v1/auth/sms/send", json={"phone": phone, "purpose": "login"})
+    second = client.post("/api/v1/auth/sms/login", json={"phone": phone, "code": fresh.json()["debug_code"]})
+
+    assert fresh.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["user"]["id"] == first.json()["user"]["id"]
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(User).where(User.phone == phone)) == 1
+        assert session.scalar(
+            select(func.count()).select_from(UserSession).where(UserSession.user_id == first.json()["user"]["id"])
+        ) == 2
+
+
+def test_sms_login_rejects_disabled_existing_user(client) -> None:
+    _configure_debug_sms(client)
+    phone = "13800138007"
+
+    sent = client.post("/api/v1/auth/sms/send", json={"phone": phone, "purpose": "login"})
+    created = client.post("/api/v1/auth/sms/login", json={"phone": phone, "code": sent.json()["debug_code"]})
+    session_factory = client.app.state.session_factory
+    with session_factory() as session:
+        user = session.scalar(select(User).where(User.phone == phone))
+        user.status = "disabled"
+        session.commit()
+
+    fresh = client.post("/api/v1/auth/sms/send", json={"phone": phone, "purpose": "login"})
+    disabled = client.post("/api/v1/auth/sms/login", json={"phone": phone, "code": fresh.json()["debug_code"]})
+
+    assert created.status_code == 200
+    assert fresh.status_code == 200
+    assert disabled.status_code == 403
+    assert disabled.json()["detail"] == "账号已停用，请联系管理员"
+
+
+def test_concurrent_first_sms_login_reuses_unique_phone_winner(client, monkeypatch) -> None:
+    integrity_phone = "13800138008"
+    conflict_phone = "13800138009"
+    session_factory = client.app.state.session_factory
+    original_create_user = api.auth._create_user
+
+    def create_competitor(session, *, phone):
+        with session_factory() as other:
+            other.add(
+                User(
+                    phone=phone,
+                    username=phone,
+                    display_name="Listingo 用户",
+                    uid=phone[-8:],
+                )
+            )
+            other.commit()
+        if phone == conflict_phone:
+            return original_create_user(session, phone=phone)
+        raise IntegrityError("INSERT app_user", {}, Exception("duplicate phone"))
+
+    monkeypatch.setattr(api.auth, "_create_user", create_competitor)
+    for phone in (integrity_phone, conflict_phone):
+        with session_factory() as session:
+            user = api.auth._get_or_create_user_by_phone(session, phone)
+            assert user.phone == phone
+            assert user.uid == phone[-8:]
 
 
 def _configure_debug_sms(client, *, cooldown_seconds: int = 0, code_ttl_seconds: int = 300) -> None:

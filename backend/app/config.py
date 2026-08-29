@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     redis_lock_ttl_seconds: int = Field(default=30, ge=1)
     redis_metric_ttl_seconds: int = Field(default=2 * 24 * 60 * 60, ge=1)
     redis_ocr_cache_ttl_seconds: int = Field(default=3600, ge=1)
+    generation_queue_poll_interval_seconds: float = Field(default=0.5, ge=0.05)
+    generation_queue_stop_timeout_seconds: float = Field(default=900.0, ge=1.0)
     rate_limit_max_size: int = Field(default=10_000, ge=1)
     rate_limit_cleanup_interval_seconds: int = Field(default=30, ge=1)
     max_upload_bytes: int = 15 * 1024 * 1024

@@ -69,6 +69,10 @@ class RateLimitStorage(ABC):
         """Apply a new TTL to an existing live key."""
 
     @abstractmethod
+    def expire_if_equal(self, key: str, expected_value: str, ttl: int) -> bool:
+        """Renew a live key's TTL only when its current value matches."""
+
+    @abstractmethod
     def set_if_absent(
         self,
         key: str,
@@ -119,3 +123,27 @@ class RateLimitStorage(ABC):
         max_attempts: int,
     ) -> HashConsumeStatus:
         """Atomically compare a hash and enforce its attempt budget."""
+
+    @abstractmethod
+    def queue_push(self, key: str, value: str) -> None:
+        """Append a durable runtime queue element."""
+
+    @abstractmethod
+    def queue_pop(self, key: str) -> str | None:
+        """Remove and return the oldest queue element."""
+
+    @abstractmethod
+    def queue_remove(self, key: str, value: str) -> bool:
+        """Remove every matching queue element and report whether one existed."""
+
+    @abstractmethod
+    def queue_length(self, key: str) -> int:
+        """Return the number of queued elements."""
+
+    @abstractmethod
+    def queue_clear(self, key: str) -> bool:
+        """Clear a rebuildable queue and report whether it existed."""
+
+    @abstractmethod
+    def queue_items(self, key: str) -> list[str]:
+        """Return queue elements in consumption order for diagnostics."""

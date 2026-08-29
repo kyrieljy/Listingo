@@ -69,6 +69,11 @@ def batch_status_key(batch_id: str) -> str:
     return f"batch:status:{batch_id}"
 
 
+def queue_key(kind: str) -> str:
+    """Runtime FIFO queues rebuilt from PostgreSQL job facts."""
+    return f"queue:{kind}"
+
+
 def lock_key(scope: str, identifier: str) -> str:
     return f"lock:{scope}:{identifier}"
 

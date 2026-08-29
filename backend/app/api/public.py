@@ -33,6 +33,7 @@ from backend.app.models import (
     VideoVersion,
     Workflow,
     User,
+    utcnow,
 )
 from backend.app.schemas import (
     AssetOut,
@@ -76,6 +77,7 @@ from backend.app.services.jobs import (
     _call_llm_with_fallback,
     _enabled_provider,
     cancel_generation_job,
+    JOB_FINAL_STATUSES,
     create_dryrun_child_version,
     create_live_child_version,
     image_provider_route,
@@ -123,6 +125,7 @@ from backend.app.services.storage import store_upload
 from backend.app.services.video_jobs import (
     build_video_copywriting_user_prompt,
     cancel_video_job,
+    FINAL_STATUSES,
     create_dryrun_video_child_version,
     create_live_video_child_version,
     dryrun_video_script,
@@ -132,6 +135,25 @@ from backend.app.services.video_jobs import (
 from backend.app.services.watermarking import apply_ai_watermark
 from backend.app.services.auth import ensure_owner_access, get_current_user, get_optional_user
 from backend.app.services.subscriptions import confirm_quota, release_quota, reserve_quota
+from backend.app.core.storage.base import StorageUnavailableError
+
+
+def _fail_closed_compensate(session_factory, job_id: str, model, ref_type: str) -> None:
+    """Redis 入队失败时回滚已落库的 queued 任务并释放预留额度（fail-closed）。
+
+    队列是正确性依赖：入队失败不应留下会稍后自动执行的 queued 任务，
+    因此将任务置为 cancelled 并释放本次预留额度，用户看到的是明确的失败。
+    """
+    with session_factory() as session:
+        job = session.get(model, job_id)
+        if job and job.status == "queued":
+            release_quota(session, ref_type=ref_type, ref_id=job.id)
+            job.status = "cancelled"
+            job.completed_at = utcnow()
+            for item in job.items:
+                if item.status == "queued":
+                    item.status = "cancelled"
+            session.commit()
 
 
 router = APIRouter(prefix="/api/v1", tags=["generation"])
@@ -655,7 +677,6 @@ def download_batch_results(
 @router.post("/generation-jobs", response_model=GenerationJobOut, status_code=201)
 async def create_generation_job(
     payload: GenerationJobCreate,
-    background_tasks: BackgroundTasks,
     request: Request,
     response: Response,
     current_user: User = Depends(get_current_user),
@@ -683,13 +704,12 @@ async def create_generation_job(
         raise
     session.commit()
     session.refresh(job)
-    background_tasks.add_task(
-        run_generation_job,
-        job.id,
-        request.app.state.session_factory,
-        request.app.state.settings,
-        request.app.state.cipher,
-    )
+    scheduler = request.app.state.generation_queue_scheduler
+    try:
+        scheduler.enqueue("generation", job.id)
+    except StorageUnavailableError:
+        _fail_closed_compensate(request.app.state.session_factory, job.id, GenerationJob, "generation_job")
+        raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
     return serialize_job(job)
 
     assets = session.scalars(select(Asset).where(Asset.id.in_(payload.asset_ids))).all()
@@ -1465,7 +1485,6 @@ async def assist_video_copywriting(
 @router.post("/video-jobs", response_model=VideoJobOut, status_code=201)
 async def create_video_job(
     payload: VideoJobCreate,
-    background_tasks: BackgroundTasks,
     request: Request,
     response: Response,
     current_user: User = Depends(get_current_user),
@@ -1529,13 +1548,12 @@ async def create_video_job(
     )
     session.commit()
     session.refresh(job)
-    background_tasks.add_task(
-        run_video_job,
-        job.id,
-        request.app.state.session_factory,
-        request.app.state.settings,
-        request.app.state.cipher,
-    )
+    scheduler = request.app.state.generation_queue_scheduler
+    try:
+        scheduler.enqueue("video", job.id)
+    except StorageUnavailableError:
+        _fail_closed_compensate(request.app.state.session_factory, job.id, VideoJob, "video_job")
+        raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
     return serialize_video_job(load_video_job(session, job.id))
 
 
@@ -1567,12 +1585,23 @@ def get_video_job(
 @router.post("/video-jobs/{job_id}/cancel", response_model=VideoJobOut)
 def cancel_video_generation_job(
     job_id: str,
+    request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     job = load_video_job(session, job_id)
     ensure_job_owner(current_user, job)
-    return serialize_video_job(cancel_video_job(session, job))
+    scheduler = request.app.state.generation_queue_scheduler
+    # 重新加锁读取最新状态，确保与 worker 认领的并发安全
+    fresh = session.execute(select(VideoJob).where(VideoJob.id == job_id).with_for_update()).scalar_one_or_none()
+    if fresh is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if fresh.status == "running":
+        raise HTTPException(status_code=409, detail="任务正在生成中，无法取消")
+    if fresh.status in FINAL_STATUSES:
+        return serialize_video_job(fresh)
+    scheduler.remove("video", job_id)
+    return serialize_video_job(cancel_video_job(session, fresh))
 
 
 @router.post("/video-jobs/{job_id}/retry-failed", response_model=VideoJobOut)
@@ -1602,8 +1631,12 @@ async def retry_failed_video_job(
     job.status = "queued"
     job.progress = 0
     session.commit()
-    await run_video_job(job.id, request.app.state.session_factory, request.app.state.settings, request.app.state.cipher)
-    session.expire_all()
+    scheduler = request.app.state.generation_queue_scheduler
+    try:
+        scheduler.enqueue("video", job.id)
+    except StorageUnavailableError:
+        _fail_closed_compensate(request.app.state.session_factory, job.id, VideoJob, "video_job")
+        raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
     return serialize_video_job(load_video_job(session, job.id))
 
 
@@ -1723,12 +1756,23 @@ def get_generation_job(
 @router.post("/generation-jobs/{job_id}/cancel", response_model=GenerationJobOut)
 def cancel_generation_job_endpoint(
     job_id: str,
+    request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     job = load_job(session, job_id)
     ensure_job_owner(current_user, job)
-    return serialize_job(cancel_generation_job(session, job))
+    scheduler = request.app.state.generation_queue_scheduler
+    # 重新加锁读取最新状态，确保与 worker 认领的并发安全
+    fresh = session.execute(select(GenerationJob).where(GenerationJob.id == job_id).with_for_update()).scalar_one_or_none()
+    if fresh is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if fresh.status == "running":
+        raise HTTPException(status_code=409, detail="任务正在生成中，无法取消")
+    if fresh.status in JOB_FINAL_STATUSES:
+        return serialize_job(fresh)
+    scheduler.remove("generation", job_id)
+    return serialize_job(cancel_generation_job(session, fresh))
 
 
 @router.post("/generation-jobs/{job_id}/retry-failed", response_model=GenerationJobOut)
@@ -1754,11 +1798,21 @@ async def retry_failed(
         ref_id=job.id,
         description="retry image generation",
     )
+    # Re-queue the job but deliberately keep the failed items in `failed`: the worker
+    # detects failed items on claim and routes to `retry_failed_live_items`, which
+    # redoes only those. Resetting them here would make the worker regenerate the
+    # whole job instead. The worker drops any job that is not `queued` on claim.
+    job.status = "queued"
+    job.progress = 0
+    job.error = None
+    job.completed_at = None
     session.commit()
-    await retry_failed_live_items(
-        job.id, request.app.state.session_factory, request.app.state.settings, request.app.state.cipher
-    )
-    session.expire_all()
+    scheduler = request.app.state.generation_queue_scheduler
+    try:
+        scheduler.enqueue("generation", job.id)
+    except StorageUnavailableError:
+        _fail_closed_compensate(request.app.state.session_factory, job.id, GenerationJob, "generation_job")
+        raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
     return serialize_job(load_job(session, job.id))
 
 

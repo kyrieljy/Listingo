@@ -7,6 +7,9 @@ from backend.app.models import AplusItem, AplusJob, BatchItem, GenerationItem, G
 
 
 OPEN_STATUSES = ("queued", "running", "cancelling")
+# 入队后 generation/video 的 queued 属于"等待中"，由队列在启动时重建，
+# 不再视为被打断；只有 running/cancelling 才是需要恢复为终态的遗留任务。
+INTERRUPTED_STATUSES = ("running", "cancelling")
 ITEM_OPEN_STATUSES = {"queued", "running", "cancelling"}
 INTERRUPTED_ERROR = "Job was interrupted by service restart; retry failed items."
 CANCELLED_ERROR = "Job cancellation completed after service restart."
@@ -52,7 +55,7 @@ def _recover_generation_jobs(session: Session) -> int:
     jobs = session.scalars(
         select(GenerationJob)
         .where(
-            GenerationJob.status.in_(OPEN_STATUSES),
+            GenerationJob.status.in_(INTERRUPTED_STATUSES),
             GenerationJob.is_admin_test.is_(False),
             ~GenerationJob.id.in_(batch_generation_ids),
         )
@@ -94,7 +97,7 @@ def _recover_aplus_generation_jobs(session: Session) -> int:
 def _recover_video_jobs(session: Session) -> int:
     jobs = session.scalars(
         select(VideoJob)
-        .where(VideoJob.status.in_(OPEN_STATUSES), VideoJob.is_admin_test.is_(False))
+        .where(VideoJob.status.in_(INTERRUPTED_STATUSES), VideoJob.is_admin_test.is_(False))
         .options(selectinload(VideoJob.items))
     ).all()
     return sum(1 for job in jobs if _recover_job(job))

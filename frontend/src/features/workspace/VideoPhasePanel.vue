@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
-import { computed, nextTick, onActivated, onMounted, ref, watch } from 'vue'
-import { Modal, message } from 'ant-design-vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { message } from 'ant-design-vue'
 import {
   CheckOutlined,
   CloseOutlined,
@@ -13,7 +13,6 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons-vue'
 import {
-  apiErrorStatus,
   assistVideoCopywriting,
   cancelVideoJob,
   createVideoJob,
@@ -40,6 +39,7 @@ import {
   videoRatioOptions,
   videoTypeOptions,
 } from './workspace-model'
+import { generationFailureMessageFor } from './generation-errors'
 import { trackWorkspaceEvent } from './analytics'
 import { useAuthStore } from '../auth/auth-store'
 
@@ -69,6 +69,8 @@ const aiSuggestionInput = ref<HTMLTextAreaElement | null>(null)
 const VIDEO_JOB_POLL_INTERVAL_MS = 1000
 const FINAL_VIDEO_JOB_STATUSES = new Set(['succeeded', 'partial_failed', 'failed', 'cancelled', 'partial_cancelled'])
 const refreshingVideoJobId = ref<string | null>(null)
+const retryCooldownUntil = ref(0)
+let retryCooldownTimer: number | undefined
 
 const videoSellingPointsPlaceholder = `建议包含以下信息：
 1. 商品名称
@@ -84,8 +86,24 @@ const selectedRatioOptions = computed(() => {
 const uploadLimitReached = computed(() => assets.value.length >= PRODUCT_IMAGE_UPLOAD_LIMIT)
 const canGenerate = computed(() => assets.value.length > 0 && form.value.videoTypes.length > 0)
 const videoJobActive = computed(() => Boolean(job.value && !FINAL_VIDEO_JOB_STATUSES.has(job.value.status)))
+const retryCooldownActive = computed(() => Date.now() < retryCooldownUntil.value)
 const dryRun = computed(() => form.value.dryRun)
 const editPreviewUrl = computed(() => editItemState.value ? currentVideoUrl(editItemState.value) : '')
+
+function clearRetryCooldown() {
+  window.clearTimeout(retryCooldownTimer)
+  retryCooldownTimer = undefined
+  retryCooldownUntil.value = 0
+}
+
+function startRetryCooldown() {
+  clearRetryCooldown()
+  retryCooldownUntil.value = Date.now() + 2000
+  retryCooldownTimer = window.setTimeout(() => {
+    retryCooldownUntil.value = 0
+    retryCooldownTimer = undefined
+  }, 2000)
+}
 function requireAuthForModelAction(): boolean {
   if (authStore.isAuthenticated) return false
   emit('require-auth')
@@ -116,6 +134,7 @@ onMounted(async () => {
   try { history.value = await listVideoJobs() } catch { history.value = [] }
 })
 onActivated(() => { void resumeCurrentVideoJobRefresh() })
+onBeforeUnmount(clearRetryCooldown)
 watch(() => form.value.platform, () => {
   const options = selectedRatioOptions.value
   if (!options.some((item) => item.value === form.value.ratio) && options[0]) {
@@ -126,13 +145,11 @@ watch(() => form.value.platform, () => {
 function requestDetail(error: unknown): string {
   return userFacingApiErrorMessage(error)
 }
+function notifyVideoGenerationFailure(source: unknown) {
+  message.error(generationFailureMessageFor('video', source))
+}
 function handleRequestError(error: unknown, fallback: string) {
-  const detail = requestDetail(error) || fallback
-  if (apiErrorStatus(error) === 422 && detail.includes('安全拦截')) {
-    Modal.error({ title: '内容安全拦截', content: detail })
-    return
-  }
-  Modal.error({ title: fallback, content: detail })
+  message.error(requestDetail(error) || fallback)
 }
 function isVideoUrl(url: string) {
   return /\.(mp4|webm|mov)(\?|$)/i.test(url)
@@ -168,8 +185,9 @@ async function resumeVideoJobRefresh(jobId: string) {
     const latest = await waitForVideoJob(jobId)
     selected.value = latest.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
     if (FINAL_VIDEO_JOB_STATUSES.has(latest.status)) history.value = await listVideoJobs()
-  } catch {
+  } catch (error: unknown) {
     // Keep the last visible state; history open or route activation can retry.
+    notifyVideoGenerationFailure(error)
   } finally {
     if (refreshingVideoJobId.value === jobId) refreshingVideoJobId.value = null
     generating.value = false
@@ -329,22 +347,18 @@ async function generate() {
     selected.value = []
     const created = await createVideoJob(payload)
     job.value = created
+    message.info('任务已在后台运行，可在消息中心查看结果')
     if (cancelRequested.value) job.value = await cancelVideoJob(created.id)
     const finished = await waitForVideoJob(created.id)
     selected.value = finished.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
     history.value = await listVideoJobs()
-    message[finished.status === 'failed' ? 'error' : ['partial_failed', 'partial_cancelled'].includes(finished.status) ? 'warning' : 'success'](
-      finished.status === 'succeeded'
-        ? '视频已生成'
-        : finished.status === 'cancelled'
-          ? '视频任务已取消'
-          : finished.status === 'partial_cancelled'
-            ? '视频任务已部分取消，已完成结果仍可使用'
-            : '部分视频生成失败，可查看原因或重试',
-    )
+    if (finished.status === 'succeeded') message.success('视频已生成')
+    else if (finished.status === 'cancelled') message.success('视频任务已取消')
+    else if (finished.status === 'partial_cancelled') message.warning('视频任务已部分取消，已完成结果仍可使用')
+    else notifyVideoGenerationFailure(finished)
   } catch (error: unknown) {
     if (job.value?.id.startsWith('optimistic-video-')) job.value = null
-    handleRequestError(error, '视频任务创建失败')
+    notifyVideoGenerationFailure(error)
   } finally {
     generating.value = false
     cancelling.value = false
@@ -352,6 +366,7 @@ async function generate() {
 }
 async function cancelGeneration() {
   if (!job.value || cancelling.value || FINAL_VIDEO_JOB_STATUSES.has(job.value.status)) return
+  if (retryCooldownActive.value) return
   trackVideoEvent('video_cancel_click', 'click', 'video', { job_id: job.value.id })
   cancelRequested.value = true
   cancelling.value = true
@@ -373,21 +388,40 @@ async function cancelGeneration() {
   }
 }
 async function retryFailed() {
-  if (!job.value || job.value.id.startsWith('optimistic-video-')) return
+  if (!job.value || job.value.id.startsWith('optimistic-video-') || generating.value || retryCooldownActive.value) return
   if (requireAuthForModelAction()) return
+  const failedItems = job.value.items.filter((item) => item.status === 'failed')
+  if (!failedItems.length) return
   trackVideoEvent('video_retry_failed_click', 'click', 'video', { job_id: job.value.id, failed_count: job.value.items.filter((item) => item.status === 'failed').length })
+  const previousJob = job.value
   generating.value = true
+  cancelling.value = false
+  cancelRequested.value = false
+  startRetryCooldown()
+  job.value = {
+    ...previousJob,
+    status: 'running',
+    progress: 0,
+    error: null,
+    items: previousJob.items.map((item) => item.status === 'failed' ? { ...item, status: 'running', error: null } : item),
+  }
   try {
-    await retryFailedVideoItems(job.value.id)
-    const finished = await waitForVideoJob(job.value.id)
+    const latest = await retryFailedVideoItems(previousJob.id)
+    if (!job.value || job.value.id !== previousJob.id) return
+    job.value = latest
+    message.info('任务已在后台运行，可在消息中心查看结果')
+    const finished = await waitForVideoJob(latest.id)
+    if (!job.value || job.value.id !== previousJob.id) return
     selected.value = finished.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
   } catch (error: unknown) {
-    handleRequestError(error, '视频重试失败')
+    if (job.value?.id === previousJob.id && !cancelRequested.value) job.value = previousJob
+    notifyVideoGenerationFailure(error)
   } finally {
-    generating.value = false
+    if (!job.value || job.value.id === previousJob.id) generating.value = false
   }
 }
 async function openHistoryJob(entry: VideoJob) {
+  clearRetryCooldown()
   job.value = await getVideoJob(entry.id)
   selected.value = job.value.items.filter((item) => item.status === 'succeeded').map((item) => item.id)
   if (videoJobNeedsRefresh(job.value)) void resumeVideoJobRefresh(job.value.id)
@@ -431,6 +465,7 @@ async function submitVideoEdit() {
 }
 
 function startNewTask() {
+  clearRetryCooldown()
   assets.value = []
   form.value = createDefaultVideoForm()
   uploading.value = false
@@ -525,7 +560,7 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
       </section>
 
       <footer class="video-footer">
-        <button v-if="videoJobActive" class="secondary-action cancel-action" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined />{{ cancelling ? '取消中' : '取消任务' }}</button>
+        <button v-if="videoJobActive && job?.status === 'queued'" class="secondary-action cancel-action" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined />{{ cancelling ? '取消中' : '取消任务' }}</button>
         <button :disabled="generating || !canGenerate" @click="generate"><RocketOutlined />{{ generating ? '正在生成视频' : `生成 ${form.videoTypes.length} 条 15s 爆款视频` }}</button>
       </footer>
     </aside>
@@ -535,8 +570,8 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
         <div class="video-toolbar">
           <div><i :class="{ failed: ['failed', 'cancelled'].includes(job.status), warning: ['partial_failed', 'partial_cancelled', 'cancelling'].includes(job.status) }" /><span><b>{{ job.status === 'succeeded' ? '生成爆款结果' : job.status === 'failed' ? '视频生成失败' : job.status === 'partial_failed' ? '部分视频生成失败' : job.status === 'cancelled' ? '视频任务已取消' : job.status === 'partial_cancelled' ? '视频任务已部分取消' : job.status === 'running' ? '正在生成视频' : '视频任务完成' }}</b><small>{{ job.count }} 条 · {{ job.dry_run ? 'Dryrun' : 'Live' }}</small></span></div>
           <div>
-            <button v-if="videoJobActive" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined />{{ cancelling ? '取消中' : '取消任务' }}</button>
-            <button v-if="job.items.some((item) => item.status === 'failed')" @click="retryFailed"><ReloadOutlined />重试失败</button>
+            <button v-if="videoJobActive && job?.status === 'queued'" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined />{{ cancelling ? '取消中' : '取消任务' }}</button>
+            <button v-if="retryCooldownActive || job.items.some((item) => item.status === 'failed')" :disabled="generating || retryCooldownActive" @click="retryFailed"><ReloadOutlined />重试失败</button>
             <button @click="selected = job.items.filter((item) => item.status === 'succeeded').map((item) => item.id)">全选成功项</button>
             <button class="video-download" @click="downloadSelected"><DownloadOutlined />下载选中 ({{ selected.length }})</button>
           </div>
@@ -549,7 +584,7 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
                 <video v-if="isVideoUrl(currentVideoUrl(item) || '')" :src="currentVideoUrl(item)" muted loop playsinline controls />
                 <img v-else :src="currentVideoUrl(item)" alt="视频占位预览" />
               </template>
-              <div v-else-if="!videoPlaceholderSpinning(item)" class="video-failed"><b>{{ videoPlaceholderLabel(item) }}</b><small>{{ item.error }}</small></div>
+              <div v-else-if="!videoPlaceholderSpinning(item)" class="video-failed"><b>{{ videoPlaceholderLabel(item) }}</b></div>
               <div v-else class="video-loading"><span />{{ videoPlaceholderLabel(item) }}</div>
             </div>
             <footer>

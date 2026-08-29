@@ -41,6 +41,7 @@ import {
 } from './batch-model'
 import resultGridSource from './ResultGrid.vue?raw'
 import aplusPanelRawSource from './APlusPhasePanel.vue?raw'
+import generationErrorsRawSource from './generation-errors.ts?raw'
 import batchHistoryRawSource from './BatchHistoryDrawer.vue?raw'
 import batchModalRawSource from './BatchHostingModal.vue?raw'
 import batchTaskCardSource from './BatchTaskCard.vue?raw'
@@ -779,9 +780,20 @@ describe('workspace model', () => {
     expect(videoPanelSource).not.toContain('正在生成 ${job?.progress')
   })
 
-  it('uses a modal for content safety interception errors', () => {
-    expect(workspaceSource).toContain("Modal.error({ title: '内容安全拦截'")
-    expect(workspaceSource).toContain("detail.includes('安全拦截')")
+  it('routes generation and content-safety failures through the top message area', () => {
+    expect(workspaceSource).not.toContain('Modal.error')
+    expect(aplusPanelSource).not.toContain('Modal.error')
+    expect(videoPanelSource).not.toContain('Modal.error')
+    expect(workspaceSource).toContain("message.error(generationFailureMessageFor('image', source))")
+    expect(aplusPanelSource).toContain("message.error(generationFailureMessageFor('image', source))")
+    expect(videoPanelSource).toContain("message.error(generationFailureMessageFor('video', source))")
+    expect(generationErrorsRawSource).toContain("image: '生成图片失败，请稍后重试'")
+    expect(generationErrorsRawSource).toContain("video: '生成视频失败，请稍后重试'")
+    expect(generationErrorsRawSource).toContain('import.meta.env.DEV')
+    expect(generationErrorsRawSource).toContain("import.meta.env.VITE_SHOW_DETAILED_GENERATION_ERRORS === 'true'")
+    expect(videoPanelSource).not.toContain('{{ item.error }}')
+    expect(aplusPanelSource).not.toContain('{{ item.error }}')
+    expect(workspaceSource).not.toContain('{{ item.error }}')
   })
 
   it('previews AI copywriting before applying and supports regeneration', () => {
@@ -1212,7 +1224,7 @@ describe('workspace model', () => {
   })
 
   it('keeps video publish ratio valid when platform changes', () => {
-    expect(videoPanelSource).toContain("import { computed, nextTick, onActivated, onMounted, ref, watch } from 'vue'")
+    expect(videoPanelSource).toContain("import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'")
     expect(videoPanelSource).toContain('watch(() => form.value.platform')
     expect(videoPanelSource).toContain('!options.some((item) => item.value === form.value.ratio)')
     expect(videoPanelSource).toContain('form.value.ratio = options[0].value')
@@ -1236,6 +1248,21 @@ describe('workspace model', () => {
     expect(workspaceVideoCss).toContain('.video-card footer .video-card-actions button { width: 28px; height: 28px; color: #6d7480;')
     expect(videoPanelSource).toContain('AI 转写')
     expect(videoPanelSource).toContain('安全演示模式')
+  })
+
+  it('keeps failed-video retry single-shot and suppresses accidental cancellation', () => {
+    expect(videoPanelSource).toContain('const retryCooldownUntil = ref(0)')
+    expect(videoPanelSource).toContain('retryCooldownUntil.value = Date.now() + 2000')
+    expect(videoPanelSource).toContain("if (!job.value || job.value.id.startsWith('optimistic-video-') || generating.value || retryCooldownActive.value) return")
+    expect(videoPanelSource).toContain("const failedItems = job.value.items.filter((item) => item.status === 'failed')")
+    expect(videoPanelSource).toContain('startRetryCooldown()')
+    expect(videoPanelSource).toContain("item.status === 'failed' ? { ...item, status: 'running', error: null } : item")
+    expect(videoPanelSource).toContain('v-if="videoJobActive && job?.status === \'queued\'"')
+    expect(videoPanelSource).toContain('v-if="retryCooldownActive || job.items.some((item) => item.status === \'failed\')"')
+    expect(videoPanelSource).toContain(':disabled="generating || retryCooldownActive" @click="retryFailed"')
+    expect(videoPanelSource).toContain('onBeforeUnmount(clearRetryCooldown)')
+    expect(videoPanelSource).toContain('function openHistoryJob(entry: VideoJob) {\n  clearRetryCooldown()')
+    expect(videoPanelSource).toContain('function startNewTask() {\n  clearRetryCooldown()')
   })
 
   it('keeps video fullscreen playback contained instead of cropped', () => {

@@ -16,7 +16,6 @@ import logoUrl from '../../assets/listingo-logo.png'
 import WaterRippleImage from './WaterRippleImage.vue'
 import { useAuthStore } from './auth-store'
 
-type AuthMode = 'login' | 'register'
 type LoginMethod = 'sms' | 'password'
 type PhoneCountryOption = {
   code: string
@@ -37,12 +36,9 @@ const phoneCountryOptions: PhoneCountryOption[] = [
   { code: '61', label: '+61 澳大利亚' },
 ]
 
-const props = withDefaults(defineProps<{
+const props = defineProps<{
   open: boolean
-  initialMode?: AuthMode
-}>(), {
-  initialMode: 'login',
-})
+}>()
 
 const emit = defineEmits<{
   'update:open': [value: boolean]
@@ -54,7 +50,6 @@ const visible = computed({
   get: () => props.open,
   set: (value: boolean) => emit('update:open', value),
 })
-const mode = ref<AuthMode>(props.initialMode)
 const method = ref<LoginMethod>('sms')
 const agreed = ref(false)
 const submitting = ref(false)
@@ -64,58 +59,32 @@ const smsCode = ref('')
 const passwordIdentifier = ref('')
 const password = ref('')
 const adminCode = ref('')
-const registerCountryCode = ref('86')
-const registerPhone = ref('')
-const registerCode = ref('')
 const firstPassword = ref('')
-const passwordRegisterStep = ref<'credentials' | 'phone'>('credentials')
 const errorText = ref('')
 const smsCountdown = ref(0)
 const adminCountdown = ref(0)
-const registerCountdown = ref(0)
-const sendingCode = ref<'sms' | 'admin' | 'register' | ''>('')
-const countryDropdownOpen = ref<'sms' | 'register' | ''>('')
+const sendingCode = ref<'sms' | 'admin' | ''>('')
+const countryDropdownOpen = ref<'sms' | ''>('')
 let smsTimer: ReturnType<typeof window.setInterval> | null = null
 let adminTimer: ReturnType<typeof window.setInterval> | null = null
-let registerTimer: ReturnType<typeof window.setInterval> | null = null
 
-const modalTitle = computed(() => mode.value === 'register' ? '创建 Listingo 账号' : '欢迎登录 Listingo')
-const passwordRegisterCredentialStep = computed(() => mode.value === 'register' && method.value === 'password' && passwordRegisterStep.value === 'credentials')
-const submitLabel = computed(() => {
-  if (passwordRegisterCredentialStep.value) return '注册'
-  if (mode.value === 'register') return method.value === 'password' ? '完成注册' : '创建并登录'
-  return '登录'
-})
 const passwordIsAdmin = computed(() => passwordIdentifier.value.trim().toLowerCase().includes('admin'))
 const firstPasswordMode = computed(() => Boolean(authStore.user?.firstPasswordPending))
 const smsValid = computed(() => Boolean(smsPhone.value.trim() && smsCode.value.trim()))
 const passwordValid = computed(() => {
   const credentialsValid = Boolean(passwordIdentifier.value.trim() && password.value.trim())
-  if (mode.value === 'register') {
-    return passwordRegisterStep.value === 'credentials'
-      ? credentialsValid
-      : credentialsValid && Boolean(registerPhone.value.trim() && registerCode.value.trim())
-  }
   return passwordIsAdmin.value ? credentialsValid && Boolean(adminCode.value.trim()) : credentialsValid
 })
 const canSubmit = computed(() => {
   if (firstPasswordMode.value) return firstPassword.value.trim().length >= 6
-  if (passwordRegisterCredentialStep.value) return passwordValid.value
   return agreed.value && (method.value === 'sms' ? smsValid.value : passwordValid.value)
-})
-
-watch(() => props.initialMode, (nextMode) => {
-  if (props.open) mode.value = nextMode
 })
 
 watch(() => props.open, (open) => {
   if (!open) return
-  mode.value = props.initialMode
   method.value = 'sms'
   smsCountryCode.value = '86'
-  registerCountryCode.value = '86'
   countryDropdownOpen.value = ''
-  passwordRegisterStep.value = 'credentials'
   errorText.value = ''
 })
 
@@ -134,56 +103,50 @@ function phoneCountryPrefix(countryCode: string): string {
   return `+${countryCode}`
 }
 
-function toggleCountryDropdown(kind: 'sms' | 'register'): void {
+function toggleCountryDropdown(kind: 'sms'): void {
   countryDropdownOpen.value = countryDropdownOpen.value === kind ? '' : kind
 }
 
-function selectPhoneCountry(kind: 'sms' | 'register', countryCode: string): void {
-  if (kind === 'sms') smsCountryCode.value = countryCode
-  else registerCountryCode.value = countryCode
+function selectPhoneCountry(countryCode: string): void {
+  smsCountryCode.value = countryCode
   countryDropdownOpen.value = ''
 }
 
-function clearTimer(kind: 'sms' | 'admin' | 'register'): void {
-  const timer = kind === 'sms' ? smsTimer : kind === 'admin' ? adminTimer : registerTimer
+function clearTimer(kind: 'sms' | 'admin'): void {
+  const timer = kind === 'sms' ? smsTimer : adminTimer
   if (timer) window.clearInterval(timer)
   if (kind === 'sms') smsTimer = null
-  else if (kind === 'admin') adminTimer = null
-  else registerTimer = null
+  else adminTimer = null
 }
 
-function startCountdown(kind: 'sms' | 'admin' | 'register'): void {
+function startCountdown(kind: 'sms' | 'admin'): void {
   clearTimer(kind)
-  const countdown = kind === 'sms' ? smsCountdown : kind === 'admin' ? adminCountdown : registerCountdown
+  const countdown = kind === 'sms' ? smsCountdown : adminCountdown
   countdown.value = 60
   const timer = window.setInterval(() => {
     countdown.value -= 1
     if (countdown.value <= 0) clearTimer(kind)
   }, 1000)
   if (kind === 'sms') smsTimer = timer
-  else if (kind === 'admin') adminTimer = timer
-  else registerTimer = timer
+  else adminTimer = timer
 }
 
-async function requestCode(kind: 'sms' | 'admin' | 'register'): Promise<void> {
+async function requestCode(kind: 'sms' | 'admin'): Promise<void> {
   if (sendingCode.value) return
   const phone = kind === 'sms'
     ? buildPhoneNumber(smsCountryCode.value, smsPhone.value)
-    : kind === 'register'
-      ? buildPhoneNumber(registerCountryCode.value, registerPhone.value)
-      : '18928268686'
+    : '18928268686'
   if (kind !== 'admin' && !phone.trim()) {
     message.warning('请先输入手机号')
     return
   }
-  const purpose = kind === 'admin' ? 'admin' : mode.value === 'register' ? 'register' : 'login'
+  const purpose = kind === 'admin' ? 'admin' : 'login'
   sendingCode.value = kind
   errorText.value = ''
   try {
     const code = await authStore.sendSmsCode(phone, purpose)
     if (code) {
       if (kind === 'sms') smsCode.value = code
-      else if (kind === 'register') registerCode.value = code
       else adminCode.value = code
     }
     startCountdown(kind)
@@ -194,14 +157,6 @@ async function requestCode(kind: 'sms' | 'admin' | 'register'): Promise<void> {
   } finally {
     sendingCode.value = ''
   }
-}
-
-function switchMode(nextMode: AuthMode): void {
-  mode.value = nextMode
-  method.value = 'sms'
-  countryDropdownOpen.value = ''
-  passwordRegisterStep.value = 'credentials'
-  errorText.value = ''
 }
 
 async function submit(): Promise<void> {
@@ -219,23 +174,11 @@ async function submit(): Promise<void> {
     }
     return
   }
-  if (passwordRegisterCredentialStep.value) {
-    passwordRegisterStep.value = 'phone'
-    errorText.value = ''
-    return
-  }
   errorText.value = ''
   submitting.value = true
   try {
     if (method.value === 'sms') {
-      await authStore.loginWithSms({ phone: buildPhoneNumber(smsCountryCode.value, smsPhone.value), code: smsCode.value, mode: mode.value })
-    } else if (mode.value === 'register') {
-      await authStore.registerWithPassword({
-        identifier: passwordIdentifier.value,
-        password: password.value,
-        phone: buildPhoneNumber(registerCountryCode.value, registerPhone.value),
-        code: registerCode.value,
-      })
+      await authStore.loginWithSms({ phone: buildPhoneNumber(smsCountryCode.value, smsPhone.value), code: smsCode.value })
     } else {
       await authStore.loginWithPassword({
         identifier: passwordIdentifier.value,
@@ -260,7 +203,6 @@ async function submit(): Promise<void> {
 onBeforeUnmount(() => {
   clearTimer('sms')
   clearTimer('admin')
-  clearTimer('register')
 })
 </script>
 
@@ -314,14 +256,14 @@ onBeforeUnmount(() => {
           <CloseOutlined />
         </button>
         <header class="auth-form-head">
-          <h2>{{ modalTitle }}</h2>
+          <h2>欢迎登录 Listingo</h2>
         </header>
 
         <div v-if="!firstPasswordMode" class="auth-method-switch" role="tablist" aria-label="登录方式">
-          <button type="button" :class="{ active: method === 'sms' }" role="tab" @click="method = 'sms'; passwordRegisterStep = 'credentials'; countryDropdownOpen = ''">
-            <MobileOutlined />短信登录
+          <button type="button" :class="{ active: method === 'sms' }" role="tab" @click="method = 'sms'; countryDropdownOpen = ''">
+            <MobileOutlined />短信登录 / 注册
           </button>
-          <button type="button" :class="{ active: method === 'password' }" role="tab" @click="method = 'password'; passwordRegisterStep = 'credentials'; countryDropdownOpen = ''">
+          <button type="button" :class="{ active: method === 'password' }" role="tab" @click="method = 'password'; countryDropdownOpen = ''">
             <LockOutlined />密码登录
           </button>
         </div>
@@ -360,7 +302,7 @@ onBeforeUnmount(() => {
                       role="option"
                       :aria-selected="smsCountryCode === country.code"
                       :class="{ selected: smsCountryCode === country.code }"
-                      @click="selectPhoneCountry('sms', country.code)"
+                      @click="selectPhoneCountry(country.code)"
                     >
                       {{ country.label }}
                     </button>
@@ -380,7 +322,7 @@ onBeforeUnmount(() => {
             </label>
           </template>
 
-          <template v-else-if="mode === 'login'">
+          <template v-else>
             <label class="auth-input-row">
               <span>账号</span>
               <div class="auth-icon-input">
@@ -406,87 +348,18 @@ onBeforeUnmount(() => {
             </label>
           </template>
 
-          <template v-else>
-            <template v-if="passwordRegisterStep === 'credentials'">
-              <label class="auth-input-row">
-                <span>账号</span>
-                <div class="auth-icon-input">
-                  <UserOutlined />
-                  <input v-model="passwordIdentifier" autocomplete="username" placeholder="设置用户名 / 邮箱" />
-                </div>
-              </label>
-              <label class="auth-input-row">
-                <span>密码</span>
-                <div class="auth-icon-input">
-                  <LockOutlined />
-                  <input v-model="password" autocomplete="new-password" type="password" placeholder="设置登录密码" />
-                </div>
-              </label>
-            </template>
-            <template v-else>
-              <div class="auth-input-row">
-                <span>绑定手机号</span>
-                <div class="auth-phone-input">
-                  <div class="auth-country-picker" :class="{ open: countryDropdownOpen === 'register' }">
-                    <button
-                      class="auth-country-trigger"
-                      type="button"
-                      aria-haspopup="listbox"
-                      :aria-expanded="countryDropdownOpen === 'register'"
-                      @click="toggleCountryDropdown('register')"
-                    >
-                      <span>{{ phoneCountryPrefix(registerCountryCode) }}</span>
-                      <i aria-hidden="true" />
-                    </button>
-                    <div v-if="countryDropdownOpen === 'register'" class="auth-country-menu" role="listbox">
-                      <button
-                        v-for="country in phoneCountryOptions"
-                        :key="country.code"
-                        type="button"
-                        role="option"
-                        :aria-selected="registerCountryCode === country.code"
-                        :class="{ selected: registerCountryCode === country.code }"
-                        @click="selectPhoneCountry('register', country.code)"
-                      >
-                        {{ country.label }}
-                      </button>
-                    </div>
-                  </div>
-                  <input v-model="registerPhone" autocomplete="tel" inputmode="tel" placeholder="请输入手机号" />
-                </div>
-              </div>
-              <label class="auth-input-row">
-                <span>验证码</span>
-                <div class="auth-code-input">
-                  <input v-model="registerCode" autocomplete="one-time-code" inputmode="numeric" placeholder="请输入验证码" />
-                  <button type="button" :disabled="registerCountdown > 0 || sendingCode === 'register'" @click="requestCode('register')">
-                    {{ sendingCode === 'register' ? '发送中...' : registerCountdown > 0 ? `${registerCountdown}s` : '获取验证码' }}
-                  </button>
-                </div>
-              </label>
-            </template>
-          </template>
-
           <p v-if="errorText" class="auth-error">{{ errorText }}</p>
 
-          <label v-if="!passwordRegisterCredentialStep && !firstPasswordMode" class="auth-agreement">
+          <label v-if="!firstPasswordMode" class="auth-agreement">
             <input v-model="agreed" type="checkbox" />
             <span>我已阅读并同意<a>用户协议</a>、<a>个人信息保护政策</a>和<a>账号规则</a></span>
           </label>
 
           <button class="auth-submit" type="submit" :disabled="!canSubmit || submitting">
-            <span>{{ submitting ? '处理中...' : submitLabel }}</span>
+            <span>{{ submitting ? '处理中...' : '登录' }}</span>
             <CheckOutlined v-if="!submitting" />
           </button>
         </form>
-
-        <button v-if="mode === 'login'" class="auth-secondary-link" type="button" @click="switchMode('register')">
-          没有账号？立即注册
-        </button>
-        <button v-else class="auth-secondary-link" type="button" @click="switchMode('login')">
-          已有账号？返回登录
-        </button>
-
         <div class="auth-social-divider"><span />更多登录方式<span /></div>
         <div class="auth-social-row" aria-label="第三方登录占位">
           <button type="button" disabled title="后续接入微信登录"><WechatOutlined /></button>

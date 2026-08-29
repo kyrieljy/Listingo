@@ -35,6 +35,12 @@ export type MetricRow = Record<string, unknown> & {
 export type MonitoringPayload = Record<string, unknown> & {
   metric_definitions?: Record<string, MetricDefinition>
   summary_cards?: MetricCard[]
+  realtime_metrics?: {
+    date: string
+    total: number
+    by_event_type: Record<string, number>
+    by_business_type: Record<string, number>
+  }
   timeseries?: MetricRow[]
   trend_rows?: MetricRow[]
   provider_rows?: MetricRow[]
@@ -78,6 +84,7 @@ export const prototypeDefinitions: Record<string, MetricDefinition> = {
   p95_latency: definition('p95_latency', 'P95耗时', 'duration_ms 的 95 分位', 'execution_log.duration_ms', '非空耗时样本', '无', 'ms/s/min', '用于观察尾部延迟。'),
   timeout_rate: definition('timeout_rate', '超时率', '超时调用数 / 总调用数', 'execution_log + provider timeout', '错误含 timeout/超时或耗时超阈值', '窗口内总调用数', '%', '没有配置超时时按错误文本判断。'),
   queue: definition('queue', '进行中', 'queued + running + cancelling', 'job status', '未进入最终态的任务', '无', '个', '用于判断积压和卡住的任务。'),
+  realtime_events: definition('realtime_events', '今日实时事件', 'Redis 当日埋点事件计数', 'analytics_event + redis daily counters', '当日新增埋点事件', '无', '次', 'PostgreSQL 保留完整审计事实；Redis 计数用于实时展示。'),
   provider_health: definition('provider_health', '中转站健康', '健康模型数 / 全部模型数', 'provider + execution_log', '未触发异常阈值的模型', '全部配置模型', '个', '参考启用状态、密钥状态和最近健康检查。'),
   active_users: definition('active_users', '活跃用户', '窗口内有登录、埋点或任务行为的去重用户数', 'analytics_event + login_event + jobs', '去重 user_id', '无', '人', '匿名事件不计入用户数。'),
   new_users: definition('new_users', '新增用户', '窗口内创建用户数', 'app_user.created_at', 'created_at 在窗口内', '无', '人', '按账号创建时间统计。'),
@@ -98,8 +105,15 @@ export const opsPrototypeData: MonitoringPayload = {
     card('p95_latency', 'P95耗时', '46.8s', 46800, 'warning', '18,110 条耗时样本'),
     card('timeout_rate', '超时率', '1.4%', 1.4, 'good', '261 次超时'),
     card('queue', '进行中', '27', 27, 'warning', 'queued 18 / running 9'),
+    card('realtime_events', '今日实时事件', '386', 386, 'neutral', '实时埋点计数'),
     card('provider_health', '中转站健康', '11/13', 11, 'warning', '2 个预警，0 个异常'),
   ],
+  realtime_metrics: {
+    date: new Date().toISOString().slice(0, 10),
+    total: 386,
+    by_event_type: { click: 214, view: 98, submit: 42, download: 32 },
+    by_business_type: { suite: 148, aplus: 126, video: 74, batch_suite: 38 },
+  },
   timeseries: ['08-07', '08-08', '08-09', '08-10', '08-11', '08-12', '08-13'].map((bucket, index) => ({
     bucket,
     total: [2210, 2440, 2602, 2510, 2790, 2974, 3116][index],

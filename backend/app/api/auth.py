@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.app.database import get_session
@@ -181,6 +182,29 @@ def _create_user(session: Session, *, phone: str, username: str | None = None, p
     return user
 
 
+def _get_or_create_user_by_phone(session: Session, phone: str) -> User:
+    normalized = normalize_phone(phone)
+    user = session.scalar(select(User).where(User.phone == normalized).limit(1))
+    if user:
+        return user
+    try:
+        with session.begin_nested():
+            return _create_user(session, phone=normalized)
+    except IntegrityError:
+        session.rollback()
+        user = session.scalar(select(User).where(User.phone == normalized).limit(1))
+        if user:
+            return user
+        raise
+    except HTTPException as conflict:
+        if conflict.status_code != 409 or conflict.detail != "手机号已注册":
+            raise
+        user = session.scalar(select(User).where(User.phone == normalized).limit(1))
+        if user:
+            return user
+        raise
+
+
 @router.post("/auth/sms/send", response_model=SmsSendOut)
 async def send_sms(payload: SmsSendCreate, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
     normalized_phone = normalize_phone(payload.phone)
@@ -214,12 +238,7 @@ def login_with_sms(
 ) -> dict[str, Any]:
     purpose = "register" if payload.mode == "register" else "login"
     verify_sms_code(request, phone=payload.phone, purpose=purpose, code=payload.code)
-    phone = normalize_phone(payload.phone)
-    user = session.scalar(select(User).where(User.phone == phone).limit(1))
-    if not user:
-        if payload.mode != "register":
-            raise HTTPException(status_code=404, detail="该手机号尚未注册，请先注册")
-        user = _create_user(session, phone=phone)
+    user = _get_or_create_user_by_phone(session, payload.phone)
     if user.status != "active":
         raise HTTPException(status_code=403, detail="账号已停用，请联系管理员")
     issue_session(session, request, response, user)

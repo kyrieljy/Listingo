@@ -173,10 +173,10 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  async function loginWithSms(payload: { phone: string; code: string; mode: 'login' | 'register' }): Promise<void> {
+  async function loginWithSms(payload: { phone: string; code: string }): Promise<void> {
     applyAuthResponse(await loginWithSmsApi(payload))
     await Promise.all([loadQuota(), loadNotifications(), loadLoginEvents()])
-    message.success(payload.mode === 'register' ? '账号已创建并登录' : '登录成功')
+    message.success('登录成功')
   }
 
   async function loginWithPassword(payload: { identifier: string; password: string; adminCode?: string }): Promise<void> {

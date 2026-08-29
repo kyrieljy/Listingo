@@ -104,6 +104,26 @@ class RedisStorage(RateLimitStorage):
         self._validate_ttl(ttl)
         return bool(self._call(self._client.expire, self._key(key), ttl))
 
+    def expire_if_equal(self, key: str, expected_value: str, ttl: int) -> bool:
+        self._validate_ttl(ttl)
+        prefixed_key = self._key(key)
+        for _ in range(3):
+            try:
+                with self._client.pipeline() as pipeline:
+                    pipeline.watch(prefixed_key)
+                    if pipeline.get(prefixed_key) != expected_value:
+                        pipeline.reset()
+                        return False
+                    pipeline.multi()
+                    pipeline.expire(prefixed_key, ttl)
+                    self._call(pipeline.execute)
+                    return True
+            except WatchError:
+                continue
+            except RedisError as exc:
+                raise StorageUnavailableError("Redis storage is unavailable") from exc
+        raise StorageUnavailableError("Redis storage changed too quickly while renewing a value")
+
     def set_if_absent(
         self,
         key: str,
@@ -236,3 +256,21 @@ class RedisStorage(RateLimitStorage):
             except RedisError as exc:
                 raise StorageUnavailableError("Redis storage is unavailable") from exc
         raise StorageUnavailableError("Redis storage changed too quickly while consuming a hash")
+
+    def queue_push(self, key: str, value: str) -> None:
+        self._call(self._client.rpush, self._key(key), value)
+
+    def queue_pop(self, key: str) -> str | None:
+        return self._call(self._client.lpop, self._key(key))
+
+    def queue_remove(self, key: str, value: str) -> bool:
+        return bool(self._call(self._client.lrem, self._key(key), 0, value))
+
+    def queue_length(self, key: str) -> int:
+        return int(self._call(self._client.llen, self._key(key)))
+
+    def queue_clear(self, key: str) -> bool:
+        return bool(self._call(self._client.delete, self._key(key)))
+
+    def queue_items(self, key: str) -> list[str]:
+        return list(self._call(self._client.lrange, self._key(key), 0, -1))

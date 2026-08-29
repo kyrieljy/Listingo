@@ -70,6 +70,7 @@ import {
   type AplusModuleSelection,
   type AplusOutputSpec,
 } from './workspace-model'
+import { generationFailureMessageFor } from './generation-errors'
 
 const emit = defineEmits<{ 'open-pricing': []; 'require-auth': [] }>()
 type BatchAplusResultGroup = BatchSelectionTask & { job: AplusJob }
@@ -354,6 +355,10 @@ onBeforeUnmount(() => {
 
 function requestDetail(error: unknown): string {
   return userFacingApiErrorMessage(error)
+}
+
+function notifyAplusGenerationFailure(source: unknown) {
+  message.error(generationFailureMessageFor('image', source))
 }
 
 async function showProductInfoEditor() {
@@ -793,8 +798,9 @@ async function resumeAplusPlanRefresh(jobId: string) {
       generating.value = true
       await continueGenerationFromPlan(latest)
     }
-  } catch {
+  } catch (error: unknown) {
     // Keep the last visible state; route activation can retry later.
+    notifyAplusGenerationFailure(error)
   } finally {
     if (refreshingAplusJobId.value === jobId) refreshingAplusJobId.value = null
     planning.value = false
@@ -808,8 +814,9 @@ async function resumeAplusGenerationRefresh(jobId: string) {
   try {
     const latest = await waitForGeneration(jobId)
     selectedResultIds.value = latest.items.filter(canPreviewAplusItem).map((item) => item.id)
-  } catch {
+  } catch (error: unknown) {
     // Keep the last visible state; route activation can retry later.
+    notifyAplusGenerationFailure(error)
   } finally {
     if (refreshingAplusJobId.value === jobId) refreshingAplusJobId.value = null
     generating.value = false
@@ -883,7 +890,7 @@ async function generateImages() {
     if (finishedPlan.status !== 'succeeded') {
       if (generationJob.value) {
         const cancelled = finishedPlan.status === 'cancelled' || finishedPlan.status === 'partial_cancelled'
-        const error = cancelled ? 'A+ 方案任务已取消' : finishedPlan.error || 'A+ 方案生成失败'
+        const error = cancelled ? 'A+ 方案任务已取消' : generationFailureMessageFor('image', finishedPlan)
         generationJob.value = {
           ...generationJob.value,
           status: cancelled ? finishedPlan.status : 'failed',
@@ -891,24 +898,20 @@ async function generateImages() {
           items: generationJob.value.items.map((item) => ({ ...item, status: cancelled ? 'cancelled' : 'failed', error: item.error || error })),
         }
       }
-      message[finishedPlan.status === 'cancelled' || finishedPlan.status === 'partial_cancelled' ? 'success' : 'error'](finishedPlan.status === 'cancelled' || finishedPlan.status === 'partial_cancelled' ? 'A+ 方案任务已取消' : finishedPlan.error || 'A+ 方案生成失败')
+      if (finishedPlan.status === 'cancelled' || finishedPlan.status === 'partial_cancelled') message.success('A+ 方案任务已取消')
+      else notifyAplusGenerationFailure(finishedPlan)
       return
     }
     selectedPlanItemIds.value = finishedPlan.items.map((item) => item.id)
     planning.value = false
     const finished = await continueGenerationFromPlan(finishedPlan)
-    message[finished.status === 'failed' ? 'error' : ['partial_failed', 'partial_cancelled'].includes(finished.status) ? 'warning' : 'success'](
-      finished.status === 'succeeded'
-        ? 'A+ 图片生成完成'
-        : finished.status === 'cancelled'
-          ? 'A+ 图片任务已取消'
-          : finished.status === 'partial_cancelled'
-            ? 'A+ 图片任务已部分取消，已完成结果仍可使用'
-            : finished.error || 'A+ 图片生成存在失败项',
-    )
+    if (finished.status === 'succeeded') message.success('A+ 图片生成完成')
+    else if (finished.status === 'cancelled') message.success('A+ 图片任务已取消')
+    else if (finished.status === 'partial_cancelled') message.warning('A+ 图片任务已部分取消，已完成结果仍可使用')
+    else notifyAplusGenerationFailure(finished)
   } catch (error: unknown) {
     if (generationJob.value?.id.startsWith('optimistic-aplus-generation-')) {
-      const detail = requestDetail(error) || 'A+ 图片生成失败'
+      const detail = generationFailureMessageFor('image', error)
       generationJob.value = {
         ...generationJob.value,
         status: 'failed',
@@ -916,7 +919,7 @@ async function generateImages() {
         items: generationJob.value.items.map((item) => ({ ...item, status: 'failed', error: item.error || detail })),
       }
     }
-    message.error(requestDetail(error) || 'A+ 图片生成失败')
+    notifyAplusGenerationFailure(error)
   } finally {
     planning.value = false
     generating.value = false
@@ -976,9 +979,8 @@ async function retryFailedAplus() {
       finished.status === 'succeeded' ? 'A+ 失败项已全部重新生成成功' : 'A+ 重试完成，仍有失败项',
     )
   } catch (error: unknown) {
-    const detail = requestDetail(error) || 'A+ 失败项重试失败'
-    markAplusItemsFailed(failedIds, detail)
-    message.error(detail)
+    markAplusItemsFailed(failedIds, generationFailureMessageFor('image', error))
+    notifyAplusGenerationFailure(error)
   } finally {
     generating.value = false
   }
@@ -999,9 +1001,8 @@ async function retrySingleAplusItem(item: AplusItem) {
       refreshed?.status === 'succeeded' ? 'A+ 单图已重新生成' : 'A+ 单图重试完成，仍未成功',
     )
   } catch (error: unknown) {
-    const detail = requestDetail(error) || 'A+ 单图重试失败'
-    markAplusItemsFailed([item.id], detail)
-    message.error(detail)
+    markAplusItemsFailed([item.id], generationFailureMessageFor('image', error))
+    notifyAplusGenerationFailure(error)
   } finally {
     setAplusItemRetrying(item.id, false)
   }
@@ -1061,12 +1062,11 @@ function scriptMarkdown(item: AplusItem): string {
   if (item.image_prompt.trim()) sections.push(`### 生图脚本\n${item.image_prompt.trim()}`)
   if (item.copy_requirements.trim()) sections.push(`### 文案要求\n${item.copy_requirements.trim()}`)
   if (item.prompt_text.trim()) sections.push(`### 完整 Prompt\n${item.prompt_text.trim()}`)
-  if (item.error?.trim()) sections.push(`### 错误信息\n${item.error.trim()}`)
   return sections.join('\n\n')
 }
 
 function hasScript(item: AplusItem): boolean {
-  return Boolean(item.image_prompt.trim() || item.copy_requirements.trim() || item.prompt_text.trim() || item.error?.trim())
+  return Boolean(item.image_prompt.trim() || item.copy_requirements.trim() || item.prompt_text.trim())
 }
 
 function canPreviewAplusItem(item: AplusItem): boolean {
@@ -1406,7 +1406,6 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
                 <div class="aplus-result-meta">
                   <b>{{ item.module_name }}</b>
                   <span>第 {{ item.index + 1 }} 张 · {{ aplusTargetLabel(item.output_mode, item.aspect_ratio) }}</span>
-                  <small v-if="item.error">{{ item.error }}</small>
                 </div>
                 <div class="aplus-card-actions">
                   <button type="button" title="预览" aria-label="预览" :disabled="!canPreviewAplusItem(item)" @click="openPreview(item)"><EyeOutlined /></button>
@@ -1458,7 +1457,6 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
               <div class="aplus-result-meta">
                 <b>{{ item.module_name }}</b>
                 <span>第 {{ item.index + 1 }} 张 · {{ aplusTargetLabel(item.output_mode, item.aspect_ratio) }}</span>
-                <small v-if="item.error">{{ item.error }}</small>
               </div>
               <div class="aplus-card-actions">
                 <button type="button" title="预览" aria-label="预览" :disabled="!canPreviewAplusItem(item)" @click="openPreview(item)"><EyeOutlined /></button>

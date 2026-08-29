@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import threading
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from time import monotonic
 from typing import Callable
@@ -57,6 +57,7 @@ class MemoryStorage(RateLimitStorage):
         self._cleanup_interval = cleanup_interval_seconds
         self._clock = clock
         self._items: OrderedDict[str, _MemoryEntry] = OrderedDict()
+        self._queues: dict[str, deque[str]] = {}
         self._sliding_windows: OrderedDict[str, OrderedDict[str, _SlidingWindowEntry]] = OrderedDict()
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -198,6 +199,16 @@ class MemoryStorage(RateLimitStorage):
             self._items.move_to_end(key)
             return True
 
+    def expire_if_equal(self, key: str, expected_value: str, ttl: int) -> bool:
+        self._ttl(ttl)
+        with self._lock:
+            self._remove_expired_locked()
+            entry = self._live_entry(key)
+            if entry is None or entry.value != expected_value:
+                return False
+            entry.expires_at = self._clock() + ttl
+            return True
+
     def set_if_absent(
         self,
         key: str,
@@ -289,6 +300,48 @@ class MemoryStorage(RateLimitStorage):
             del self._items[key]
             self._items.pop(attempts_key, None)
             return HashConsumeStatus.ACCEPTED
+
+    def queue_push(self, key: str, value: str) -> None:
+        # Queues are correctness state and deliberately bypass TTL/LRU eviction.
+        with self._lock:
+            self._queues.setdefault(key, deque()).append(value)
+
+    def queue_pop(self, key: str) -> str | None:
+        with self._lock:
+            queue = self._queues.get(key)
+            if not queue:
+                return None
+            value = queue.popleft()
+            if not queue:
+                del self._queues[key]
+            return value
+
+    def queue_remove(self, key: str, value: str) -> bool:
+        with self._lock:
+            queue = self._queues.get(key)
+            if queue is None:
+                return False
+            removed = value in queue
+            try:
+                while True:
+                    queue.remove(value)
+            except ValueError:
+                pass
+            if not queue:
+                del self._queues[key]
+            return removed
+
+    def queue_length(self, key: str) -> int:
+        with self._lock:
+            return len(self._queues.get(key, ()))
+
+    def queue_clear(self, key: str) -> bool:
+        with self._lock:
+            return self._queues.pop(key, None) is not None
+
+    def queue_items(self, key: str) -> list[str]:
+        with self._lock:
+            return list(self._queues.get(key, ()))
 
     def cleanup_expired(self) -> int:
         with self._lock:

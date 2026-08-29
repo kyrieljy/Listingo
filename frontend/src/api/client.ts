@@ -534,7 +534,7 @@ export async function sendSmsCodeApi(phone: string, purpose: SmsPurpose): Promis
   return (await api.post('/auth/sms/send', { phone, purpose })).data
 }
 
-export async function loginWithSmsApi(payload: { phone: string; code: string; mode: 'login' | 'register' }): Promise<AuthMeResponse> {
+export async function loginWithSmsApi(payload: { phone: string; code: string; mode?: 'login' | 'register' }): Promise<AuthMeResponse> {
   return (await api.post('/auth/sms/login', payload)).data
 }
 

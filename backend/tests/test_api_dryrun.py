@@ -1,5 +1,6 @@
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
+import asyncio
 import json
 from zipfile import ZipFile
 
@@ -55,6 +56,15 @@ def active_workflow_version_id(client, code: str) -> str:
         workflow = session.scalar(select(Workflow).where(Workflow.code == code))
         assert workflow is not None and workflow.active_version_id
         return workflow.active_version_id
+
+
+def drive_generation_queue(client, kind: str) -> None:
+    """Run one queued job to completion synchronously (mirrors the worker loop).
+
+    The generation/video endpoints enqueue jobs instead of executing them
+    inline, so tests that assert terminal state must drive the queue.
+    """
+    asyncio.run(client.app.state.generation_queue_scheduler.tick(kind))
 
 
 def test_admin_ocr_settings_can_be_updated_and_prewarmed(client, monkeypatch) -> None:
@@ -129,6 +139,7 @@ def test_dryrun_job_completes_without_external_calls_and_exports_zip(client) -> 
         },
     )
     assert response.status_code == 201, response.text
+    drive_generation_queue(client, "generation")
     job = response.json()
     detail = client.get(f"/api/v1/generation-jobs/{job['id']}").json()
 
@@ -176,17 +187,17 @@ def test_dryrun_job_completes_without_external_calls_and_exports_zip(client) -> 
         assert image.height > image.width
 
 
-def test_generation_cancel_marks_unstarted_items_and_is_idempotent(client) -> None:
+def test_generation_cancel_only_queued_and_is_idempotent(client) -> None:
     prompt_version_id = active_prompt_version_id(client, "ecommerce-meta")
     workflow_version_id = active_workflow_version_id(client, "product-suite-v1")
     with client.app.state.session_factory() as session:
         job = GenerationJob(
-            status="running",
+            status="queued",
             dry_run=True,
             params_json="{}",
             asset_ids_json="[]",
-            count=3,
-            progress=30,
+            count=2,
+            progress=0,
             prompt_version_id=prompt_version_id,
             workflow_version_id=workflow_version_id,
         )
@@ -194,9 +205,8 @@ def test_generation_cancel_marks_unstarted_items_and_is_idempotent(client) -> No
         session.flush()
         session.add_all(
             [
-                GenerationItem(job_id=job.id, index=0, image_type="hero", prompt_text="{}", status="succeeded"),
-                GenerationItem(job_id=job.id, index=1, image_type="queued", prompt_text="{}", status="queued"),
-                GenerationItem(job_id=job.id, index=2, image_type="running", prompt_text="{}", status="running"),
+                GenerationItem(job_id=job.id, index=0, image_type="hero", prompt_text="{}", status="queued"),
+                GenerationItem(job_id=job.id, index=1, image_type="detail", prompt_text="{}", status="queued"),
             ]
         )
         session.commit()
@@ -205,12 +215,37 @@ def test_generation_cancel_marks_unstarted_items_and_is_idempotent(client) -> No
     response = client.post(f"/api/v1/generation-jobs/{job_id}/cancel")
     assert response.status_code == 200, response.text
     cancelled = response.json()
-    assert cancelled["status"] == "cancelling"
-    assert [item["status"] for item in cancelled["items"]] == ["succeeded", "cancelled", "running"]
+    assert cancelled["status"] == "cancelled"
+    assert [item["status"] for item in cancelled["items"]] == ["cancelled", "cancelled"]
 
     repeated = client.post(f"/api/v1/generation-jobs/{job_id}/cancel")
     assert repeated.status_code == 200, repeated.text
-    assert repeated.json()["status"] == "cancelling"
+    assert repeated.json()["status"] == "cancelled"
+
+
+def test_generation_cancel_rejects_running_with_409(client) -> None:
+    prompt_version_id = active_prompt_version_id(client, "ecommerce-meta")
+    workflow_version_id = active_workflow_version_id(client, "product-suite-v1")
+    with client.app.state.session_factory() as session:
+        job = GenerationJob(
+            status="running",
+            dry_run=True,
+            params_json="{}",
+            asset_ids_json="[]",
+            count=1,
+            progress=40,
+            prompt_version_id=prompt_version_id,
+            workflow_version_id=workflow_version_id,
+        )
+        session.add(job)
+        session.flush()
+        session.add(GenerationItem(job_id=job.id, index=0, image_type="hero", prompt_text="{}", status="running"))
+        session.commit()
+        job_id = job.id
+
+    response = client.post(f"/api/v1/generation-jobs/{job_id}/cancel")
+    assert response.status_code == 409, response.text
+    assert "无法取消" in response.json()["detail"]
 
 
 def test_aplus_cancel_endpoints_are_idempotent_and_preserve_successes(client) -> None:
@@ -572,12 +607,12 @@ def test_workspace_recovery_settles_orphaned_open_jobs_across_surfaces(client) -
             prompt_version_id=aplus_prompt_id,
         )
         video_job = VideoJob(
-            status="queued",
+            status="running",
             dry_run=False,
             params_json="{}",
             asset_ids_json="[]",
             count=1,
-            progress=0,
+            progress=50,
             prompt_version_id=video_prompt_id,
         )
         session.add_all([generation_job, aplus_job, video_job])
@@ -588,7 +623,7 @@ def test_workspace_recovery_settles_orphaned_open_jobs_across_surfaces(client) -
                 GenerationItem(job_id=generation_job.id, index=1, image_type="scene", prompt_text="{}", status="running"),
                 AplusItem(job_id=aplus_job.id, index=0, module_index=1, module_name="hero", prompt_text="{}", status="failed"),
                 AplusItem(job_id=aplus_job.id, index=1, module_index=2, module_name="detail", prompt_text="{}", status="running"),
-                VideoItem(job_id=video_job.id, index=0, video_type="ugc", status="queued"),
+                VideoItem(job_id=video_job.id, index=0, video_type="ugc", status="running"),
             ]
         )
         generation_job_id = generation_job.id
@@ -931,11 +966,12 @@ def test_video_dryrun_creates_one_item_per_selected_type(client) -> None:
             "language": "英语",
             "aspect_ratio": "9:16",
             "selling_points": "便携、防漏、适合通勤",
-            "video_types": ["UGC 种草", "痛点解决"],
-            "dry_run": True,
-        },
+        "video_types": ["UGC 种草", "痛点解决"],
+        "dry_run": True,
+    },
     )
     assert response.status_code == 201, response.text
+    drive_generation_queue(client, "video")
     detail = client.get(f"/api/v1/video-jobs/{response.json()['id']}").json()
 
     assert detail["status"] == "succeeded"
@@ -959,10 +995,11 @@ def test_video_dryrun_edit_creates_child_version(client) -> None:
             "language": "英语",
             "aspect_ratio": "9:16",
             "selling_points": "便携、防漏、适合通勤",
-            "video_types": ["UGC 种草"],
-            "dry_run": True,
-        },
+        "video_types": ["UGC 种草"],
+        "dry_run": True,
+    },
     ).json()
+    drive_generation_queue(client, "video")
     detail = client.get(f"/api/v1/video-jobs/{job['id']}").json()
     item = detail["items"][0]
     first_version = item["versions"][0]
@@ -1000,10 +1037,11 @@ def test_video_edit_rejects_missing_item_and_current_version(client) -> None:
             "language": "英语",
             "aspect_ratio": "9:16",
             "selling_points": "便携、防漏、适合通勤",
-            "video_types": ["UGC 种草"],
-            "dry_run": True,
-        },
+        "video_types": ["UGC 种草"],
+        "dry_run": True,
+    },
     ).json()
+    drive_generation_queue(client, "video")
     detail = client.get(f"/api/v1/video-jobs/{job['id']}").json()
     item_id = detail["items"][0]["id"]
     with client.app.state.session_factory() as session:
@@ -1057,12 +1095,13 @@ def test_dryrun_edit_creates_child_version_and_keeps_original(client) -> None:
             "market": "美国",
             "language": "English",
             "aspect_ratio": "1:1",
-            "selling_points": "保温杯",
-            "mode": "smart",
-            "count": 7,
-            "dry_run": True,
-        },
+        "selling_points": "保温杯",
+        "mode": "smart",
+        "count": 7,
+        "dry_run": True,
+    },
     ).json()
+    drive_generation_queue(client, "generation")
     detail = client.get(f"/api/v1/generation-jobs/{job['id']}").json()
     item = detail["items"][0]
     first_version = item["versions"][0]
@@ -1105,12 +1144,13 @@ def test_suite_version_endpoint_accepts_empty_instruction_for_regenerate(client)
             "market": "United States",
             "language": "English",
             "aspect_ratio": "1:1",
-            "selling_points": "Insulated tumbler",
-            "mode": "smart",
-            "count": 7,
-            "dry_run": True,
-        },
+        "selling_points": "Insulated tumbler",
+        "mode": "smart",
+        "count": 7,
+        "dry_run": True,
+    },
     ).json()
+    drive_generation_queue(client, "generation")
     detail = client.get(f"/api/v1/generation-jobs/{job['id']}").json()
     item = detail["items"][0]
     first_version = item["versions"][0]
@@ -1225,6 +1265,7 @@ def test_custom_counts_drive_dryrun_plan_and_are_limited_to_four_each(client) ->
     response = client.post("/api/v1/generation-jobs", json=payload)
 
     assert response.status_code == 201, response.text
+    drive_generation_queue(client, "generation")
     detail = client.get(f"/api/v1/generation-jobs/{response.json()['id']}").json()
     assert [item["image_type"].split(" ")[0] for item in detail["items"]] == [
         "白底图",
@@ -1372,6 +1413,7 @@ def test_dryrun_executes_the_extended_prompt_workflow_without_external_calls(cli
         },
     )
     assert response.status_code == 201, response.text
+    drive_generation_queue(client, "generation")
     detail = client.get(f"/api/v1/generation-jobs/{response.json()['id']}").json()
     assert set(detail["params"]["_prompt_versions"]) == {
         "product-vision", "copywriting-assist", "edit-rewrite", "image-text-edit", "content-safety-review"

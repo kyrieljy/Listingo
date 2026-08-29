@@ -79,6 +79,19 @@ describe('auth model', () => {
     expect(authCssSource).toContain('input:-webkit-autofill')
   })
 
+  it('uses one SMS login flow for existing and first-time phones', () => {
+    expect(authModalSource).toContain('短信登录 / 注册')
+    expect(authModalSource).toContain("const purpose = kind === 'admin' ? 'admin' : 'login'")
+    expect(authModalSource).toContain('await authStore.loginWithSms({ phone: buildPhoneNumber(smsCountryCode.value, smsPhone.value), code: smsCode.value })')
+    expect(authModalSource).not.toContain('type AuthMode')
+    expect(authModalSource).not.toContain('initialMode')
+    expect(authModalSource).not.toContain('switchMode')
+    expect(authModalSource).not.toContain('registerWithPassword')
+    expect(authModalSource).not.toContain("purpose === 'register'")
+    expect(authStoreSource).toContain('async function loginWithSms(payload: { phone: string; code: string })')
+    expect(authStoreSource).not.toContain('payload.mode === \'register\'')
+  })
+
   it('turns API failures into user-facing Chinese copy', () => {
     expect(userFacingApiErrorMessage({
       config: { url: '/auth/password/login' },

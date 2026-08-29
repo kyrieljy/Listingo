@@ -313,10 +313,20 @@ def sync_video_quota(session: Session, job: VideoJob) -> None:
 
 
 def cancel_video_job(session: Session, job: VideoJob) -> VideoJob:
-    if job.status in FINAL_STATUSES:
+    """仅 queued 任务可取消；running/终态由调用方（端点）拦截。
+
+    队列化后任务进入 running 即不可中断，取消接口对 running 返回 409，
+    不再将状态置为 cancelling，执行链路也不再响应取消请求。
+    """
+    if job.status != "queued":
         return job
-    job.status = "cancelling"
-    finalize_video_cancellation(session, job)
+    job.status = "cancelled"
+    job.progress = 100
+    job.completed_at = utcnow()
+    for item in job.items:
+        if item.status == "queued":
+            item.status = "cancelled"
+            item.error = USER_CANCELLED_ERROR
     sync_video_quota(session, job)
     session.commit()
     session.refresh(job)

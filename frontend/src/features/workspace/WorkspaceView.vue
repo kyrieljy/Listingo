@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type CSSProperties } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Modal, message } from 'ant-design-vue'
+import { message } from 'ant-design-vue'
 import {
   AppstoreOutlined, BgColorsOutlined, CheckOutlined, ClockCircleOutlined, CloudUploadOutlined,
   CloseOutlined, DownOutlined, HistoryOutlined, MenuFoldOutlined, PlayCircleOutlined, PlusOutlined, RocketOutlined,
@@ -9,7 +9,7 @@ import {
 } from '@ant-design/icons-vue'
 import BrandLogo from '../../components/BrandLogo.vue'
 import {
-  apiErrorStatus, assistCopywriting, batchSelectionDownloadUrl, cancelJob, createJob, editItem, editItemText, generationDownloadUrl, getJob, listAplusGenerationJobs, listAplusPlanJobs, listJobs, listVideoJobs, ocrItemText, retryFailedItems, retryItem, uploadAsset, userFacingApiErrorMessage,
+  assistCopywriting, batchSelectionDownloadUrl, cancelJob, createJob, editItem, editItemText, generationDownloadUrl, getJob, listAplusGenerationJobs, listAplusPlanJobs, listJobs, listVideoJobs, ocrItemText, retryFailedItems, retryItem, uploadAsset, userFacingApiErrorMessage,
   type AplusJob, type Asset, type DownloadFormat, type ImageTextEditLine, type Job, type JobItem, type VideoJob,
 } from '../../api/client'
 import APlusPhasePanel from './APlusPhasePanel.vue'
@@ -28,10 +28,11 @@ import { trackWorkspaceEvent } from './analytics'
 import { batchItemResultJob, type BatchSelectionPayload, type BatchSelectionTask } from './batch-model'
 import {
   buildGenerationPayload, createDefaultWorkspaceForm, customTotal, customTypeDefinitions,
-  generationCount, generationFailureMessage, languageOptions, latestActiveWorkspaceJob, marketOptions, phaseDefinitions, platformOptions, renderMarkdown, ratioOptions, ratioValues,
+  generationCount, languageOptions, latestActiveWorkspaceJob, marketOptions, phaseDefinitions, platformOptions, renderMarkdown, ratioOptions, ratioValues,
   PRODUCT_IMAGE_UPLOAD_LIMIT,
   type CustomCountKey, type PhaseKey,
 } from './workspace-model'
+import { generationFailureMessageFor } from './generation-errors'
 
 const route = useRoute(); const router = useRouter(); const authStore = useAuthStore()
 const disabledPhaseKeys = new Set<PhaseKey>(['agent'])
@@ -46,7 +47,7 @@ const assets = ref<Asset[]>([]); const job = ref<Job | null>(null); const histor
 const batchSuiteResults = ref<BatchSuiteResultGroup[]>([])
 const historyOpen = ref(false); const previewOpen = ref(false); const scriptOpen = ref(false); const editOpen = ref(false); const textEditOpen = ref(false); const confirmOpen = ref(false); const activeItem = ref<JobItem | null>(null)
 const suiteBatchOpen = ref(false)
-const authOpen = ref(false); const authInitialMode = ref<'login' | 'register'>('login'); const accountOpen = ref(false); const accountInitialTab = ref<AccountInitialTab>('profile'); const pricingOpen = ref(false)
+const authOpen = ref(false); const accountOpen = ref(false); const accountInitialTab = ref<AccountInitialTab>('profile'); const pricingOpen = ref(false)
 const aplusPanel = ref<HistoryPanelRef<AplusJob> | null>(null); const videoPanel = ref<HistoryPanelRef<VideoJob> | null>(null)
 const selected = ref<string[]>([]); const editInstruction = ref(''); const editSubmitting = ref(false)
 const suiteEditPlaceholder = '写下这次想调整的画面；不填则按当前版本重新生成。比如：让背景更清爽、主体位置微调、保留商品外观。'
@@ -85,7 +86,6 @@ const customValid = computed(() => form.value.mode === 'smart' || (count.value >
 const inputValid = computed(() => form.value.sellingPoints.trim().length > 0)
 const layoutPreferred = computed(() => form.value.modelPreference === 'layout')
 const selectedModelPreference = computed(() => modelPreferenceOptions.find((option) => option.key === form.value.modelPreference) ?? modelPreferenceOptions[0])
-const currentFailureMessage = computed(() => generationFailureMessage(job.value))
 const suiteJobActive = computed(() => Boolean(job.value && !FINAL_JOB_STATUSES.has(job.value.status)))
 const activeItemScript = computed(() => activeItem.value ? scriptMarkdown(activeItem.value) : '')
 const currentDryRun = computed(() => phase.value === 'aplus' ? (aplusPanel.value?.dryRun ?? form.value.dryRun) : phase.value === 'video' ? (videoPanel.value?.dryRun ?? form.value.dryRun) : form.value.dryRun)
@@ -357,13 +357,11 @@ onBeforeUnmount(() => {
 function requestDetail(error: unknown): string {
   return userFacingApiErrorMessage(error)
 }
+function notifySuiteGenerationFailure(source: unknown) {
+  message.error(generationFailureMessageFor('image', source))
+}
 function handleRequestError(error: unknown, fallback: string) {
-  const detail = requestDetail(error) || fallback
-  if (apiErrorStatus(error) === 422 && detail.includes('安全拦截')) {
-    Modal.error({ title: '内容安全拦截', content: detail })
-    return
-  }
-  message.error(detail || fallback)
+  message.error(requestDetail(error) || fallback)
 }
 function createOptimisticJob(payload: Record<string, unknown>): Job {
   const total = Number(payload.count || count.value)
@@ -529,13 +527,12 @@ function navigate(key: PhaseKey) {
   trackWorkspaceEvent({ event_name: 'workspace_phase_click', event_type: 'click', business_type: phaseBusinessType(key), feature_key: key })
   router.push(`/app/${key}`)
 }
-function openAuth(mode: 'login' | 'register' = 'login') {
-  authInitialMode.value = mode
+function openAuth() {
   authOpen.value = true
 }
 function requireAuthForModelAction(): boolean {
   if (authStore.isAuthenticated) return false
-  openAuth('login')
+  openAuth()
   return true
 }
 function openAccount(tab: AccountInitialTab = 'profile') {
@@ -547,7 +544,7 @@ function openPricing() {
 }
 function requireAuthFromPricing() {
   pricingOpen.value = false
-  openAuth('login')
+  openAuth()
 }
 function updateIncludeWatermark(value: boolean) {
   includeWatermark.value = allowedIncludeWatermark(value)
@@ -686,18 +683,10 @@ function generate() {
   confirmOpen.value = true
 }
 function notifySuiteJobResult(finished: Job) {
-  const failureMessage = generationFailureMessage(finished)
-  message[finished.status === 'failed' ? 'error' : ['partial_failed', 'partial_cancelled'].includes(finished.status) ? 'warning' : 'success'](
-    finished.status === 'succeeded'
-      ? '套图任务完成'
-      : finished.status === 'cancelled'
-        ? '套图任务已取消'
-        : finished.status === 'partial_cancelled'
-          ? '套图任务已部分取消，已完成结果仍可使用'
-          : finished.status === 'partial_failed'
-            ? (failureMessage ? `部分图片生成失败：${failureMessage}` : '部分图片生成失败，可单独重试')
-            : (failureMessage ? `套图任务失败：${failureMessage}` : '套图任务失败'),
-  )
+  if (finished.status === 'succeeded') message.success('套图任务完成')
+  else if (finished.status === 'cancelled') message.success('套图任务已取消')
+  else if (finished.status === 'partial_cancelled') message.success('套图任务已部分取消，已完成结果仍可使用')
+  else notifySuiteGenerationFailure(finished)
 }
 
 async function followSubmittedSuiteJob(jobId: string) {
@@ -708,8 +697,9 @@ async function followSubmittedSuiteJob(jobId: string) {
     }
     history.value = await listJobs()
     notifySuiteJobResult(finished)
-  } catch {
+  } catch (error: unknown) {
     // The task stays in history and can be reopened; avoid blocking new submissions on a polling failure.
+    notifySuiteGenerationFailure(error)
   }
 }
 
@@ -728,11 +718,11 @@ async function runConfirmedGeneration() {
     selected.value = []
     const created = preservePendingJobItems(await createJob(payload)); job.value = created
     if (cancelRequested.value) job.value = preservePendingJobItems(await cancelJob(created.id))
-    message.success('任务已提交，可继续新建任务')
+    message.info('任务已在后台运行，可在消息中心查看结果')
     void followSubmittedSuiteJob(created.id)
   } catch (error: unknown) {
     if (job.value?.id.startsWith('optimistic-')) job.value = null
-    handleRequestError(error, '任务创建失败，请检查配置与后端日志')
+    notifySuiteGenerationFailure(error)
   } finally { generating.value = false; submittingGeneration.value = false; cancelling.value = false }
 }
 async function retryFailed() {
@@ -744,14 +734,14 @@ async function retryFailed() {
   markSuiteItemsRetrying(failedIds)
   try {
     await retryFailedItems(job.value.id)
+    message.info('任务已在后台运行，可在消息中心查看结果')
     const finished = await waitForJob(job.value.id)
     selected.value = finished.items.filter((item) => item.status === 'succeeded' && currentItemUrl(item)).map((item) => item.id)
     history.value = await listJobs()
     message[finished.status === 'succeeded' ? 'success' : 'warning'](finished.status === 'succeeded' ? '失败图片已全部重试成功' : '重试完成，仍有图片生成失败')
   } catch (error: unknown) {
-    const detail = requestDetail(error) || '失败项重试失败'
-    markSuiteItemsFailed(failedIds, detail)
-    message.error(detail)
+    markSuiteItemsFailed(failedIds, generationFailureMessageFor('image', error))
+    notifySuiteGenerationFailure(error)
   }
   finally { generating.value = false }
 }
@@ -769,9 +759,8 @@ async function retrySingleItem(item: JobItem) {
       refreshed?.status === 'succeeded' ? '单图已重新生成' : '单图重试完成，仍未成功',
     )
   } catch (error: unknown) {
-    const detail = requestDetail(error) || '单图重试失败'
-    markSuiteItemsFailed([item.id], detail)
-    message.error(detail)
+    markSuiteItemsFailed([item.id], generationFailureMessageFor('image', error))
+    notifySuiteGenerationFailure(error)
   } finally {
     generating.value = false
   }
@@ -870,10 +859,9 @@ function scriptMarkdown(item: JobItem): string {
     if (parsed.image_requirements) sections.push(`**图片要求**\n${String(parsed.image_requirements)}`)
     if (parsed.copywriting_requirements) sections.push(`**文案要求**\n${String(parsed.copywriting_requirements)}`)
     if (rawPrompt) sections.push(`**Raw Prompt**\n${rawPrompt}`)
-    if (item.error) sections.push(`**错误信息**\n${item.error}`)
     return sections.join('\n\n') || '暂无脚本内容'
   } catch {
-    return [`**Raw Prompt**\n${rawPrompt || '暂无脚本内容'}`, item.error ? `**错误信息**\n${item.error}` : ''].filter(Boolean).join('\n\n')
+    return `**Raw Prompt**\n${rawPrompt || '暂无脚本内容'}`
   }
 }
 async function submitEdit() {
@@ -989,14 +977,14 @@ async function openHistoryJob(entry: HistoryEntry) {
       <span class="mode-status"><i />{{ currentDryRun ? 'Dryrun 安全模式' : 'Live 模式' }}</span>
       <button v-if="authStore.isAuthenticated" class="header-link" @click="openHistoryDrawer"><HistoryOutlined />历史记录</button>
       <UserMenu
-        @login="openAuth('login')"
-        @register="openAuth('register')"
+        @login="openAuth"
+        @register="openAuth"
         @profile="openAccount"
         @billing="openPricing"
         @admin="router.push('/admin/providers')"
       />
     </header>
-    <AuthModal v-model:open="authOpen" :initial-mode="authInitialMode" />
+    <AuthModal v-model:open="authOpen" />
     <AccountModal v-model:open="accountOpen" :initial-tab="accountInitialTab" @open-pricing="openPricing" />
     <PricingModal v-model:open="pricingOpen" @require-auth="requireAuthFromPricing" />
     <nav class="phase-rail">
@@ -1077,7 +1065,7 @@ async function openHistoryJob(entry: HistoryEntry) {
           <label class="switch-row"><span><b>安全演示模式</b><small>本地模拟资产，不调用语言或图片模型</small></span><input v-model="form.dryRun" type="checkbox"/></label>
         </section>
         <div class="panel-footer">
-          <button v-if="suiteJobActive" class="secondary-action cancel-action" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined/>{{ cancelling ? '取消中' : '取消任务' }}</button>
+          <button v-if="suiteJobActive && job?.status === 'queued'" class="secondary-action cancel-action" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined/>{{ cancelling ? '取消中' : '取消任务' }}</button>
           <button class="generate-button" :disabled="submittingGeneration || !assets.length || !inputValid || !customValid" @click="generate"><RocketOutlined/>{{ submittingGeneration ? '正在提交' : `开始生成 ${count} 张套图` }}</button>
         </div>
       </template>
@@ -1144,9 +1132,9 @@ async function openHistoryJob(entry: HistoryEntry) {
         </div>
         <div v-else-if="job?.items.length" class="result-workspace">
           <div class="result-toolbar">
-            <div><span class="success-dot" :class="{ failed: ['failed', 'cancelled'].includes(job.status), warning: ['partial_failed', 'partial_cancelled', 'cancelling'].includes(job.status) }"/><span class="result-status-text"><strong>{{ job.status==='succeeded' ? '套图已生成' : job.status==='partial_failed' ? '部分图片生成失败，可重试' : job.status==='cancelled' ? '任务已取消' : job.status==='partial_cancelled' ? '任务已部分取消' : job.status==='failed' ? '任务失败' : '任务处理中' }}</strong><small>{{ job.items.length }} 张 · {{ job.dry_run ? 'Dryrun' : 'Live' }}</small><small v-if="currentFailureMessage" class="result-error">{{ currentFailureMessage }}</small></span></div>
+            <div><span class="success-dot" :class="{ failed: ['failed', 'cancelled'].includes(job.status), warning: ['partial_failed', 'partial_cancelled', 'cancelling'].includes(job.status) }"/><span class="result-status-text"><strong>{{ job.status==='succeeded' ? '套图已生成' : job.status==='partial_failed' ? '部分图片生成失败，可重试' : job.status==='cancelled' ? '任务已取消' : job.status==='partial_cancelled' ? '任务已部分取消' : job.status==='failed' ? '任务失败' : '任务处理中' }}</strong><small>{{ job.items.length }} 张 · {{ job.dry_run ? 'Dryrun' : 'Live' }}</small></span></div>
             <div>
-              <button v-if="suiteJobActive" class="secondary-action cancel-action" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined/>{{ cancelling ? '取消中' : '取消任务' }}</button>
+              <button v-if="suiteJobActive && job?.status === 'queued'" class="secondary-action cancel-action" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined/>{{ cancelling ? '取消中' : '取消任务' }}</button>
               <button v-if="job.items.some((item)=>item.status==='failed')" class="secondary-action retry-all" :disabled="generating" @click="retryFailed"><ThunderboltOutlined/>重试失败项</button>
               <button class="secondary-action" @click="toggleSuiteJobSuccess">{{ suiteJobAllSelected ? '取消全选' : '全选成功项' }}</button>
               <WatermarkDownloadMenu

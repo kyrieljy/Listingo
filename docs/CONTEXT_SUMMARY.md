@@ -45,7 +45,7 @@
 
 | 路由 | 前缀/职责 | 文件 |
 |---|---|---|
-| 认证 | 登录/注册、短信二次验证、账号中心、会话 | `auth.py` |
+| 认证 | 统一短信登录/注册（手机号首次登录自动创建 free 账号）、密码登录、短信二次验证、账号中心、会话 | `auth.py` |
 | 公开 | 工作台任务、上传、批量/workspace 配置、公开资产 | `public.py` |
 | 管理 | Provider、Workflow、Prompt、用户、套餐、订单、监控、短信、OCR、运行配置 | `admin.py` |
 
@@ -62,7 +62,8 @@
 | 内容安全 | 本地关键词 + LLM 审查 | `content_safety.py` |
 | 水印 | AI 水印下载权限规则 | `watermarking.py` |
 | 批量托管 | `BatchJob`/`BatchItem`、调度、取消、恢复、ZIP | `batch_jobs.py`、`batch_scheduler.py` |
-| 工作区恢复 | 重启后按 `provider_task_id` 续传/下载 | `workspace_recovery.py` |
+| 工作区恢复 | 重启后按 `provider_task_id` 续传/下载；保留 `queued` 任务以供队列重建，仅 `running`/`cancelling` 判定为中断 | `workspace_recovery.py` |
+| 生图 / 生视频缓冲队列 | `GenerationQueueScheduler`：两条相互独立的 Redis FIFO 队列（元素仅存 `job_id`）、`queued→running` 条件认领、每队列一个顺序 worker、启动按 `created_at,id` 重建、终态写入站内信；入队失败 fail-closed 并补偿释放额度 | `generation_queues.py`、`core/storage/keys.py`（`queue_key`） |
 | Provider 目录 | 47 个源码预设、route roles、slot 映射 | `provider_catalog.py`、`provider_routing.py`、`providers.py` |
 | 并发限制 | 进程级 `ProviderConcurrencyLimiter`（普通/A+/子编辑/OCR/批量共享） | `provider_limiter.py` |
 | Prompt 资产 | 8 类 Prompt 版本化、契约校验、JSON 修复 | `prompt_contract.py`、`prompt_testing.py`、`workflow_registry.py` |
@@ -89,8 +90,8 @@
 
 | 能力域 | 职责 | 关键文件（`frontend/src/features/`） |
 |---|---|---|
-| 工作台 `/app` | 四期统一工作台：套图、A+ 详情页、视频、Demo 面板、批量托管、OCR 改字、水印下载、结果网格 | `workspace/WorkspaceView.vue`、`APlusPhasePanel.vue`、`VideoPhasePanel.vue`、`DemoPhasePanel.vue`、`BatchHostingModal.vue`、`BatchHistoryDrawer.vue`、`ImageTextEditPanel.vue`、`WatermarkDownloadMenu.vue`、`ResultGrid.vue`；状态 `workspace-model.ts`、`batch-model.ts`、`analytics.ts` |
-| 账号 `/auth` | 登录/注册弹窗、账号中心、套餐弹窗、用户菜单、会话 store | `auth/AuthModal.vue`、`AccountModal.vue`、`PricingModal.vue`、`UserMenu.vue`、`auth-store.ts`、`auth-model.ts` |
+| 工作台 `/app` | 四期统一工作台：套图、A+ 详情页、视频、Demo 面板、批量托管、OCR 改字、水印下载、结果网格、环境感知生成失败提示 | `workspace/WorkspaceView.vue`、`APlusPhasePanel.vue`、`VideoPhasePanel.vue`、`DemoPhasePanel.vue`、`BatchHostingModal.vue`、`BatchHistoryDrawer.vue`、`ImageTextEditPanel.vue`、`WatermarkDownloadMenu.vue`、`ResultGrid.vue`；状态 `workspace-model.ts`、`generation-errors.ts`、`batch-model.ts`、`analytics.ts` |
+| 账号 `/auth` | 统一登录/注册弹窗（短信登录自动开户、密码登录）、账号中心、套餐弹窗、用户菜单、会话 store | `auth/AuthModal.vue`、`AccountModal.vue`、`PricingModal.vue`、`UserMenu.vue`、`auth-store.ts`、`auth-model.ts` |
 | 运营后台 `/admin` | Provider 分组、Prompt 上传/版本比较/试跑、Workflow、日志、运行配置、短信/OCR/用户/套餐/订单、监控图表 | `admin/AdminView.vue`、`MonitoringDashboard.vue`、`MonitoringLineChart.vue`、`SharePieChart.vue`、`ComparisonMatrix.vue`、`MetricKpiStrip.vue`、`UserDrilldownPanel.vue`、`provider-display.ts`、`monitoring-data.ts` |
 | 基础设施 | HTTP 客户端、路由、全局样式 | `api/client.ts`、`router/index.ts`、`styles/` |
 
@@ -115,6 +116,8 @@
 
 | 日期 | 变更 | 来源 |
 |---|---|---|
+| 2026-08-29 | `changes/012-unified-phone-login-registration`：短信登录与首次注册合并。未注册手机号通过 `purpose=login` 验证后自动创建 active/free 用户、注册通知、会话与 `sms` 登录事件；前端移除显式注册模式，保留密码登录与旧注册 API 兼容 | changes |
+| 2026-08-29 | `changes/010-generation-video-buffer-queues`：生图 / 生视频外部 API 调用改为两条独立 Redis FIFO 缓冲队列。创建与 retry-failed 入队后立即返回 `queued`（不再 `BackgroundTasks` 同步执行），worker 条件认领为 `running` 并顺序执行，终态写入站内信；取消语义收紧为「`queued` 可取消 / `running` 返回 409」，`workspace_recovery` 保留 `queued` 供队列重建；前端提交/重试后提示「任务已在后台运行」，取消入口仅 `queued` 可见。`docs/REDIS_KEYS.md` 新增「队列缓冲」键段与队列保护运维约定 | changes |
 | 2026-08-22 | 建立 `docs/CONTEXT_SUMMARY.md` 语义索引（响应 `/doc-update`）；确认 `SPEC.md`/`README.md` 保持删除，权威文档收敛为 `TASKS.md`/`TECH_STACK.md`/`开发计划.md` | doc-update |
 | 2026-08-23 | `changes/009-redis-scenario-expansion`：落地 `redis-analysis.md` 第二节六类 Redis 场景——热点缓存（Provider/Prompt/Workflow/套餐/规则）、任务状态缓存、会话缓存、分布式锁（批量认领/额度预留/订单创建/模拟支付）、实时计数与 OCR 结果缓存；新增 `core/runtime.py`（`RuntimeStateService`）、`services/runtime_cache.py`、`services/metrics.py`，`keys.py` 扩展 cache/session/batch/lock/metric 构造器，`config.py` 新增 7 项 TTL 配置，`main.py` 装配 `app.state.runtime_state`；约束演进为「PostgreSQL 事实 + Redis 派生态」，缓存/计数 fail-open、锁 fail-closed | changes |
 | 2026-08-23 | `changes/006-redis-rate-limit-verification`：新增 Compose Redis、`LISTINGO_REDIS_URL`、Redis 存储适配器；限流/Nonce/封禁与短信验证码临时状态迁往 Redis，删除 SQLite `sms_verification_code` 表 | changes |

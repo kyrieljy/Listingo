@@ -162,6 +162,10 @@ class RuntimeStateService:
         """Release only our token so expired holders cannot delete newer locks."""
         return self.storage.delete_if_equal(key, token)
 
+    def renew_lock(self, key: str, token: str, ttl: int) -> bool:
+        """Renew only our token; false means this holder must stop consuming."""
+        return self.storage.expire_if_equal(key, token, ttl)
+
     def increment(self, key: str, ttl: int) -> int:
         return self.storage.incr(key, ttl).value
 

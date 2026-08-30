@@ -24,6 +24,7 @@ from backend.app.models import (
     utcnow,
 )
 from backend.app.security import ApiKeyCipher
+from backend.app.core.runtime import default_runtime
 from backend.app.services.execution import (
     parse_plan_with_one_repair,
     run_image_route,
@@ -36,8 +37,10 @@ from backend.app.services.prompt_contract import (
     parse_product_facts,
     plan_to_json,
     render_prompt_variables,
+    sensitive_image_categories,
     validate_meta_prompt_semantics,
 )
+from backend.app.services.sensitive_words import load_sensitive_word_snapshot
 from backend.app.services.content_safety import ContentSafetyBlocked, ensure_content_safe, run_content_safety_review
 from backend.app.services.provider_routing import (
     ProviderRecord,
@@ -553,6 +556,7 @@ async def _run_live_job(
             if not safety_prompt:
                 raise RuntimeError("任务引用的内容安全审计 Prompt 版本不存在")
             job_count = job.count
+            image_safety_enabled = bool(load_sensitive_word_snapshot(session, default_runtime()))
             session.add(
                 ExecutionLog(
                     job_id=job.id,
@@ -686,6 +690,22 @@ async def _run_live_job(
         if generation_cancel_requested(session_factory, job_id):
             return
         product_facts = parse_product_facts(facts_raw)
+        image_safety = sensitive_image_categories(product_facts)
+        if image_safety_enabled and image_safety:
+            with session_factory() as session:
+                session.add(
+                    ExecutionLog(
+                        job_id=job_id,
+                        node="sensitive_image",
+                        status="failed",
+                        request_summary="{}",
+                        response_summary=safe_json({"categories": image_safety}),
+                        error="包含敏感信息",
+                        dry_run=False,
+                    )
+                )
+                session.commit()
+            raise RuntimeError("包含敏感信息")
         image_plan = custom_count_instruction(params.get("custom_counts")) if params.get("mode") == "custom" else f"由核心提示词智能匹配，共 {job_count} 张"
         product_info_parts = [
             f"商品名称：{params.get('product_name') or product_facts.product_name}",

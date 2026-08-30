@@ -895,3 +895,40 @@ class AdminNotificationBroadcastCreate(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     body: str = Field(default="", max_length=4000)
     user_ids: list[str] = Field(default_factory=list, max_length=500)
+
+
+class SensitiveWordCreate(BaseModel):
+    term: str = Field(min_length=1, max_length=120)
+    aliases: list[str] = Field(default_factory=list, max_length=20)
+    enabled: bool = True
+    note: str = Field(default="", max_length=500)
+
+    @field_validator("term", "aliases")
+    @classmethod
+    def strip_terms(cls, value: list[str] | str) -> list[str] | str:
+        if isinstance(value, str):
+            return value.strip()
+        return [item.strip() for item in value]
+
+
+class SensitiveWordUpdate(BaseModel):
+    term: str | None = Field(default=None, min_length=1, max_length=120)
+    aliases: list[str] | None = Field(default=None, max_length=20)
+    enabled: bool | None = None
+    note: str | None = Field(default=None, max_length=500)
+
+    @field_validator("term", "aliases")
+    @classmethod
+    def strip_terms(cls, value: list[str] | str | None) -> list[str] | str | None:
+        if value is None:
+            return value
+        if isinstance(value, str):
+            return value.strip()
+        return [item.strip() for item in value]
+
+
+class SensitiveWordSettingsUpdate(BaseModel):
+    enabled: bool | None = None
+    max_variants_per_word: int | None = Field(default=None, ge=1, le=1024)
+    max_total_variants: int | None = Field(default=None, ge=1, le=1_000_000)
+    max_snapshot_bytes: int | None = Field(default=None, ge=1024, le=100 * 1024 * 1024)

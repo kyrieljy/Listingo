@@ -113,6 +113,38 @@ class SmsConfig(Base, TimestampMixin):
     daily_limit_per_phone: Mapped[int] = mapped_column(Integer, default=10)
 
 
+class SensitiveWordConfig(Base, TimestampMixin):
+    __tablename__ = "sensitive_word_config"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    max_variants_per_word: Mapped[int] = mapped_column(Integer, default=256)
+    max_total_variants: Mapped[int] = mapped_column(Integer, default=100_000)
+    max_snapshot_bytes: Mapped[int] = mapped_column(Integer, default=10_485_760)
+
+
+class SensitiveWord(Base, TimestampMixin):
+    __tablename__ = "sensitive_word"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    term: Mapped[str] = mapped_column(String(120))
+    normalized_term: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    aliases_json: Mapped[str] = mapped_column(Text, default="[]")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+
+
+class SensitiveWordSnapshot(Base, TimestampMixin):
+    __tablename__ = "sensitive_word_snapshot"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    source_digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    word_count: Mapped[int] = mapped_column(Integer, default=0)
+    variant_count: Mapped[int] = mapped_column(Integer, default=0)
+    payload_bytes: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class SubscriptionPlan(Base, TimestampMixin):
     __tablename__ = "subscription_plan"
 

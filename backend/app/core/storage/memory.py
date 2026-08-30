@@ -175,6 +175,12 @@ class MemoryStorage(RateLimitStorage):
             self._items[key] = _MemoryEntry(value=value, expires_at=expires_at, evictable=allow_eviction)
             return WriteResult(success=True, expires_in_seconds=self._entry_ttl(self._items[key]))
 
+    def set_persistent_many(self, items: dict[str, str]) -> None:
+        with self._lock:
+            # Persistent facts are replaced as one visibility unit while the lock is held.
+            for key, value in items.items():
+                self._items[key] = _MemoryEntry(value=value, expires_at=None, evictable=False)
+
     def get(self, key: str) -> StorageItem | None:
         with self._lock:
             self._remove_expired_locked()

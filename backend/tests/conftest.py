@@ -15,6 +15,7 @@ from sqlalchemy.engine import make_url
 from backend.app.config import Settings
 from backend.app.main import create_app
 from backend.app.models import Base
+from backend.app.services.image_text_edit import clear_ocr_engine_cache
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -60,6 +61,9 @@ def postgres_database_url():
 @pytest.fixture(autouse=True)
 def clean_business_tables(postgres_database_url: str) -> None:
     _clear_business_tables(postgres_database_url)
+    clear_ocr_engine_cache()
+    yield
+    clear_ocr_engine_cache()
 
 
 def _clear_business_tables(database_url: str) -> None:

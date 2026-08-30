@@ -89,13 +89,21 @@ class RedisStorage(RateLimitStorage):
         self._call(self._client.set, self._key(key), value, ex=ttl)
         return WriteResult(success=True, expires_in_seconds=ttl)
 
+    def set_persistent_many(self, items: dict[str, str]) -> None:
+        if not items:
+            return
+        with self._client.pipeline(transaction=True) as pipeline:
+            for key, value in items.items():
+                pipeline.set(self._key(key), value)
+            self._call(pipeline.execute)
+
     def get(self, key: str) -> StorageItem | None:
         prefixed_key = self._key(key)
         value = self._call(self._client.get, prefixed_key)
         if value is None:
             return None
         ttl = int(self._call(self._client.ttl, prefixed_key))
-        return StorageItem(value=value, expires_in_seconds=max(1, ttl))
+        return StorageItem(value=value, expires_in_seconds=ttl if ttl > 0 else None)
 
     def delete(self, key: str) -> bool:
         return bool(self._call(self._client.delete, self._key(key)))

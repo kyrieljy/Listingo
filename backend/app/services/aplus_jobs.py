@@ -15,9 +15,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from backend.app.config import Settings
-from backend.app.models import AplusItem, AplusJob, AplusVersion, Asset, PromptVersion, utcnow
+from backend.app.models import AplusItem, AplusJob, AplusVersion, Asset, ExecutionLog, PromptVersion, utcnow
 from backend.app.schemas import A_PLUS_MODULE_TOTAL_LIMIT
 from backend.app.security import ApiKeyCipher
+from backend.app.core.runtime import default_runtime
 from backend.app.services.execution import run_image_route
 from backend.app.services.jobs import _call_llm_with_fallback, _enabled_provider, validate_generated_image_bytes
 from backend.app.services.provider_routing import (
@@ -27,9 +28,10 @@ from backend.app.services.provider_routing import (
     route_provider_codes,
 )
 from backend.app.services.provider_limiter import provider_slot
-from backend.app.services.prompt_contract import parse_product_facts
+from backend.app.services.prompt_contract import parse_product_facts, sensitive_image_categories
 from backend.app.services.providers import ProviderClient, provider_requires_public_urls, requested_image_size
 from backend.app.services.redaction import safe_json
+from backend.app.services.sensitive_words import load_sensitive_word_snapshot
 from backend.app.services.storage import public_file_url
 from backend.app.services.subscriptions import confirm_quota, release_quota
 
@@ -767,6 +769,7 @@ async def run_aplus_plan_job(
             if not prompt_version:
                 raise RuntimeError("A+ Meta Prompt 未启用")
             prompt_content = str(params.get("_admin_prompt_content") or prompt_version.content)
+            image_safety_enabled = bool(load_sensitive_word_snapshot(session, default_runtime()))
             session.commit()
 
         module_selections = _normalize_module_selections(params)
@@ -799,6 +802,22 @@ async def run_aplus_plan_job(
             if aplus_cancel_requested(session_factory, job_id):
                 return
             product_facts = parse_product_facts(facts_raw)
+            image_safety = sensitive_image_categories(product_facts)
+            if image_safety_enabled and image_safety:
+                with session_factory() as session:
+                    session.add(
+                        ExecutionLog(
+                            job_id=job_id,
+                            node="sensitive_image",
+                            status="failed",
+                            request_summary="{}",
+                            response_summary=safe_json({"categories": image_safety}),
+                            error="包含敏感信息",
+                            dry_run=False,
+                        )
+                    )
+                    session.commit()
+                raise RuntimeError("包含敏感信息")
             input_mode = "image_with_text" if str(params.get("product_info") or "").strip() else "image_only"
             product_info = params.get("product_info") or json.dumps(product_facts.model_dump(), ensure_ascii=False)
             product_facts_dict = product_facts.model_dump()

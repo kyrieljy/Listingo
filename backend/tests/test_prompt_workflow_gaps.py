@@ -22,6 +22,7 @@ from backend.app.services.prompt_contract import (
     MetaPromptPlan,
     parse_product_facts,
     render_prompt_variables,
+    sensitive_image_categories,
     validate_meta_prompt_semantics,
 )
 from backend.app.services.execution import validate_plan_with_one_replan
@@ -105,6 +106,36 @@ def test_product_facts_have_strict_contracts() -> None:
         "sku_count": 1, "accessories": [], "labels_text": [], "uncertain": ["容量"],
     })
     assert facts.sku_count == 1
+
+
+def test_product_facts_default_safety_fields_to_false_for_old_contract() -> None:
+    facts = parse_product_facts({
+        "schema_version": "1.0", "product_name": "保温杯", "category": "饮水器具",
+        "sku_count": 1,
+    })
+
+    assert (facts.is_pornography, facts.is_violence, facts.is_politics) == (False, False, False)
+    assert sensitive_image_categories(facts) == []
+
+
+def test_product_facts_accept_prompt_safety_boolean_coercions() -> None:
+    base = {"schema_version": "1.0", "product_name": "保温杯", "category": "饮水器具", "sku_count": 1}
+
+    false_cases = [
+        {**base, "is_pornography": 0},
+        {**base, "is_violence": "0"},
+        {**base, "is_politics": False},
+    ]
+    true_cases = [
+        {**base, "is_pornography": 1},
+        {**base, "is_violence": "1"},
+        {**base, "is_politics": True},
+    ]
+
+    assert [sensitive_image_categories(parse_product_facts(payload)) for payload in false_cases] == [[], [], []]
+    assert [sensitive_image_categories(parse_product_facts(payload)) for payload in true_cases] == [
+        ["pornography"], ["violence"], ["politics"]
+    ]
 
 
 def test_product_facts_accept_llm_string_list_fields() -> None:

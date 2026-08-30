@@ -59,6 +59,9 @@ class ProductFacts(BaseModel):
     accessories: list[str] = Field(default_factory=list, max_length=30)
     labels_text: list[str] = Field(default_factory=list, max_length=30)
     uncertain: list[str] = Field(default_factory=list, max_length=30)
+    is_pornography: bool = False
+    is_violence: bool = False
+    is_politics: bool = False
 
     @field_validator("visible_features", "materials", "colors", "accessories", "labels_text", "uncertain", mode="before")
     @classmethod
@@ -89,6 +92,18 @@ class ContentSafetyReview(BaseModel):
     passed: bool
     categories: list[str] = Field(default_factory=list, max_length=20)
     issues: list[str] = Field(default_factory=list, max_length=20)
+
+
+def sensitive_image_categories(facts: ProductFacts) -> list[str]:
+    """Return only enum labels so blocking logs never reproduce source content."""
+    categories: list[str] = []
+    if facts.is_pornography:
+        categories.append("pornography")
+    if facts.is_violence:
+        categories.append("violence")
+    if facts.is_politics:
+        categories.append("politics")
+    return categories
 
 
 def append_runtime_contract(source: str, expected_count: int) -> str:

@@ -104,7 +104,11 @@ def test_admin_ocr_settings_can_be_updated_and_prewarmed(client, monkeypatch) ->
             "cache_size": 1,
         }
 
-    monkeypatch.setattr(admin_api, "prewarm_ocr_engine", fake_prewarm)
+    async def fake_prewarm_async(settings, state=None):
+        assert state is not None
+        return fake_prewarm(settings)
+
+    monkeypatch.setattr(admin_api, "prewarm_ocr_engine_async", fake_prewarm_async)
     prewarm = client.post("/api/v1/admin/ocr-settings/prewarm")
     assert prewarm.status_code == 200, prewarm.text
     assert prewarm.json()["prewarm"]["active_engine"] == "RapidOCR"

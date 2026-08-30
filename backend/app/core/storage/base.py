@@ -57,6 +57,10 @@ class RateLimitStorage(ABC):
         """Set a value with an absolute TTL, optionally evicting old records."""
 
     @abstractmethod
+    def set_persistent_many(self, items: dict[str, str]) -> None:
+        """Atomically replace durable values without TTL or LRU eviction."""
+
+    @abstractmethod
     def get(self, key: str) -> StorageItem | None:
         """Return a live value and its remaining TTL."""
 

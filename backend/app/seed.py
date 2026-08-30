@@ -7,7 +7,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.models import Prompt, PromptVersion, Provider, SmsConfig, User, Workflow, WorkflowVersion
+from backend.app.models import Prompt, PromptVersion, Provider, SensitiveWordConfig, SmsConfig, User, Workflow, WorkflowVersion
 from backend.app.services.sms import normalize_phone
 from backend.app.services.subscriptions import seed_subscription_defaults
 from backend.app.services.provider_routing import (
@@ -340,6 +340,19 @@ def seed_database(session: Session) -> None:
     sms_config = session.scalar(select(SmsConfig).limit(1))
     if not sms_config:
         session.add(SmsConfig(enabled=True, debug_mode=True, sign_name="Listingo", login_template_code="SMS_DEBUG"))
+        session.flush()
+
+    sensitive_word_config = session.scalar(select(SensitiveWordConfig).limit(1))
+    if not sensitive_word_config:
+        # Detection starts disabled until an administrator deliberately enables the compiled word list.
+        session.add(
+            SensitiveWordConfig(
+                enabled=False,
+                max_variants_per_word=256,
+                max_total_variants=100_000,
+                max_snapshot_bytes=10_485_760,
+            )
+        )
         session.flush()
 
     legacy_video = session.scalar(select(Provider).where(Provider.code == LEGACY_VIDEO_PROVIDER_CODE))

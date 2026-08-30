@@ -98,6 +98,11 @@ from backend.app.services.image_text_edit import (
     create_live_generation_text_version,
     detect_text_lines_with_status,
 )
+from backend.app.services.sensitive_preflight import (
+    SensitiveInformationBlocked,
+    ensure_sensitive_information_safe,
+    prewarm_uploaded_asset_ocr,
+)
 from backend.app.services.batch_jobs import (
     cancel_batch_job,
     cached_batch_job_payload,
@@ -508,6 +513,7 @@ def build_copywriting_user_prompt(payload: CopywritingAssistCreate) -> str:
 @router.post("/assets", response_model=AssetOut, status_code=201)
 async def create_asset(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
@@ -517,6 +523,7 @@ async def create_asset(
     session.add(asset)
     session.commit()
     session.refresh(asset)
+    background_tasks.add_task(prewarm_uploaded_asset_ocr, asset.file_path, request.app.state.settings)
     return asset
 
 
@@ -529,6 +536,23 @@ async def create_batch_job(
 ) -> dict[str, Any]:
     settings = request.app.state.settings
     try:
+        scan_texts = []
+        scan_asset_ids: list[str] = []
+        for item in payload.items:
+            scan_asset_ids.extend(item.asset_ids)
+            if payload.business_type == "suite":
+                scan_texts.append(item.selling_points or str(payload.global_params.get("selling_points") or ""))
+            else:
+                product_info = str(payload.global_params.get("product_info") or "")
+                scan_texts.append(product_info or item.selling_points or item.name)
+        await ensure_sensitive_information_safe(
+            session,
+            getattr(request.app.state, "runtime_state", None),
+            settings,
+            scan_texts,
+            asset_ids=scan_asset_ids,
+            user_id=current_user.id,
+        )
         batch = create_batch_job_record(session, payload, settings, user_id=current_user.id)
         reserve_quota(
             session,
@@ -545,6 +569,9 @@ async def create_batch_job(
     except HTTPException:
         session.rollback()
         raise
+    except SensitiveInformationBlocked:
+        session.rollback()
+        raise HTTPException(status_code=422, detail="包含敏感信息")
     session.commit()
     invalidate_batch_status(batch.id, getattr(request.app.state, "runtime_state", None))
     batch = load_batch_job(session, batch.id)
@@ -774,6 +801,14 @@ async def create_generation_job(
     if len(payload.asset_ids) > 6:
         raise HTTPException(status_code=422, detail="Single generation jobs allow at most 6 product images")
     try:
+        await ensure_sensitive_information_safe(
+            session,
+            getattr(request.app.state, "runtime_state", None),
+            request.app.state.settings,
+            [payload.selling_points],
+            asset_ids=payload.asset_ids,
+            user_id=current_user.id,
+        )
         job = create_generation_job_record(session, payload, max_asset_count=6, user_id=current_user.id)
         reserve_quota(
             session,
@@ -790,6 +825,9 @@ async def create_generation_job(
     except HTTPException:
         session.rollback()
         raise
+    except SensitiveInformationBlocked:
+        session.rollback()
+        raise HTTPException(status_code=422, detail="包含敏感信息")
     session.commit()
     session.refresh(job)
     scheduler = request.app.state.generation_queue_scheduler
@@ -989,10 +1027,21 @@ async def create_aplus_plan_job(
     if len(payload.asset_ids) > 6:
         raise HTTPException(status_code=422, detail="Single A+ plan jobs allow at most 6 product images")
     try:
+        await ensure_sensitive_information_safe(
+            session,
+            getattr(request.app.state, "runtime_state", None),
+            request.app.state.settings,
+            [payload.product_info],
+            asset_ids=payload.asset_ids,
+            user_id=current_user.id,
+        )
         job = create_aplus_plan_job_record(session, payload, max_asset_count=6, user_id=current_user.id)
     except TaskCreationError as exc:
         session.rollback()
         raise_task_creation_error(exc)
+    except SensitiveInformationBlocked:
+        session.rollback()
+        raise HTTPException(status_code=422, detail="包含敏感信息")
     session.commit()
     session.refresh(job)
     background_tasks.add_task(run_aplus_plan_job, job.id, request.app.state.session_factory, request.app.state.cipher)
@@ -1582,6 +1631,17 @@ async def create_video_job(
     assets = session.scalars(asset_query_for_user(payload.asset_ids, current_user)).all()
     if len(assets) != len(payload.asset_ids):
         raise HTTPException(status_code=422, detail="存在无效商品图")
+    try:
+        await ensure_sensitive_information_safe(
+            session,
+            getattr(request.app.state, "runtime_state", None),
+            request.app.state.settings,
+            [payload.selling_points],
+            asset_ids=payload.asset_ids,
+            user_id=current_user.id,
+        )
+    except SensitiveInformationBlocked:
+        raise HTTPException(status_code=422, detail="包含敏感信息")
     prompt = session.scalar(select(Prompt).where(Prompt.code == "ecommerce-video-meta-15s"))
     prompt_version = session.get(PromptVersion, prompt.active_version_id) if prompt and prompt.active_version_id else None
     if not prompt_version:

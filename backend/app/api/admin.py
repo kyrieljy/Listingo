@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -24,6 +25,8 @@ from backend.app.models import (
     PromptTestRun,
     PromptVersion,
     Provider,
+    SensitiveWordConfig,
+    SensitiveWord,
     SmsConfig,
     SubscriptionPlan,
     User,
@@ -46,6 +49,9 @@ from backend.app.schemas import (
     SmsSendCreate,
     SmsSendOut,
     SmsSettingsUpdate,
+    SensitiveWordCreate,
+    SensitiveWordSettingsUpdate,
+    SensitiveWordUpdate,
     WorkflowVersionCreate,
 )
 from backend.app.security import mask_api_key
@@ -76,8 +82,23 @@ from backend.app.services.image_text_edit import (
     SUPPORTED_OCR_ENGINES,
     SUPPORTED_OCR_MODELS,
     clear_ocr_engine_cache,
+    new_ocr_prewarm_state,
     ocr_cache_size,
+    _public_prewarm_state,
+    prewarm_ocr_engine_async,
     prewarm_ocr_engine,
+    schedule_ocr_prewarm,
+)
+from backend.app.services.sensitive_words import (
+    build_sensitive_word_snapshot,
+    get_sensitive_word_config,
+    normalize_sensitive_text,
+    persist_sensitive_word_snapshot,
+    preview_sensitive_variants,
+    sensitive_word_status,
+    snapshot_meta,
+    sync_sensitive_word_snapshot,
+    SensitiveWordError,
 )
 from backend.app.services.jobs import run_generation_job
 from backend.app.services.prompt_testing import (
@@ -105,6 +126,7 @@ from backend.app.services.subscriptions import (
 from backend.app.services.workflow_registry import validate_workflow_graph
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
 
@@ -263,7 +285,7 @@ def _normalize_admin_ocr_model(value: Any) -> str:
     return aliases.get(lowered, normalized)
 
 
-def _ocr_settings_dict(settings: Settings) -> dict[str, Any]:
+def _ocr_settings_dict(settings: Settings, prewarm_state: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "ocr_engine": settings.ocr_engine,
         "ocr_primary_model": settings.ocr_primary_model,
@@ -281,7 +303,86 @@ def _ocr_settings_dict(settings: Settings) -> dict[str, Any]:
         "supported_engines": list(SUPPORTED_OCR_ENGINES),
         "supported_models": list(SUPPORTED_OCR_MODELS),
         "cache_size": ocr_cache_size(),
+        "prewarm_status": _public_prewarm_state(prewarm_state) if prewarm_state is not None else new_ocr_prewarm_state(),
     }
+
+
+def _ocr_prewarm_state(request: Request) -> dict[str, Any]:
+    state = getattr(request.app.state, "ocr_prewarm", None)
+    if state is None:
+        state = new_ocr_prewarm_state()
+        request.app.state.ocr_prewarm = state
+    return state
+
+
+def _aliases_payload(term: str, aliases: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    normalized_seen = {normalize_sensitive_text(term, compact=True)}
+    for alias in aliases:
+        if not alias or len(alias) > 120:
+            raise HTTPException(status_code=422, detail="人工别名必须为 1-120 个字符")
+        normalized = normalize_sensitive_text(alias, compact=True)
+        if not normalized:
+            raise HTTPException(status_code=422, detail="人工别名不能为空")
+        if normalized in normalized_seen:
+            raise HTTPException(status_code=422, detail="人工别名不能与原词或其他别名重复")
+        normalized_seen.add(normalized)
+        cleaned.append(alias)
+    return cleaned
+
+
+def _word_response(session: Session, word: SensitiveWord) -> dict[str, Any]:
+    config = get_sensitive_word_config(session)
+    previews = preview_sensitive_variants(
+        word.term,
+        json.loads(word.aliases_json or "[]"),
+        max_variants_per_word=config.max_variants_per_word,
+    )
+    variants: list[str] = []
+    for preview in previews:
+        for variant in preview.variants:
+            if variant not in variants:
+                variants.append(variant)
+    return {
+        "id": word.id,
+        "term": word.term,
+        "aliases": json.loads(word.aliases_json or "[]"),
+        "enabled": word.enabled,
+        "note": word.note,
+        "variant_count": len(variants),
+        "variants": variants,
+        "created_at": word.created_at,
+        "updated_at": word.updated_at,
+    }
+
+
+def _locked_sensitive_config(session: Session):
+    config = session.scalar(select(SensitiveWordConfig).limit(1))
+    if config is None:
+        get_sensitive_word_config(session)
+        config = session.scalar(select(SensitiveWordConfig).limit(1).with_for_update())
+    else:
+        config = session.scalar(select(SensitiveWordConfig).where(SensitiveWordConfig.id == config.id).with_for_update())
+    if config is None:
+        raise HTTPException(status_code=500, detail="敏感词配置初始化失败")
+    return config
+
+
+def _commit_sensitive_snapshot(session: Session, runtime) -> dict[str, Any]:
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.error("敏感词快照数据库提交失败", exc_info=True)
+        # Redis was already updated before DB commit; restore the last committed DB truth when possible.
+        try:
+            config = get_sensitive_word_config(session)
+            words = list(session.scalars(select(SensitiveWord).order_by(SensitiveWord.normalized_term)).all())
+            sync_sensitive_word_snapshot(build_sensitive_word_snapshot(config, words), runtime)
+        except Exception:
+            pass
+        raise HTTPException(status_code=503, detail="敏感词快照保存失败，请稍后再试")
+    return {"redis_synced": True}
 
 
 def _bounded_float(payload: dict[str, Any], key: str, current: float, minimum: float = 0, maximum: float = 1) -> float:
@@ -490,13 +591,234 @@ def update_runtime_settings(payload: dict[str, str], request: Request) -> dict[s
     }
 
 
+@router.get("/sensitive-words")
+def list_sensitive_words(request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
+    config = get_sensitive_word_config(session)
+    words = session.scalars(select(SensitiveWord).order_by(SensitiveWord.created_at.desc())).all()
+    return {
+        "config": {
+            "enabled": config.enabled,
+            "max_variants_per_word": config.max_variants_per_word,
+            "max_total_variants": config.max_total_variants,
+            "max_snapshot_bytes": config.max_snapshot_bytes,
+            "updated_at": config.updated_at,
+        },
+        "words": [_word_response(session, word) for word in words],
+        "snapshot": sensitive_word_status(session, getattr(request.app.state, "runtime_state", None)),
+    }
+
+
+@router.post("/sensitive-words/preview")
+def preview_sensitive_word(payload: SensitiveWordCreate, session: Session = Depends(get_session)) -> dict[str, Any]:
+    config = get_sensitive_word_config(session)
+    aliases = _aliases_payload(payload.term, payload.aliases)
+    try:
+        previews = preview_sensitive_variants(
+            payload.term,
+            aliases,
+            max_variants_per_word=config.max_variants_per_word,
+        )
+    except SensitiveWordError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "previews": [
+            {"source": preview.source, "boundary": preview.boundary, "variants": list(preview.variants)}
+            for preview in previews
+        ],
+        "variant_count": sum(len(preview.variants) for preview in previews),
+        "max_variants_per_word": config.max_variants_per_word,
+    }
+
+
+@router.post("/sensitive-words")
+def create_sensitive_word(
+    payload: SensitiveWordCreate,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    runtime = getattr(request.app.state, "runtime_state", None)
+    aliases = _aliases_payload(payload.term, payload.aliases)
+    normalized_term = normalize_sensitive_text(payload.term, compact=True)
+    if not normalized_term:
+        raise HTTPException(status_code=422, detail="敏感词不能为空")
+    try:
+        _locked_sensitive_config(session)
+        if session.scalar(select(SensitiveWord).where(SensitiveWord.normalized_term == normalized_term)):
+            raise HTTPException(status_code=422, detail="敏感词已存在")
+        word = SensitiveWord(
+            term=payload.term,
+            normalized_term=normalized_term,
+            aliases_json=json.dumps(aliases, ensure_ascii=False),
+            enabled=payload.enabled,
+            note=payload.note,
+        )
+        session.add(word)
+        session.flush()
+        config = get_sensitive_word_config(session)
+        words = list(session.scalars(select(SensitiveWord).order_by(SensitiveWord.normalized_term)).all())
+        snapshot = build_sensitive_word_snapshot(config, words)
+        persist_sensitive_word_snapshot(session, snapshot)
+        sync_sensitive_word_snapshot(snapshot, runtime)
+    except HTTPException:
+        session.rollback()
+        raise
+    except SensitiveWordError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        session.rollback()
+        logger.error("敏感词快照同步失败", exc_info=True)
+        raise HTTPException(status_code=503, detail="敏感词快照同步失败，请稍后再试") from exc
+    word_id = word.id
+    result = _commit_sensitive_snapshot(session, runtime)
+    word = session.get(SensitiveWord, word_id)
+    return {**_word_response(session, word), **result}
+
+
+@router.patch("/sensitive-words/settings")
+def update_sensitive_word_settings(
+    payload: SensitiveWordSettingsUpdate,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    runtime = getattr(request.app.state, "runtime_state", None)
+    try:
+        config = _locked_sensitive_config(session)
+        updates = payload.model_dump(exclude_unset=True)
+        for field, value in updates.items():
+            setattr(config, field, value)
+        session.flush()
+        words = list(session.scalars(select(SensitiveWord).order_by(SensitiveWord.normalized_term)).all())
+        snapshot = build_sensitive_word_snapshot(config, words)
+        persist_sensitive_word_snapshot(session, snapshot)
+        sync_sensitive_word_snapshot(snapshot, runtime)
+    except SensitiveWordError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(status_code=503, detail="敏感词快照同步失败，请稍后再试") from exc
+    _commit_sensitive_snapshot(session, runtime)
+    config = get_sensitive_word_config(session)
+    return {
+        "enabled": config.enabled,
+        "max_variants_per_word": config.max_variants_per_word,
+        "max_total_variants": config.max_total_variants,
+        "max_snapshot_bytes": config.max_snapshot_bytes,
+        "updated_at": config.updated_at,
+        "redis_synced": True,
+        "snapshot": sensitive_word_status(session, runtime),
+    }
+
+
+@router.patch("/sensitive-words/{word_id}")
+def update_sensitive_word(
+    word_id: str,
+    payload: SensitiveWordUpdate,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    runtime = getattr(request.app.state, "runtime_state", None)
+    try:
+        _locked_sensitive_config(session)
+        word = session.get(SensitiveWord, word_id)
+        if not word:
+            raise HTTPException(status_code=404, detail="敏感词不存在")
+        updates = payload.model_dump(exclude_unset=True)
+        if "term" in updates:
+            normalized_term = normalize_sensitive_text(updates["term"], compact=True)
+            if not normalized_term:
+                raise HTTPException(status_code=422, detail="敏感词不能为空")
+            existing = session.scalar(select(SensitiveWord).where(SensitiveWord.normalized_term == normalized_term))
+            if existing and existing.id != word.id:
+                raise HTTPException(status_code=422, detail="敏感词已存在")
+            word.term = updates["term"]
+            word.normalized_term = normalized_term
+        if "aliases" in updates:
+            word.aliases_json = json.dumps(_aliases_payload(word.term, updates["aliases"]), ensure_ascii=False)
+        if "enabled" in updates:
+            word.enabled = updates["enabled"]
+        if "note" in updates:
+            word.note = updates["note"]
+        session.flush()
+        config = get_sensitive_word_config(session)
+        words = list(session.scalars(select(SensitiveWord).order_by(SensitiveWord.normalized_term)).all())
+        snapshot = build_sensitive_word_snapshot(config, words)
+        persist_sensitive_word_snapshot(session, snapshot)
+        sync_sensitive_word_snapshot(snapshot, runtime)
+    except HTTPException:
+        session.rollback()
+        raise
+    except SensitiveWordError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(status_code=503, detail="敏感词快照同步失败，请稍后再试") from exc
+    _commit_sensitive_snapshot(session, runtime)
+    word = session.get(SensitiveWord, word_id)
+    return {**_word_response(session, word), "redis_synced": True}
+
+
+@router.delete("/sensitive-words/{word_id}")
+def delete_sensitive_word(
+    word_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    runtime = getattr(request.app.state, "runtime_state", None)
+    try:
+        _locked_sensitive_config(session)
+        word = session.get(SensitiveWord, word_id)
+        if not word:
+            raise HTTPException(status_code=404, detail="敏感词不存在")
+        session.delete(word)
+        session.flush()
+        config = get_sensitive_word_config(session)
+        words = list(session.scalars(select(SensitiveWord).order_by(SensitiveWord.normalized_term)).all())
+        snapshot = build_sensitive_word_snapshot(config, words)
+        persist_sensitive_word_snapshot(session, snapshot)
+        sync_sensitive_word_snapshot(snapshot, runtime)
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(status_code=503, detail="敏感词快照同步失败，请稍后再试") from exc
+    _commit_sensitive_snapshot(session, runtime)
+    return {"deleted": True, "redis_synced": True, "snapshot": sensitive_word_status(session, runtime)}
+
+
+@router.post("/sensitive-words/snapshot/rebuild")
+def rebuild_sensitive_word_snapshot(
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    runtime = getattr(request.app.state, "runtime_state", None)
+    try:
+        _locked_sensitive_config(session)
+        config = get_sensitive_word_config(session)
+        words = list(session.scalars(select(SensitiveWord).order_by(SensitiveWord.normalized_term)).all())
+        snapshot = build_sensitive_word_snapshot(config, words)
+        persist_sensitive_word_snapshot(session, snapshot)
+        sync_sensitive_word_snapshot(snapshot, runtime)
+    except SensitiveWordError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(status_code=503, detail="敏感词快照重建失败，请稍后再试") from exc
+    _commit_sensitive_snapshot(session, runtime)
+    return {"redis_synced": True, "snapshot": sensitive_word_status(session, runtime)}
+
+
 @router.get("/ocr-settings")
 def get_ocr_settings(request: Request) -> dict[str, Any]:
-    return _ocr_settings_dict(request.app.state.settings)
+    return _ocr_settings_dict(request.app.state.settings, _ocr_prewarm_state(request))
 
 
 @router.patch("/ocr-settings")
-def update_ocr_settings(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+async def update_ocr_settings(payload: dict[str, Any], request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     if "ocr_engine" in payload:
         engine = str(payload.get("ocr_engine") or "").strip().lower()
@@ -528,22 +850,25 @@ def update_ocr_settings(payload: dict[str, Any], request: Request) -> dict[str, 
         if key in payload:
             setattr(settings, key, bool(payload[key]))
     clear_ocr_engine_cache()
-    return _ocr_settings_dict(settings)
+    state = _ocr_prewarm_state(request)
+    schedule_ocr_prewarm(settings, state)
+    return _ocr_settings_dict(settings, state)
 
 
 @router.post("/ocr-settings/prewarm")
-def prewarm_ocr_settings(request: Request) -> dict[str, Any]:
+async def prewarm_ocr_settings(request: Request) -> dict[str, Any]:
+    state = _ocr_prewarm_state(request)
     try:
-        result = prewarm_ocr_engine(request.app.state.settings)
-    except RuntimeError as exc:
+        result = await prewarm_ocr_engine_async(request.app.state.settings, state)
+    except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc))
-    return {**_ocr_settings_dict(request.app.state.settings), "prewarm": result}
+    return {**_ocr_settings_dict(request.app.state.settings, state), "prewarm": result}
 
 
 @router.post("/ocr-settings/cache/clear")
 def clear_ocr_settings_cache(request: Request) -> dict[str, Any]:
     clear_ocr_engine_cache()
-    return _ocr_settings_dict(request.app.state.settings)
+    return _ocr_settings_dict(request.app.state.settings, _ocr_prewarm_state(request))
 
 
 @router.patch("/providers/{provider_id}", response_model=ProviderOut)

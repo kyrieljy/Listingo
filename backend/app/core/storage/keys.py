@@ -80,3 +80,11 @@ def lock_key(scope: str, identifier: str) -> str:
 
 def metric_daily_key(day: str, name: str) -> str:
     return f"metric:daily:{day}:{name}"
+
+
+def sensitive_word_meta_key() -> str:
+    return "sensitive:words:meta"
+
+
+def sensitive_word_snapshot_key() -> str:
+    return "sensitive:words:snapshot"

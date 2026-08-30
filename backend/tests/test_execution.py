@@ -19,6 +19,7 @@ from backend.app.models import (
     AplusItem,
     AplusJob,
     Asset,
+    ExecutionLog,
     GenerationItem,
     GenerationJob,
     GenerationVersion,
@@ -32,6 +33,7 @@ from backend.app.services.execution import parse_plan_with_one_repair, run_image
 from backend.app.services import aplus_jobs, image_text_edit
 from backend.app.services import jobs as jobs_service
 from backend.app.services.jobs import _run_live_item, image_provider_route
+from backend.app.services.prompt_contract import ContentSafetyReview
 from backend.app.services.providers import (
     IMAGE2_SIZE_MAP,
     ProviderClient,
@@ -182,7 +184,7 @@ def test_paddleocr_rows_are_normalized_and_english_noise_is_filtered(tmp_path, m
     assert [line.text for line in result.lines] == ["Closure:", "Zipper & Buckle"]
 
 
-def test_paddleocr_runtime_falls_back_from_v6_to_v5(tmp_path, monkeypatch) -> None:
+def test_paddleocr_runtime_failure_does_not_fallback(tmp_path, monkeypatch) -> None:
     image_path = tmp_path / "source.png"
     Image.new("RGB", (300, 220), "#ffffff").save(image_path)
     calls: list[str] = []
@@ -227,10 +229,9 @@ def test_paddleocr_runtime_falls_back_from_v6_to_v5(tmp_path, monkeypatch) -> No
         language_hint="英文",
     )
 
-    assert [line.text for line in result.lines] == ["Closure:"]
-    assert calls == ["PP-OCRv6", "PP-OCRv5"]
-    assert result.warning and "PP-OCRv6 OCR failed" in result.warning
-    assert "using PaddleOCR PP-OCRv5" in result.warning
+    assert [line.text for line in result.lines] == []
+    assert calls == ["PP-OCRv6"]
+    assert result.warning and "temporary model failure" in result.warning
 
 
 def test_rapidocr_constructor_supplies_legacy_model_path(monkeypatch) -> None:
@@ -259,7 +260,7 @@ def test_rapidocr_constructor_supplies_legacy_model_path(monkeypatch) -> None:
 
 
 def test_rapidocr_prewarm_uses_installed_package(monkeypatch) -> None:
-    monkeypatch.setattr(image_text_edit, "_OCR_RUNNER_CACHE", {})
+    image_text_edit.clear_ocr_engine_cache()
     try:
         result = image_text_edit.prewarm_ocr_engine(
             Settings(testing=True, ocr_engine="rapidocr", ocr_text_score_threshold=0.72, ocr_box_score_threshold=0.58)
@@ -306,7 +307,7 @@ def test_paddleocr_primary_success_does_not_initialize_fallback(tmp_path, monkey
         created_models.append(model)
         return image_text_edit.OcrRunner("PaddleOCR", model, PaddleStub(model), uses_predict=True)
 
-    monkeypatch.setattr(image_text_edit, "_OCR_RUNNER_CACHE", {})
+    image_text_edit.clear_ocr_engine_cache()
     monkeypatch.setattr(image_text_edit, "_create_paddleocr_runner", create_runner)
     monkeypatch.setattr(
         image_text_edit,
@@ -2215,6 +2216,113 @@ def create_live_aplus_generation_job(
             web_item = item
     session.commit()
     return job.id, str(asset_path)
+
+
+def test_suite_and_aplus_stop_before_next_provider_when_image_safety_hits(client, monkeypatch) -> None:
+    session_factory = client.app.state.session_factory
+    settings = client.app.state.settings
+    cipher = client.app.state.cipher
+    assert client.patch("/api/v1/admin/sensitive-words/settings", json={"enabled": True}).status_code == 200
+
+    sensitive_facts = {
+        "schema_version": "1.0",
+        "product_name": "保温杯",
+        "category": "饮水器具",
+        "sku_count": 1,
+        "is_pornography": True,
+        "is_violence": 1,
+        "is_politics": "1",
+    }
+    llm_calls: list[str] = []
+
+    async def fake_vision_call(_client, provider, *_args, **_kwargs):
+        llm_calls.append(provider.code)
+        return json.dumps(sensitive_facts, ensure_ascii=False), provider
+
+    async def fake_input_safety(_client, provider, *_args, **_kwargs):
+        return ContentSafetyReview(schema_version="1.0", passed=True), provider
+
+    monkeypatch.setattr(jobs_service, "_call_llm_with_fallback", fake_vision_call)
+    monkeypatch.setattr(jobs_service, "run_content_safety_review", fake_input_safety)
+    monkeypatch.setattr(aplus_jobs, "_call_llm_with_fallback", fake_vision_call)
+
+    asset_path = settings.uploads_dir / "sensitive-image-source.png"
+    asset_bytes = png_bytes()
+    asset_path.write_bytes(asset_bytes)
+    with session_factory() as session:
+        llm_default = add_provider(session, cipher, "doubao-seed-2-0-mini", "llm", default=True)
+        add_provider(session, cipher, "qwen-3-6", "llm", fallback=True)
+        add_provider(session, cipher, "apimodels-nano-pro-generate", "image")
+        meta_prompt = add_prompt_version(session, "ecommerce-meta")
+        vision_prompt = add_prompt_version(session, "product-vision")
+        safety_prompt = add_prompt_version(session, "content-safety-review", "safety prompt")
+        workflow = session.scalar(select(Workflow).where(Workflow.code == "product-suite-v1"))
+        asset = Asset(
+            original_name="sensitive-image-source.png",
+            mime_type="image/png",
+            file_path=str(asset_path),
+            url="/files/uploads/sensitive-image-source.png",
+            width=640,
+            height=640,
+            byte_size=len(asset_bytes),
+            sha256="test-sensitive-image-source",
+        )
+        session.add(asset)
+        session.flush()
+        suite_job = GenerationJob(
+            status="queued",
+            dry_run=False,
+            params_json=json.dumps({
+                "aspect_ratio": "1:1",
+                "platform": "Amazon",
+                "market": "美国",
+                "language": "English",
+                "selling_points": "常规商品",
+                "_prompt_versions": {
+                    "product-vision": vision_prompt.id,
+                    "content-safety-review": safety_prompt.id,
+                },
+            }, ensure_ascii=False),
+            asset_ids_json=json.dumps([asset.id]),
+            count=1,
+            progress=0,
+            prompt_version_id=meta_prompt.id,
+            workflow_version_id=workflow.active_version_id,
+        )
+        aplus_job = AplusJob(
+            job_type="plan",
+            status="queued",
+            dry_run=False,
+            params_json=json.dumps({
+                "platform": "亚马逊",
+                "market": "美国",
+                "language": "英文",
+                "product_info": "常规商品",
+                "output_targets": [{"mode": "amazon_aplus_advanced_web", "aspect_ratio": "1464:600"}],
+                "_prompt_versions": {"product-vision": vision_prompt.id},
+            }, ensure_ascii=False),
+            asset_ids_json=json.dumps([asset.id]),
+            count=1,
+            progress=0,
+            prompt_version_id=meta_prompt.id,
+        )
+        session.add_all([suite_job, aplus_job])
+        session.commit()
+        suite_job_id = suite_job.id
+        aplus_job_id = aplus_job.id
+
+    asyncio.run(jobs_service.run_generation_job(suite_job_id, session_factory, settings, cipher))
+    asyncio.run(aplus_jobs.run_aplus_plan_job(aplus_job_id, session_factory, cipher))
+
+    assert llm_calls == [llm_default.code, llm_default.code]
+    with session_factory() as session:
+        suite = session.get(GenerationJob, suite_job_id)
+        aplus = session.get(AplusJob, aplus_job_id)
+        logs = session.scalars(select(ExecutionLog).where(ExecutionLog.node == "sensitive_image")).all()
+        assert (suite.status, suite.error) == ("failed", "包含敏感信息")
+        assert (aplus.status, aplus.error) == ("failed", "包含敏感信息")
+        assert len(logs) == 2
+        assert all(json.loads(log.response_summary)["categories"] == ["pornography", "violence", "politics"] for log in logs)
 
 
 def test_aplus_live_advanced_mobile_derives_from_web_master_with_atlas_edit(client, monkeypatch) -> None:

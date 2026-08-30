@@ -7,6 +7,8 @@ import pytest
 from redis.exceptions import ConnectionError
 
 from backend.app.core.storage.base import HashConsumeStatus, StorageUnavailableError
+from backend.app.core.storage.memory import MemoryStorage
+from backend.app.core.storage.keys import sensitive_word_meta_key, sensitive_word_snapshot_key
 from backend.app.core.storage.redis import RedisStorage
 
 
@@ -32,6 +34,34 @@ def test_redis_storage_uses_prefix_ttl_and_atomic_increment(storage: RedisStorag
     assert 1 <= first.expires_in_seconds <= 60
     assert fake_redis.get("listingo-test:rate:counter") == "2"
     assert fake_redis.ttl("listingo-test:rate:counter") > 0
+
+
+def test_redis_persistent_many_is_atomic_without_ttl(storage: RedisStorage, fake_redis: FakeRedis) -> None:
+    storage.set_persistent_many(
+        {
+            sensitive_word_meta_key(): '{"digest":"same"}',
+            sensitive_word_snapshot_key(): '{"words":[]}',
+        }
+    )
+
+    assert fake_redis.ttl(f"listingo-test:{sensitive_word_meta_key()}") == -1
+    assert fake_redis.ttl(f"listingo-test:{sensitive_word_snapshot_key()}") == -1
+    assert storage.get(sensitive_word_meta_key()).expires_in_seconds is None
+
+
+def test_memory_persistent_many_ignores_ttl_and_lru_eviction() -> None:
+    memory = MemoryStorage(max_size=2, start_cleanup_thread=False)
+
+    memory.set_persistent_many(
+        {
+            sensitive_word_meta_key(): "meta",
+            sensitive_word_snapshot_key(): "snapshot",
+        }
+    )
+    assert not memory.setex("derived", "value", 60).success
+
+    assert memory.get(sensitive_word_meta_key()).expires_in_seconds is None
+    assert memory.exists(sensitive_word_snapshot_key())
 
 
 def test_redis_set_if_absent_wins_once_under_concurrency(storage: RedisStorage) -> None:

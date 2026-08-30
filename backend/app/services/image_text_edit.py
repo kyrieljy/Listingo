@@ -5,6 +5,9 @@ import hashlib
 import re
 import shutil
 import tempfile
+import asyncio
+from datetime import datetime, timezone
+import threading
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -46,6 +49,9 @@ IMAGE_TEXT_EDIT_PROMPT_CODE = "image-text-edit"
 _LAST_OCR_ERROR: str | None = None
 _LAST_OCR_WARNING: str | None = None
 _OCR_RUNNER_CACHE: dict[tuple[str, str, str, float, float], "OcrRunner"] = {}
+_OCR_ENGINE_LOCK = threading.RLock()
+_ACTIVE_OCR_FINGERPRINT: tuple[Any, ...] | None = None
+_ACTIVE_OCR_RUNNER: OcrRunner | None = None
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
 SUPPORTED_OCR_ENGINES = ("paddleocr", "rapidocr", "auto")
 SUPPORTED_OCR_MODELS = ("PP-OCRv6", "PP-OCRv5", "PP-OCRv4", "PP-OCRv3")
@@ -357,10 +363,13 @@ def _cached_runner(key: tuple[str, str, str, float, float], factory: Callable[[]
 
 
 def clear_ocr_engine_cache() -> None:
-    global _LAST_OCR_ERROR, _LAST_OCR_WARNING
-    _OCR_RUNNER_CACHE.clear()
-    _LAST_OCR_ERROR = None
-    _LAST_OCR_WARNING = None
+    global _ACTIVE_OCR_FINGERPRINT, _ACTIVE_OCR_RUNNER, _LAST_OCR_ERROR, _LAST_OCR_WARNING
+    with _OCR_ENGINE_LOCK:
+        _OCR_RUNNER_CACHE.clear()
+        _ACTIVE_OCR_FINGERPRINT = None
+        _ACTIVE_OCR_RUNNER = None
+        _LAST_OCR_ERROR = None
+        _LAST_OCR_WARNING = None
 
 
 def ocr_cache_size() -> int:
@@ -368,58 +377,150 @@ def ocr_cache_size() -> int:
 
 
 def _load_ocr_engine(settings: Settings | None = None) -> Any | None:
-    global _LAST_OCR_ERROR, _LAST_OCR_WARNING
-    _LAST_OCR_ERROR = None
-    _LAST_OCR_WARNING = None
+    global _ACTIVE_OCR_FINGERPRINT, _ACTIVE_OCR_RUNNER, _LAST_OCR_ERROR, _LAST_OCR_WARNING
     resolved = settings or Settings()
     engine_name = (resolved.ocr_engine or "paddleocr").strip().lower()
-    candidates: list[OcrCandidate] = []
+    fingerprint = (
+        engine_name,
+        _normalize_ocr_model_version(resolved.ocr_primary_model),
+        resolved.ocr_device or "cpu",
+        resolved.ocr_text_score_threshold,
+        resolved.ocr_box_score_threshold,
+        resolved.ocr_short_text_score_threshold,
+        resolved.ocr_min_box_width,
+        resolved.ocr_min_box_height,
+        resolved.ocr_min_box_area,
+    )
+    with _OCR_ENGINE_LOCK:
+        _LAST_OCR_ERROR = None
+        _LAST_OCR_WARNING = None
+        if _ACTIVE_OCR_FINGERPRINT == fingerprint and _ACTIVE_OCR_RUNNER is not None:
+            return _ACTIVE_OCR_RUNNER
+        _OCR_RUNNER_CACHE.clear()
+        try:
+            if engine_name == "rapidocr":
+                runner = _create_rapidocr_runner(resolved)
+            elif engine_name in {"paddleocr", "auto"}:
+                runner = _create_paddleocr_runner(_normalize_ocr_model_version(resolved.ocr_primary_model), resolved)
+            else:
+                raise RuntimeError(f"OCR engine {engine_name!r} is not supported")
+        except Exception as exc:
+            _LAST_OCR_ERROR = str(exc)
+            _ACTIVE_OCR_FINGERPRINT = None
+            _ACTIVE_OCR_RUNNER = None
+            raise
+        _ACTIVE_OCR_FINGERPRINT = fingerprint
+        _ACTIVE_OCR_RUNNER = runner
+        _OCR_RUNNER_CACHE[("active", runner.model, resolved.ocr_device or "cpu", 0, 0)] = runner
+        return runner
 
-    if engine_name in {"paddleocr", "auto"}:
-        paddle_models = [
-            _normalize_ocr_model_version(resolved.ocr_primary_model),
-            _normalize_ocr_model_version(resolved.ocr_fallback_model),
-        ]
-        for model_version in dict.fromkeys(model for model in paddle_models if model):
-            key = (
-                "paddleocr",
-                model_version,
-                resolved.ocr_device or "cpu",
-                resolved.ocr_text_score_threshold,
-                resolved.ocr_box_score_threshold,
-            )
-            candidates.append(
-                OcrCandidate(
-                    "PaddleOCR",
-                    model_version,
-                    key,
-                    lambda model_version=model_version: _create_paddleocr_runner(model_version, resolved),
+
+def _call_ocr_engine(engine: Any, image_path: str) -> Any:
+    with _OCR_ENGINE_LOCK:
+        if isinstance(engine, OcrRunner):
+            return engine.run(image_path)
+        return engine(image_path)
+
+
+def _ocr_engine_metadata(engine: Any) -> tuple[str, str]:
+    if isinstance(engine, OcrRunner):
+        return engine.code, engine.model
+    return getattr(engine, "code", "OCR"), getattr(engine, "model", "")
+
+
+def active_ocr_identity(settings: Settings | None = None) -> dict[str, str | None] | None:
+    with _OCR_ENGINE_LOCK:
+        if _ACTIVE_OCR_RUNNER is None:
+            return None
+        return {"engine": _ACTIVE_OCR_RUNNER.code, "model": _ACTIVE_OCR_RUNNER.model}
+
+
+def reset_ocr_singleton_for_tests() -> None:
+    clear_ocr_engine_cache()
+
+
+def new_ocr_prewarm_state() -> dict[str, Any]:
+    return {"status": "pending", "generation": 0, "started_at": None, "finished_at": None, "result": None}
+
+
+def _public_prewarm_state(state: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in state.items() if not key.startswith("_")}
+
+
+async def prewarm_ocr_engine_async(
+    settings: Settings | None = None,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    generation = int(state.get("generation", 0)) if state is not None else 0
+    if state is not None:
+        state.update(status="running", started_at=datetime.now(timezone.utc).isoformat(), error=None)
+    try:
+        result = await asyncio.to_thread(prewarm_ocr_engine, settings)
+    except Exception as exc:
+        if state is not None:
+            if int(state.get("generation", 0)) == generation:
+                state.update(
+                    status="failed",
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    error=str(exc),
                 )
+        raise
+    if state is not None:
+        # A settings change may have queued a newer generation while this retry ran.
+        if int(state.get("generation", 0)) == generation:
+            state.update(
+                status="succeeded",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                result=result,
+                cache_size=ocr_cache_size(),
+            )
+    return result
+
+
+def schedule_ocr_prewarm(settings: Settings, state: dict[str, Any]) -> None:
+    """Queue one background warm-up; a newer config supersedes an older run."""
+    if settings.testing:
+        state.update(status="skipped_testing", finished_at=datetime.now(timezone.utc).isoformat())
+        return
+    generation = int(state.get("generation", 0)) + 1
+    state.update(generation=generation, status="pending", error=None, result=None, finished_at=None)
+    old_task = state.get("_task")
+    if old_task is not None and not old_task.done():
+        old_task.cancel()
+
+    async def run() -> None:
+        state.update(status="running", started_at=datetime.now(timezone.utc).isoformat())
+        try:
+            result = await asyncio.to_thread(prewarm_ocr_engine, settings)
+        except asyncio.CancelledError:
+            if state.get("generation") == generation:
+                state.update(status="superseded", finished_at=datetime.now(timezone.utc).isoformat())
+            raise
+        except Exception as exc:
+            if state.get("generation") == generation:
+                state.update(
+                    status="failed",
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    error=str(exc),
+                )
+            return
+        if state.get("generation") == generation:
+            state.update(
+                status="succeeded",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                result=result,
+                cache_size=ocr_cache_size(),
             )
 
-    if engine_name in {"paddleocr", "rapidocr", "auto"}:
-        key = (
-            "rapidocr",
-            "PP-OCRv4-onnx",
-            resolved.ocr_device or "cpu",
-            resolved.ocr_text_score_threshold,
-            resolved.ocr_box_score_threshold,
-        )
-        candidates.append(OcrCandidate("RapidOCR", "PP-OCRv4-onnx", key, lambda: _create_rapidocr_runner(resolved)))
-
-    if not candidates:
-        _LAST_OCR_ERROR = f"OCR engine {engine_name!r} is not supported"
-        return None
-
-    return FallbackOcrEngine(candidates)
+    state["_task"] = asyncio.create_task(run())
 
 
 def prewarm_ocr_engine(settings: Settings | None = None) -> dict[str, Any]:
     resolved = settings or Settings()
+    started_at = perf_counter()
     engine = _load_ocr_engine(resolved)
     if engine is None:
         raise RuntimeError(_LAST_OCR_ERROR or "OCR engine unavailable")
-    started_at = perf_counter()
     temp_path: str | None = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp_file:
@@ -428,11 +529,11 @@ def prewarm_ocr_engine(settings: Settings | None = None) -> dict[str, Any]:
         if hasattr(engine, "prewarm_all"):
             warmed = engine.prewarm_all(temp_path)
         else:
-            raw = engine(temp_path)
+            raw = _call_ocr_engine(engine, temp_path)
             warmed = [
                 {
-                    "engine": getattr(engine, "code", "OCR"),
-                    "model": getattr(engine, "model", ""),
+                    "engine": _ocr_engine_metadata(engine)[0],
+                    "model": _ocr_engine_metadata(engine)[1],
                     "ok": True,
                     "elapsed_ms": int(round((perf_counter() - started_at) * 1000)),
                     "result_count": len(raw) if isinstance(raw, list) else 1,
@@ -664,9 +765,12 @@ def detect_text_lines_with_status(
     cached_result = _cached_ocr_result(result_cache_key, runtime)
     if cached_result is not None:
         return cached_result
-    engine = _load_ocr_engine(resolved)
-    if engine is None:
-        return OcrDetectionResult(lines=[], warning=_LAST_OCR_ERROR or "OCR engine unavailable")
+    try:
+        engine = _load_ocr_engine(resolved)
+        if engine is None:
+            return OcrDetectionResult(lines=[], warning=_LAST_OCR_ERROR or "OCR engine unavailable")
+    except Exception as error:
+        return OcrDetectionResult(lines=[], warning=f"OCR failed: {error}")
     rows: list[dict[str, Any]] = []
     variants = _prepare_ocr_variants(path, resolved)
     temp_paths = [variant_path for variant_path, _, is_temp in variants if is_temp]
@@ -679,7 +783,7 @@ def detect_text_lines_with_status(
     try:
         for variant_path, scale, _ in variants:
             try:
-                rows.extend(_parse_ocr_rows(engine(variant_path), scale, resolved, language_hint, image_size))
+                rows.extend(_parse_ocr_rows(_call_ocr_engine(engine, variant_path), scale, resolved, language_hint, image_size))
             except Exception as error:
                 return OcrDetectionResult(lines=[], warning=f"OCR failed: {error}")
     finally:

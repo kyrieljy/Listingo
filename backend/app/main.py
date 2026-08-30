@@ -38,6 +38,8 @@ from backend.app.services.runtime_cache import (
     invalidate_workflow_cache,
 )
 from backend.app.services.workspace_recovery import recover_interrupted_workspace_jobs, repair_monitoring_fixture_history
+from backend.app.services.image_text_edit import new_ocr_prewarm_state, schedule_ocr_prewarm
+from backend.app.services.sensitive_words import ensure_sensitive_word_snapshot
 
 
 logger = logging.getLogger(__name__)
@@ -129,6 +131,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 seed_database(session)
                 repair_monitoring_fixture_history(session)
                 recover_interrupted_workspace_jobs(session)
+            try:
+                with session_factory() as session:
+                    ensure_sensitive_word_snapshot(session, runtime_state)
+            except Exception:
+                logger.warning("敏感词快照启动同步失败；检测将按 PostgreSQL fallback 执行", exc_info=True)
             invalidate_provider_cache(runtime_state)
             invalidate_prompt_cache(runtime_state)
             invalidate_workflow_cache(runtime_state)
@@ -142,6 +149,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.generation_queue_scheduler = generation_queue_scheduler
             if not resolved.testing:
                 await generation_queue_scheduler.start()
+            schedule_ocr_prewarm(resolved, application.state.ocr_prewarm)
             yield
         finally:
             if not resolved.testing and "generation_queue_scheduler" in locals():
@@ -160,6 +168,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.cipher = ApiKeyCipher(resolved.secret_key_path)
     application.state.rate_limiter = rate_limiter
     application.state.runtime_state = runtime_state
+    application.state.ocr_prewarm = new_ocr_prewarm_state()
     configure_default_runtime(runtime_state)
     @application.exception_handler(StorageUnavailableError)
     async def storage_unavailable_handler(_: Request, __: StorageUnavailableError) -> JSONResponse:

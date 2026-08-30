@@ -259,6 +259,8 @@ export type AuthUserDto = {
   first_password_pending: boolean
   last_login_at: string | null
   created_at: string
+  feishu_webhook: string
+  feishu_webhook_configured: boolean
 }
 
 export type AuthMeResponse = { user: AuthUserDto | null; unread_count: number }
@@ -558,8 +560,12 @@ export async function getAuthMeApi(): Promise<AuthMeResponse> {
   return (await api.get('/auth/me')).data
 }
 
-export async function updateProfileApi(payload: { display_name?: string; email?: string; gender?: string; bio?: string }): Promise<AuthMeResponse> {
+export async function updateProfileApi(payload: { display_name?: string; email?: string; gender?: string; bio?: string; feishu_webhook?: string }): Promise<AuthMeResponse> {
   return (await api.patch('/account/profile', payload)).data
+}
+
+export async function testFeishuWebhookApi(webhook: string): Promise<{ ok: boolean }> {
+  return (await api.post('/account/feishu-webhook/test', { webhook })).data
 }
 
 export async function changePasswordApi(payload: { current_password: string; next_password: string }): Promise<AuthMeResponse> {

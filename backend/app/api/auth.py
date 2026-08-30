@@ -24,6 +24,7 @@ from backend.app.schemas import (
     ChangePhoneConfirmCreate,
     ChangePhoneStartCreate,
     FirstPasswordCreate,
+    FeishuWebhookTestCreate,
     NotificationOut,
     PasswordChangeCreate,
     PasswordLoginCreate,
@@ -51,9 +52,11 @@ from backend.app.services.auth import (
     verify_password,
 )
 from backend.app.services.notifications import (
+    FeishuWebhookError,
     create_notification,
     list_user_notifications,
     mark_notification_read,
+    send_feishu_webhook_test,
     serialize_notification,
     unread_count,
 )
@@ -376,8 +379,37 @@ def update_profile(payload: ProfileUpdate, current_user: User = Depends(get_curr
         current_user.gender = updates["gender"].strip()
     if "bio" in updates and updates["bio"] is not None:
         current_user.bio = updates["bio"].strip()
+    if "feishu_webhook" in updates and updates["feishu_webhook"] is not None:
+        # No format validation by product decision; stored as-is. Empty string
+        # means "not configured", so the worker will skip the Feishu POST.
+        current_user.feishu_webhook = updates["feishu_webhook"]
     session.commit()
     return {"user": public_user(current_user), "unread_count": unread_count(session, current_user)}
+
+
+@router.post("/account/feishu-webhook/test")
+async def test_feishu_webhook(
+    payload: FeishuWebhookTestCreate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Push a fixed probe message so the user can verify the Feishu channel.
+
+    Prefers the URL carried in the body (i.e. what is currently typed in the
+    profile form, so it can be tested before saving) and falls back to the
+    saved value when the body is empty.
+    """
+    webhook = (payload.webhook or "").strip() or (current_user.feishu_webhook or "").strip()
+    if not webhook:
+        raise HTTPException(status_code=400, detail="请先填写飞书 Webhook 地址")
+    try:
+        await send_feishu_webhook_test(
+            webhook,
+            timeout=request.app.state.settings.sms_timeout_seconds,
+        )
+    except FeishuWebhookError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True}
 
 
 @router.post("/account/change-phone/start", response_model=SmsSendOut)

@@ -61,6 +61,8 @@ def public_user(user: User) -> dict[str, Any]:
         "first_password_pending": user.first_password_pending,
         "last_login_at": user.last_login_at,
         "created_at": user.created_at,
+        "feishu_webhook": user.feishu_webhook,
+        "feishu_webhook_configured": bool(user.feishu_webhook and user.feishu_webhook.strip()),
     }
 
 

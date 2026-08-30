@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 from uuid import uuid5, NAMESPACE_URL
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.config import Settings
 from backend.app.models import Notification, User, utcnow
+from backend.app.security import ApiKeyCipher
+
+
+logger = logging.getLogger(__name__)
 
 
 def create_notification(
@@ -31,6 +38,23 @@ def create_notification(
     return notification
 
 
+def build_task_result_title(*, category: str, business_type: str | None = None, status: str) -> str:
+    """Single source of truth for task-completion notice text across all channels.
+
+    Used by the in-app notification, the SMS notify template and the Feishu
+    webhook so the three channels can never drift apart.
+    """
+    if category == "batch":
+        domain_label = "A+详情批量" if business_type == "aplus" else "商品套图批量"
+    else:
+        domain_label = "生图" if category == "generation" else "视频"
+    if status == "succeeded":
+        return f"{domain_label}任务已完成"
+    if status == "partial_failed":
+        return f"{domain_label}任务部分完成"
+    return f"{domain_label}任务生成失败"
+
+
 def create_job_result_notification_once(
     session: Session,
     user_id: str,
@@ -46,15 +70,13 @@ def create_job_result_notification_once(
     if existing:
         return existing
 
+    title = build_task_result_title(category=category, status=status)
     domain_label = "生图" if category == "generation" else "视频"
     if status == "succeeded":
-        title = f"{domain_label}任务已完成"
         body = f"你的{domain_label}任务已完成，可前往工作台查看结果。"
     elif status == "partial_failed":
-        title = f"{domain_label}任务部分完成"
         body = f"你的{domain_label}任务部分生成失败，可在工作台重试失败项。"
     else:
-        title = f"{domain_label}任务生成失败"
         body = f"你的{domain_label}任务生成失败，可在工作台查看失败原因。"
 
     notification = Notification(
@@ -91,14 +113,12 @@ def create_batch_result_notification_once(
         return existing
 
     domain_label = "A+详情批量" if business_type == "aplus" else "商品套图批量"
+    title = build_task_result_title(category="batch", business_type=business_type, status=status)
     if status == "succeeded":
-        title = f"{domain_label}任务已完成"
         body = f"你的{domain_label}任务已全部完成，可前往批量记录查看结果。"
     elif status == "partial_failed":
-        title = f"{domain_label}任务部分完成"
         body = f"你的{domain_label}任务有 {failed_count} 个商品失败，可在批量记录查看详情。"
     else:
-        title = f"{domain_label}任务生成失败"
         body = f"你的{domain_label}任务生成失败，可在批量记录查看失败原因。"
 
     notification = Notification(
@@ -163,3 +183,81 @@ def unread_count(session: Session, user: User) -> int:
             select(Notification.id).where(Notification.user_id == user.id, Notification.unread.is_(True))
         ).all()
     )
+
+
+FEISHU_TEST_TEXT = "设计就上Listingo"
+
+
+class FeishuWebhookError(RuntimeError):
+    """Feishu webhook POST failed; `args[0]` is a user-facing Chinese reason."""
+
+
+async def _post_feishu_webhook(url: str, text: str, *, timeout: float) -> None:
+    """POST a plain-text message to a user-configured Feishu custom-bot webhook.
+
+    Raises FeishuWebhookError on transport failures, HTTP errors and Feishu's own
+    `code != 0` payloads — the latter arrive with HTTP 200, so raise_for_status()
+    alone would silently treat them as success. Callers that must never fail (the
+    worker notify path) log and swallow the error.
+    """
+    payload = {"msg_type": "text", "content": {"text": text}}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+    except httpx.TimeoutException:
+        raise FeishuWebhookError("推送超时，请检查 Webhook 地址是否正确") from None
+    except httpx.HTTPStatusError as exc:
+        raise FeishuWebhookError(f"推送失败（HTTP {exc.response.status_code}）") from exc
+    except httpx.RequestError as exc:
+        raise FeishuWebhookError(f"无法连接 Webhook 地址：{exc}") from exc
+
+    json_method = getattr(response, "json", None)
+    if json_method is None:
+        return
+    try:
+        body = json_method()
+    except ValueError:
+        return
+    if isinstance(body, dict) and body.get("code") not in (None, 0):
+        raise FeishuWebhookError(f"飞书返回错误：{body.get('msg') or body.get('code')}")
+
+
+async def send_feishu_webhook_test(url: str, *, timeout: float) -> None:
+    """Push the fixed probe text to a Feishu webhook (user-facing test action)."""
+    await _post_feishu_webhook(url, FEISHU_TEST_TEXT, timeout=timeout)
+
+
+async def notify_task_completion_external(
+    session: Session,
+    settings: Settings,
+    cipher: ApiKeyCipher,
+    *,
+    user: User,
+    category: str,
+    business_type: str | None = None,
+    status: str,
+    dry_run: bool = False,
+) -> None:
+    """Best-effort external notification (Feishu webhook + SMS) on task terminal.
+
+    Failures are logged only and never raised, so a broken webhook or SMS channel
+    can never affect the task terminal state or the worker loop. Called exactly once
+    per terminal task from the real-time tick path; never from reconcile.
+    """
+    text = build_task_result_title(category=category, business_type=business_type, status=status)
+
+    webhook = (user.feishu_webhook or "").strip()
+    if webhook:
+        try:
+            await _post_feishu_webhook(webhook, text, timeout=settings.sms_timeout_seconds)
+        except Exception:
+            logger.warning("Feishu webhook notify failed for user %s", user.id, exc_info=True)
+
+    try:
+        # Lazy import avoids a circular dependency with sms.py.
+        from backend.app.services.sms import send_sms_notification
+
+        await send_sms_notification(session, settings, cipher, phone=user.phone, text=text)
+    except Exception:
+        logger.warning("SMS completion notify failed for user %s", user.id, exc_info=True)

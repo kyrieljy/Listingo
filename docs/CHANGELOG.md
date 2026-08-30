@@ -26,6 +26,24 @@
 
 ## [Unreleased]
 
+### 016-task-completion-multi-channel-notify — 2026-08-31
+- 任务终态通知扩展为「站内信 + 短信 + 飞书 Webhook」三渠道同源。`notifications.py` 新增 `build_task_result_title`（单任务/批量 × 成功 / 部分完成 / 失败 文案单一事实源）与 `notify_task_completion_external`（飞书 POST + 阿里云通知短信，try/except 仅记日志，失败不抛出、不重试、无兜底）；`sms.py` 新增 `send_sms_notification`（复用 `SmsConfig.notify_template_code` + 参数 `{"content": text}`，**不占验证码每日限额**），`send_aliyun_sms` 模板参数泛化（默认仍 `{"code": code}`）。触发点仅实时 `tick`（`generation_queues.py` / `generation_queue_service.py` 以 `asyncio.create_task` fire-and-forget），`reconcile_notifications` 仍只写站内信，避免重启对历史终态任务重推外部渠道。`User.feishu_webhook`（明文 String 512）与 `SmsConfig.notify_template_code` 两列 + 迁移 `d1e2f3a4b5c6`；`PATCH /account/profile` 与 `GET /auth/me` 支持该字段，个人中心新增飞书 Webhook 输入，运营后台短信配置面板暴露通知模板。新增 `test_task_notify_016.py`（15 passed）。关联模块：通知、短信、队列 worker、账号配置。
+
+### 013-batch-generation-queue — 2026-08-31
+- 批量托管任务并入统一生图缓冲队列：新增 `generation_queue_service.py::UnifiedGenerationQueueScheduler`，普通生图与批量套图 / A+ item 共用唯一生图 worker（视频仍独立 worker）。`POST /batch-jobs` 与 retry-failed 只落库、推入 `batch_item:{item_id}` token 并立即返回，移除生产 `BatchScheduler` 旁路，执行逻辑抽取为 `BatchItemExecutor`；父任务聚合终态并只写一条幂等站内信。取消语义收紧为仅全部 queued 可取消（逐个删除 Redis token、释放额度），已 running 返回 409；Redis 部分入队失败 fail-closed 回滚已推 token 并返回 503。前端批量提交提示「任务已在后台运行」，五种语义状态映射与稳定占位，取消入口仅 queued 可见。实现偏差：`generation_queues.py` 被外部进程锁定未改，扩展隔离于新子类。测试 26 passed / 后端全量 248 passed / 前端 106 passed。关联模块：批量托管、生图 / 生视频缓冲队列、通知。
+
+### 012-unified-phone-login-registration — 2026-08-31
+- 短信登录与首次注册合并：`/api/v1/auth/sms/login` 在 `purpose=login` 验证通过后，未注册手机号自动创建 active/free 用户、注册通知、会话与 `sms` 登录事件；并发首次登录经手机号预检冲突或唯一键冲突均复用胜出用户，不再直接 409。保留 `mode=register` 与 `/auth/register` 旧客户端兼容。前端移除 `AuthMode` / `initialMode` / `switchMode`、密码注册两步表单与注册验证码计时器，短信验证码固定 `purpose=login`，顶层「登录 / 注册」入口打开同一弹窗。验证码一次性消费、错误 5 次锁定、发送冷却与滚动日限额行为不变。后端 `test_sms_phone.py` 13 passed、前端 106 passed。关联模块：认证、短信、账号。
+
+### 011-video-retry-error-notices-watermark-confirm — 2026-08-31
+- 视频「重试失败」首次点击即提交：乐观地把失败项置为运行、2 秒冷却内禁用重试并隐藏取消入口、请求失败回滚失败快照，冷却结束后仅在任务仍 active 时展示「取消任务」，规避误触取消。套图 / A+ / 视频生成失败统一收敛到 AntD 顶部 `message`（不再 `Modal.error`），开发 / 测试构建保留明细，生产固定为 `生成图片失败，请稍后重试`（套图 / A+）与 `生成视频失败，请稍后重试`（视频），并从结果区、失败卡片与脚本文本移除原始异常渲染（后端 payload 与日志仍保留诊断）。订阅用户关闭「包含 AI 水印」需先勾选「我已知悉」确认弹窗，红色「确定」按钮未勾选前禁用、取消 / 遮罩关闭不改变状态，未订阅用户仍锁定。新增 `generation-errors.test.ts`、`WatermarkDownloadMenu.test.ts`、`VideoPhasePanel.test.ts`；前端 105 passed，生产构建已核实两条兜底文案。关联模块：工作台、水印。
+
+### 009-redis-scenario-expansion — 2026-08-31
+- 落地 Redis 六类新场景，约束演进为「PostgreSQL 事实 + Redis 派生态」：新增 `core/runtime.py::RuntimeStateService`（JSON 缓存 / 域版本号 / token 锁 / 计数）与 `services/runtime_cache.py`、`services/metrics.py`，`main.py` 装配 `app.state.runtime_state`。覆盖 Provider 快照与路由解析缓存、Prompt/Workflow 激活版本与套餐规则缓存、会话元数据缓存（`session:{sha256(token)}`，值不含明文）、批量详情短 TTL 缓存、批量认领 / 额度预留 / 订单创建 / 模拟支付分布式锁、当日实时计数（`/admin/ops-monitoring` 返回 `realtime_metrics`，前端 KPI 条新增「今日实时事件」）、OCR 结果指纹缓存。降级分级：缓存 / 计数 fail-open，锁 fail-closed 503。`keys.py` 扩展 cache/session/batch/lock/metric 构造器，`config.py` 新增 7 项 TTL 配置；`docs/REDIS_KEYS.md` 重写边界、键清单与失效策略。`test_redis_runtime_features.py` 8 passed。关联模块：运行时派生状态、Provider 目录、账号、批量托管、运营分析。
+
+### 003-environment-config-files — 2026-08-31
+- 新增逐项注释的 `.env.local` 与 `.env.production`（含义 / 使用位置 / 变量配置 三行注释）。`Settings` 默认加载 `.env.local`，经 `LISTINGO_ENV_FILE` 切换生产文件，真实环境变量优先于 dotenv。CORS 白名单、会话 / 刷新 TTL、Cookie Secure、调试短信码（移除内置 `246810`，空值时随机生成）、短信 HTTP 超时、后端端口改为读取配置；Compose 以 `${LISTINGO_ENV_FILE:-.env.local}` 注入，Uvicorn、Vite 开发代理与前端 Nginx 模板统一读 `LISTINGO_PORT`。新增 `test_config.py`（配置解析、CORS、会话 Cookie、短信配置引用），后端全量 169 passed，前端 typecheck 与 build 通过。遗留：`docker compose config` 运行时校验因本机无 Docker CLI 未执行。关联模块：配置、应用装配、认证会话、短信、部署编排。
+
 ### 014-sensitive-information-detection — 2026-08-30
 - 运营后台新增「敏感词」栏目：全局开关、词 CRUD、人工别名、实时变体预览、快照状态与重建；套图/A+/视频/批量创建在 quota 预留与入队前完成卖点文本 + 上传图片 OCR 敏感词检测，命中返回 422「包含敏感信息」且不留 quota/不入队。新增 `SensitiveWordConfig`/`SensitiveWord`/`SensitiveWordSnapshot` 三表与无 TTL 常驻 Redis 快照（`sensitive:words:meta`/`snapshot`）；Aho-Corasick 一次扫描多文本视图；套图/A+ 商品视觉事实新增 `is_pornography`/`is_violence`/`is_politics` 布尔字段阻断（默认 0 兼容旧 Prompt）。OCR 改为进程级单例并启动自动预热，配置变更清理旧实例并重预热。`docs/REDIS_KEYS.md` 新增常驻快照键段；迁移 head：`c0a1b2c3d4e5`。
 

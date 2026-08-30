@@ -727,6 +727,8 @@ class AuthUserOut(BaseModel):
     first_password_pending: bool
     last_login_at: datetime | None
     created_at: datetime
+    feishu_webhook: str
+    feishu_webhook_configured: bool
 
 
 class AuthMeOut(BaseModel):
@@ -752,6 +754,13 @@ class ProfileUpdate(BaseModel):
     email: str | None = Field(default=None, max_length=160)
     gender: str | None = Field(default=None, max_length=20)
     bio: str | None = Field(default=None, max_length=140)
+    feishu_webhook: str | None = Field(default=None, max_length=512)
+
+
+class FeishuWebhookTestCreate(BaseModel):
+    """Webhook URL to probe. Empty means "fall back to the saved value"."""
+
+    webhook: str = Field(default="", max_length=512)
 
 
 class PasswordChangeCreate(BaseModel):
@@ -889,6 +898,7 @@ class SmsSettingsUpdate(BaseModel):
     code_ttl_seconds: int | None = Field(default=None, ge=60, le=1800)
     cooldown_seconds: int | None = Field(default=None, ge=10, le=600)
     daily_limit_per_phone: int | None = Field(default=None, ge=1, le=100)
+    notify_template_code: str | None = Field(default=None, max_length=80)
 
 
 class AdminNotificationBroadcastCreate(BaseModel):

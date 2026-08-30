@@ -1254,6 +1254,7 @@ def _sms_settings_dict(config: SmsConfig) -> dict[str, Any]:
         "code_ttl_seconds": config.code_ttl_seconds,
         "cooldown_seconds": config.cooldown_seconds,
         "daily_limit_per_phone": config.daily_limit_per_phone,
+        "notify_template_code": config.notify_template_code,
         "updated_at": config.updated_at,
     }
 

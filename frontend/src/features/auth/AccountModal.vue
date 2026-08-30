@@ -23,6 +23,8 @@ import {
   listAplusGenerationJobs,
   listJobs,
   listVideoJobs,
+  testFeishuWebhookApi,
+  userFacingApiErrorMessage,
   type AplusJob,
   type Job,
   type LoginEventDto,
@@ -64,6 +66,7 @@ const authStore = useAuthStore()
 const activeTab = ref<AccountTab>(props.initialTab)
 const avatarInput = ref<HTMLInputElement | null>(null)
 const saving = ref(false)
+const testingFeishu = ref(false)
 const uploadingAvatar = ref(false)
 const loadingTasks = ref(false)
 const tasksLoaded = ref(false)
@@ -82,6 +85,7 @@ const profileForm = reactive({
   email: '',
   gender: '男',
   bio: '',
+  feishuWebhook: '',
 })
 
 const privacy = reactive({
@@ -222,6 +226,7 @@ function syncProfile(): void {
   profileForm.email = authStore.user?.email || ''
   profileForm.gender = normalizeGender(authStore.user?.gender || '')
   profileForm.bio = authStore.user?.bio || ''
+  profileForm.feishuWebhook = authStore.user?.feishuWebhook || ''
 }
 
 function normalizeGender(value: string): string {
@@ -260,9 +265,27 @@ async function saveProfile(): Promise<void> {
       email: profileForm.email.trim(),
       gender: profileForm.gender,
       bio: profileForm.bio.trim(),
+      feishuWebhook: profileForm.feishuWebhook.trim(),
     })
   } finally {
     saving.value = false
+  }
+}
+
+async function testFeishuWebhook(): Promise<void> {
+  const webhook = profileForm.feishuWebhook.trim()
+  if (!webhook) {
+    message.warning('请先填写飞书 Webhook 地址')
+    return
+  }
+  testingFeishu.value = true
+  try {
+    await testFeishuWebhookApi(webhook)
+    message.success('测试消息已发送，请到飞书群查看')
+  } catch (error) {
+    message.error(userFacingApiErrorMessage(error))
+  } finally {
+    testingFeishu.value = false
   }
 }
 
@@ -623,6 +646,17 @@ function deleteAccount(): void {
             <label>
               <span>个性签名</span>
               <input v-model="profileForm.bio" type="text" placeholder="留下一句话介绍自己" />
+            </label>
+            <label>
+              <span>飞书 Webhook</span>
+              <div class="account-webhook-row">
+                <input v-model="profileForm.feishuWebhook" type="text" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxxx" />
+                <button class="account-webhook-test" type="button" :disabled="testingFeishu" @click="testFeishuWebhook">
+                  {{ testingFeishu ? '测试中' : '测试' }}
+                </button>
+              </div>
+              <small v-if="authStore.user?.feishuWebhookConfigured">已配置，任务完成时将推送飞书消息</small>
+              <small v-else>填写个人飞书机器人 Webhook，任务完成后推送消息；留空则不推送</small>
             </label>
             <label>
               <span>手机号</span>

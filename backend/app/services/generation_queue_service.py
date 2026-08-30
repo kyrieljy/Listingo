@@ -256,6 +256,7 @@ class UnifiedGenerationQueueScheduler(GenerationQueueScheduler):
             self._mark_claim_failed("generation", task_id, str(exc))
 
         self._notify_terminal("generation", task_id)
+        self._schedule_external_notification(category="generation", job_id=task_id)
         return True
 
     def _claim_batch_item(self, item_id: str) -> bool:
@@ -302,5 +303,8 @@ class UnifiedGenerationQueueScheduler(GenerationQueueScheduler):
                     total_count=batch.total_count,
                 )
                 session.commit()
+                self._schedule_external_notification(
+                    category="batch", job_id=batch.id, business_type=batch.business_type
+                )
         except Exception:
             logger.warning("Queued batch terminal notification failed: %s", item_id, exc_info=True)

@@ -43,6 +43,7 @@ class User(Base, TimestampMixin):
     bio: Mapped[str] = mapped_column(Text, default="")
     current_plan_code: Mapped[str] = mapped_column(String(40), default="free", index=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    feishu_webhook: Mapped[str] = mapped_column(String(512), default="")
 
 
 class UserSession(Base, TimestampMixin):
@@ -111,6 +112,7 @@ class SmsConfig(Base, TimestampMixin):
     code_ttl_seconds: Mapped[int] = mapped_column(Integer, default=300)
     cooldown_seconds: Mapped[int] = mapped_column(Integer, default=60)
     daily_limit_per_phone: Mapped[int] = mapped_column(Integer, default=10)
+    notify_template_code: Mapped[str] = mapped_column(String(80), default="")
 
 
 class SensitiveWordConfig(Base, TimestampMixin):

@@ -196,12 +196,13 @@ export const useAuthStore = defineStore('auth', () => {
     message.success('登录密码已设置')
   }
 
-  async function updateProfile(payload: { displayName?: string; email?: string; gender?: string; bio?: string }): Promise<void> {
+  async function updateProfile(payload: { displayName?: string; email?: string; gender?: string; bio?: string; feishuWebhook?: string }): Promise<void> {
     applyAuthResponse(await updateProfileApi({
       display_name: payload.displayName,
       email: payload.email,
       gender: payload.gender,
       bio: payload.bio,
+      feishu_webhook: payload.feishuWebhook,
     }))
     message.success('个人资料已保存')
   }

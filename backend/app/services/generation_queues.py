@@ -16,13 +16,18 @@ from backend.app.core.storage.base import StorageUnavailableError
 from backend.app.core.storage.keys import lock_key, queue_key
 from backend.app.models import (
     BatchItem,
+    BatchJob,
     GenerationJob,
+    User,
     VideoJob,
     utcnow,
 )
 from backend.app.security import ApiKeyCipher
 from backend.app.services.jobs import retry_failed_live_items, run_generation_job
-from backend.app.services.notifications import create_job_result_notification_once
+from backend.app.services.notifications import (
+    create_job_result_notification_once,
+    notify_task_completion_external,
+)
 from backend.app.services.video_jobs import run_video_job
 
 
@@ -53,6 +58,7 @@ class GenerationQueueScheduler:
             else settings.generation_queue_poll_interval_seconds
         )
         self._worker_tasks: dict[QueueKind, asyncio.Task[None]] = {}
+        self._notify_tasks: set[asyncio.Task[None]] = set()
         self._stopping = asyncio.Event()
 
     @property
@@ -214,6 +220,7 @@ class GenerationQueueScheduler:
             self._mark_claim_failed(kind, job_id, str(exc))
 
         self._notify_terminal(kind, job_id)
+        self._schedule_external_notification(category=kind, job_id=job_id)
         return True
 
     def _mark_claim_failed(self, kind: QueueKind, job_id: str, error: str) -> None:
@@ -261,6 +268,70 @@ class GenerationQueueScheduler:
                 session.commit()
         except Exception:
             logger.warning("Queued job terminal notification failed: %s %s", kind, job_id, exc_info=True)
+
+    def _schedule_external_notification(
+        self, *, category: str, job_id: str, business_type: str | None = None
+    ) -> None:
+        """Fire-and-forget external notify (Feishu + SMS) for one terminal task.
+
+        Runs as a detached asyncio task so it never blocks the worker tick. We keep
+        a reference set to avoid garbage-collection "pending task destroyed" warnings.
+        """
+        try:
+            task = asyncio.create_task(
+                self._notify_external_async(category=category, job_id=job_id, business_type=business_type),
+                name=f"notify-external-{category}-{job_id}",
+            )
+            self._notify_tasks.add(task)
+            task.add_done_callback(self._notify_tasks.discard)
+        except Exception:
+            logger.warning("Failed to schedule external notify for %s %s", category, job_id, exc_info=True)
+
+    async def _notify_external_async(
+        self, *, category: str, job_id: str, business_type: str | None = None
+    ) -> None:
+        """Load the terminal task + owner and fan out to Feishu webhook + SMS notify."""
+        try:
+            if category == "batch":
+                with self._session_factory() as session:
+                    batch = session.get(BatchJob, job_id)
+                    if not batch or not batch.user_id or batch.status not in NOTIFIED_STATUSES:
+                        return
+                    user = session.get(User, batch.user_id)
+                    if not user:
+                        return
+                    await notify_task_completion_external(
+                        session,
+                        self._settings,
+                        self._cipher,
+                        user=user,
+                        category="batch",
+                        business_type=batch.business_type,
+                        status=batch.status,
+                        dry_run=False,
+                    )
+                return
+
+            model = GenerationJob if category == "generation" else VideoJob
+            with self._session_factory() as session:
+                job = session.get(model, job_id)
+                if not job or not job.user_id or job.status not in NOTIFIED_STATUSES:
+                    return
+                user = session.get(User, job.user_id)
+                if not user:
+                    return
+                await notify_task_completion_external(
+                    session,
+                    self._settings,
+                    self._cipher,
+                    user=user,
+                    category=category,
+                    business_type=None,
+                    status=job.status,
+                    dry_run=getattr(job, "dry_run", False),
+                )
+        except Exception:
+            logger.warning("External notify failed for %s %s", category, job_id, exc_info=True)
 
     async def _run_loop(self, kind: QueueKind) -> None:
         lease_key = lock_key("generation-queue", kind)

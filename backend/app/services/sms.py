@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 from urllib.parse import quote
 from uuid import uuid4
@@ -12,6 +13,9 @@ import httpx
 from fastapi import HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+
+logger = logging.getLogger(__name__)
 
 from backend.app.models import SmsConfig, utcnow
 from backend.app.security import ApiKeyCipher
@@ -230,7 +234,11 @@ async def send_aliyun_sms(
     template_code: str,
     code: str,
     timeout_seconds: float,
+    template_param: dict[str, str] | None = None,
 ) -> str:
+    # The verification-code path passes template_param=None and keeps the legacy
+    # {"code": code} shape; completion notifications pass {"content": text}.
+    effective_template_param = template_param if template_param is not None else {"code": code}
     params: dict[str, str] = {
         "AccessKeyId": access_key_id,
         "Action": "SendSms",
@@ -242,7 +250,7 @@ async def send_aliyun_sms(
         "SignatureVersion": "1.0",
         "SignName": sign_name,
         "TemplateCode": template_code,
-        "TemplateParam": json.dumps({"code": code}, ensure_ascii=False, separators=(",", ":")),
+        "TemplateParam": json.dumps(effective_template_param, ensure_ascii=False, separators=(",", ":")),
         "Timestamp": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "Version": "2017-05-25",
     }
@@ -257,6 +265,68 @@ async def send_aliyun_sms(
     if body.get("Code") != "OK":
         raise RuntimeError(body.get("Message") or body.get("Code") or "Aliyun SMS send failed")
     return str(body.get("BizId") or "aliyun-ok")
+
+
+async def send_sms_notification(
+    session: Session,
+    settings: Settings,
+    cipher: ApiKeyCipher,
+    *,
+    phone: str,
+    text: str,
+) -> None:
+    """Send a task-completion notification SMS via the backend notify template.
+
+    Does NOT consume the verification-code rate-limit quota and does not store any
+    code. Returns early (no real SMS) when SMS is disabled, in debug mode, or when
+    no notify template is configured. Any failure is logged and re-raised so the
+    caller's best-effort wrapper can swallow it without affecting the task.
+    """
+    config = load_sms_config(session)
+    if not config.enabled and not config.debug_mode:
+        return
+    if config.debug_mode:
+        # In debug mode the verification flow returns codes locally; skip real SMS.
+        return
+    if not config.notify_template_code:
+        logger.warning("SMS completion notify skipped: notify_template_code not configured")
+        return
+
+    normalized = normalize_phone(phone)
+    if not normalized:
+        logger.warning("SMS completion notify skipped: empty phone")
+        return
+    country_code, local_phone = split_phone(normalized)
+    if country_code not in PHONE_COUNTRY_RULES:
+        logger.warning("SMS completion notify skipped: unsupported phone %s", mask_phone(phone))
+        return
+    target_phone = local_phone if country_code == "86" else f"{country_code}{local_phone}"
+
+    secret = cipher.decrypt(config.encrypted_access_key_secret) if config.encrypted_access_key_secret else ""
+    missing = []
+    if not config.access_key_id:
+        missing.append("AccessKey ID")
+    if not secret:
+        missing.append("AccessKey Secret")
+    if not config.sign_name:
+        missing.append("SignName 短信签名")
+    if not config.notify_template_code:
+        missing.append("NotifyTemplateCode 通知模板")
+    if missing:
+        logger.warning("SMS completion notify skipped: missing %s", ", ".join(missing))
+        return
+
+    await send_aliyun_sms(
+        access_key_id=config.access_key_id,
+        access_key_secret=secret,
+        region_id=config.region_id,
+        phone=target_phone,
+        sign_name=config.sign_name,
+        template_code=config.notify_template_code,
+        code=text,
+        timeout_seconds=settings.sms_timeout_seconds,
+        template_param={"content": text},
+    )
 
 
 async def send_aliyun_pnvs_sms(

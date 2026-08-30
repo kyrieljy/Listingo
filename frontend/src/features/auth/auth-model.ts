@@ -27,6 +27,8 @@ export type AuthUser = {
   firstPasswordPending: boolean
   lastLoginAt: string
   createdAt: string
+  feishuWebhook: string
+  feishuWebhookConfigured: boolean
 }
 
 export type MembershipPlan = {
@@ -142,6 +144,8 @@ export function toAuthUser(dto: AuthUserDto): AuthUser {
     firstPasswordPending: dto.first_password_pending,
     lastLoginAt: dto.last_login_at || dto.created_at,
     createdAt: dto.created_at,
+    feishuWebhook: dto.feishu_webhook,
+    feishuWebhookConfigured: dto.feishu_webhook_configured,
   }
 }
 

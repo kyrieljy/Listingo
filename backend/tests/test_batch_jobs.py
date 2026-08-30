@@ -28,8 +28,10 @@ def upload_asset(client) -> str:
     return upload_asset_payload(client)["id"]
 
 
-def tick_batch_scheduler(client) -> None:
-    asyncio.run(client.app.state.batch_scheduler.tick())
+def drain_generation_queue(client) -> None:
+    scheduler = client.app.state.generation_queue_scheduler
+    while scheduler.queue_length("generation"):
+        asyncio.run(scheduler.tick("generation"))
 
 
 def test_workspace_config_exposes_batch_limits_without_secrets(client) -> None:
@@ -67,7 +69,7 @@ def test_batch_suite_dryrun_runs_items_and_downloads_grouped_zip(client) -> None
     assert response.status_code == 201, response.text
     batch_id = response.json()["id"]
 
-    tick_batch_scheduler(client)
+    drain_generation_queue(client)
     detail = client.get(f"/api/v1/batch-jobs/{batch_id}").json()
 
     assert detail["status"] == "succeeded"
@@ -137,7 +139,7 @@ def test_batch_aplus_dryrun_runs_plan_and_generation_chain(client) -> None:
     assert response.status_code == 201, response.text
     batch_id = response.json()["id"]
 
-    tick_batch_scheduler(client)
+    drain_generation_queue(client)
     detail = client.get(f"/api/v1/batch-jobs/{batch_id}").json()
 
     item = detail["items"][0]

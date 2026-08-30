@@ -30,8 +30,7 @@ from backend.app.security import ApiKeyCipher
 from backend.app.api.auth import router as auth_router
 from backend.app.api.public import router as public_router
 from backend.app.api.admin import router as admin_router
-from backend.app.services.batch_scheduler import BatchScheduler
-from backend.app.services.generation_queues import GenerationQueueScheduler
+from backend.app.services.generation_queue_service import UnifiedGenerationQueueScheduler
 from backend.app.services.provider_routing import invalidate_provider_cache
 from backend.app.services.runtime_cache import (
     invalidate_prompt_cache,
@@ -134,7 +133,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             invalidate_prompt_cache(runtime_state)
             invalidate_workflow_cache(runtime_state)
             invalidate_subscription_cache(runtime_state)
-            generation_queue_scheduler = GenerationQueueScheduler(
+            generation_queue_scheduler = UnifiedGenerationQueueScheduler(
                 session_factory,
                 resolved,
                 application.state.cipher,
@@ -143,19 +142,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.generation_queue_scheduler = generation_queue_scheduler
             if not resolved.testing:
                 await generation_queue_scheduler.start()
-            scheduler = BatchScheduler(
-                session_factory,
-                resolved,
-                application.state.cipher,
-                runtime_state=application.state.runtime_state,
-            )
-            application.state.batch_scheduler = scheduler
-            if not resolved.testing:
-                await scheduler.start()
             yield
         finally:
-            if not resolved.testing and "scheduler" in locals():
-                await scheduler.stop()
             if not resolved.testing and "generation_queue_scheduler" in locals():
                 await generation_queue_scheduler.stop()
             reset_default_runtime(runtime_state)

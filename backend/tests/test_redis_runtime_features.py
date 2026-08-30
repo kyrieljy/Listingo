@@ -16,6 +16,7 @@ from backend.app.core.storage.keys import (
     cache_version_key,
     lock_key,
     metric_daily_key,
+    queue_key,
     session_cache_key,
 )
 from backend.app.core.storage.memory import MemoryStorage
@@ -36,7 +37,6 @@ from backend.app.services.batch_jobs import (
     cached_batch_job_payload,
     invalidate_batch_status,
 )
-from backend.app.services.batch_scheduler import BatchScheduler
 from backend.app.services.image_text_edit import detect_text_lines_with_status
 from backend.app.services.metrics import increment_analytics_event_counters, realtime_metrics
 from backend.app.services.provider_routing import cached_provider_by_code
@@ -231,7 +231,7 @@ def test_session_cache_hit_still_checks_user_and_logout_invalidates(client) -> N
     assert client.app.state.runtime_state.get_json(key) is None
 
 
-def test_batch_snapshot_and_scheduler_claim_lock(client, monkeypatch) -> None:
+def test_batch_snapshot_and_generation_queue_claim_lock(client, monkeypatch) -> None:
     with client.app.state.session_factory() as session:
         batch = BatchJob(business_type="suite", user_id=None)
         session.add(batch)
@@ -247,27 +247,33 @@ def test_batch_snapshot_and_scheduler_claim_lock(client, monkeypatch) -> None:
         fresh = cached_batch_job_payload(session, batch, runtime=client.app.state.runtime_state)
         assert fresh["status"] == "running"
 
-    scheduler = BatchScheduler(
-        client.app.state.session_factory,
-        client.app.state.settings,
-        client.app.state.cipher,
-        runtime_state=client.app.state.runtime_state,
-    )
+    scheduler = client.app.state.generation_queue_scheduler
     claim_calls = 0
 
-    async def claim_once() -> None:
+    def claim_once(task_id: str) -> bool:
         nonlocal claim_calls
         claim_calls += 1
+        return False
 
-    monkeypatch.setattr(scheduler, "_claim_available", claim_once)
-    claim_key = lock_key("batch-scheduler", "claim")
+    monkeypatch.setattr(scheduler, "_claim_batch_item", claim_once)
+    scheduler.storage.queue_push(queue_key("generation"), "batch_item:locked")
+
+    async def stop_on_sleep(_: float) -> None:
+        scheduler._stopping.set()
+
+    monkeypatch.setattr(scheduler, "_sleep", stop_on_sleep)
+    claim_key = lock_key("generation-queue", "generation")
     token = client.app.state.runtime_state.acquire_lock(claim_key, 10)
     assert token is not None
-    asyncio.run(scheduler.tick(wait=False))
+    scheduler._stopping.clear()
+    asyncio.run(scheduler._run_loop("generation"))
     assert claim_calls == 0
+    assert scheduler.queue_length("generation") == 1
     assert client.app.state.runtime_state.release_lock(claim_key, token)
-    asyncio.run(scheduler.tick(wait=False))
+    scheduler._stopping.clear()
+    asyncio.run(scheduler._run_loop("generation"))
     assert claim_calls == 1
+    assert scheduler.queue_length("generation") == 0
 
 
 def test_quota_and_order_locks_preserve_payment_idempotency(client) -> None:

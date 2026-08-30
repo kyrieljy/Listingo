@@ -400,6 +400,9 @@ def test_api_retry_failed_enqueues_without_executing(client, monkeypatch) -> Non
     monkeypatch.setattr(
         "backend.app.services.generation_queues.retry_failed_live_items", fake_retry
     )
+    monkeypatch.setattr(
+        "backend.app.services.generation_queue_service.retry_failed_live_items", fake_retry
+    )
 
     retry = client.post(f"/api/v1/generation-jobs/{job_id}/retry-failed")
     assert retry.status_code == 200, retry.text

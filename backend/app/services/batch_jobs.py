@@ -35,14 +35,13 @@ from backend.app.schemas import (
     BatchJobCreate,
     GenerationJobCreate,
 )
-from backend.app.services.aplus_jobs import cancel_aplus_job, serialize_aplus_job
+from backend.app.services.aplus_jobs import serialize_aplus_job
 from backend.app.services.job_creation import (
     TaskCreationError,
     create_aplus_generation_job_record,
     create_aplus_plan_job_record,
     create_generation_job_record,
 )
-from backend.app.services.jobs import cancel_generation_job
 from backend.app.services.subscriptions import confirm_quota, release_quota
 from backend.app.services.watermarking import apply_ai_watermark
 
@@ -494,28 +493,33 @@ def cached_batch_job_payload(
 def cancel_batch_job(session: Session, batch: BatchJob) -> BatchJob:
     if batch.status in FINAL_STATUSES:
         return batch
-    batch.status = "cancelling"
+    if batch.status != "queued" or any(item.status != "queued" for item in batch.items):
+        raise TaskCreationError(409, "批量任务正在生成中，无法取消")
+
     for item in batch.items:
-        if item.status == "queued":
-            item.status = "cancelled"
-            item.error = "User cancelled batch item"
-            item.completed_at = utcnow()
-            continue
-        if item.status != "running":
-            continue
+        item.status = "cancelled"
+        item.error = "User cancelled batch item"
+        item.completed_at = utcnow()
         if item.generation_job_id:
             child = session.get(GenerationJob, item.generation_job_id)
-            if child:
-                cancel_generation_job(session, child)
-        if item.aplus_plan_job_id:
+            if child and child.status == "queued":
+                child.status = "cancelled"
+                child.progress = 100
+                child.completed_at = utcnow()
+                for child_item in child.items:
+                    if child_item.status == "queued":
+                        child_item.status = "cancelled"
+                        child_item.error = "User cancelled batch item"
+        if item.aplus_plan_job_id and not item.aplus_generation_job_id:
             child = session.get(AplusJob, item.aplus_plan_job_id)
-            if child:
-                cancel_aplus_job(session, child)
-        if item.aplus_generation_job_id:
-            child = session.get(AplusJob, item.aplus_generation_job_id)
-            if child:
-                cancel_aplus_job(session, child)
-        sync_batch_item_from_children(session, item)
+            if child and child.status == "queued":
+                child.status = "cancelled"
+                child.progress = 100
+                child.completed_at = utcnow()
+                for child_item in child.items:
+                    if child_item.status == "queued":
+                        child_item.status = "cancelled"
+                        child_item.error = "User cancelled batch item"
     aggregate_batch_job(session, batch)
     session.commit()
     session.refresh(batch)

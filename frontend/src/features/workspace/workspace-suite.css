@@ -1762,6 +1762,20 @@
   white-space: nowrap;
 }
 
+.batch-history-detail header .batch-history-header-actions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.batch-history-detail header .batch-history-header-actions .ghost-action {
+  min-width: 82px;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+
 .batch-history-items {
   display: grid;
   gap: 10px;
@@ -1793,6 +1807,31 @@
   object-fit: contain;
   background: #fff;
   border: 1px solid #eef1f6;
+}
+
+.batch-task-thumb {
+  position: relative;
+  width: 52px;
+  height: 52px;
+}
+
+.batch-task-thumb img {
+  display: block;
+}
+
+.batch-task-generating {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border-radius: 6px;
+  background: rgba(248, 250, 252, .86);
+  color: #17417a;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
 }
 
 .batch-history-items article > div {

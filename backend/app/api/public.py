@@ -103,6 +103,7 @@ from backend.app.services.batch_jobs import (
     cached_batch_job_payload,
     create_batch_job_record,
     create_validation_fixture_batches,
+    aggregate_batch_job,
     invalidate_batch_status,
     load_batch_job,
     mark_validation_fixture_partial_failed,
@@ -154,6 +155,47 @@ def _fail_closed_compensate(session_factory, job_id: str, model, ref_type: str) 
                 if item.status == "queued":
                     item.status = "cancelled"
             session.commit()
+
+
+def _fail_closed_cancel_batches(session_factory, batch_ids: list[str]) -> None:
+    """Cancel queued batch facts when Redis cannot accept the complete buffer."""
+    with session_factory() as session:
+        for batch_id in batch_ids:
+            batch = session.scalar(
+                select(BatchJob)
+                .where(BatchJob.id == batch_id)
+                .options(selectinload(BatchJob.items))
+            )
+            if not batch or batch.status in FINAL_STATUSES:
+                continue
+            for item in batch.items:
+                if item.status != "queued":
+                    continue
+                item.status = "cancelled"
+                item.error = "Background queue unavailable"
+                item.completed_at = utcnow()
+                if item.generation_job_id:
+                    child = session.get(GenerationJob, item.generation_job_id)
+                    if child and child.status == "queued":
+                        child.status = "cancelled"
+                        child.progress = 100
+                        child.completed_at = utcnow()
+                        for child_item in child.items:
+                            if child_item.status == "queued":
+                                child_item.status = "cancelled"
+                                child_item.error = "Background queue unavailable"
+                if item.aplus_plan_job_id and not item.aplus_generation_job_id:
+                    child = session.get(AplusJob, item.aplus_plan_job_id)
+                    if child and child.status == "queued":
+                        child.status = "cancelled"
+                        child.progress = 100
+                        child.completed_at = utcnow()
+                        for child_item in child.items:
+                            if child_item.status == "queued":
+                                child_item.status = "cancelled"
+                                child_item.error = "Background queue unavailable"
+            aggregate_batch_job(session, batch)
+        session.commit()
 
 
 router = APIRouter(prefix="/api/v1", tags=["generation"])
@@ -506,8 +548,12 @@ async def create_batch_job(
     session.commit()
     invalidate_batch_status(batch.id, getattr(request.app.state, "runtime_state", None))
     batch = load_batch_job(session, batch.id)
-    if not settings.testing and hasattr(request.app.state, "batch_scheduler"):
-        await request.app.state.batch_scheduler.tick(wait=False)
+    scheduler = request.app.state.generation_queue_scheduler
+    try:
+        scheduler.enqueue_batch_items([item.id for item in batch.items])
+    except StorageUnavailableError:
+        _fail_closed_cancel_batches(request.app.state.session_factory, [batch.id])
+        raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
     return serialize_batch_job(session, batch)
 
 
@@ -544,8 +590,20 @@ async def create_batch_validation_fixtures_endpoint(
     for batch_id in batch_ids:
         invalidate_batch_status(batch_id, getattr(request.app.state, "runtime_state", None))
 
-    if hasattr(request.app.state, "batch_scheduler"):
-        await request.app.state.batch_scheduler.tick(wait=True)
+    scheduler = request.app.state.generation_queue_scheduler
+    try:
+        batch_items = []
+        for batch_id in batch_ids:
+            fixture_batch = load_batch_job(session, batch_id)
+            if fixture_batch:
+                batch_items.extend(fixture_batch.items)
+        scheduler.enqueue_batch_items([item.id for item in batch_items])
+    except StorageUnavailableError:
+        _fail_closed_cancel_batches(request.app.state.session_factory, batch_ids)
+        raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
+    if settings.testing:
+        while scheduler.queue_length("generation"):
+            await scheduler.tick("generation")
 
     session.expire_all()
     if len(batch_ids) > 1:
@@ -617,6 +675,7 @@ def get_batch_job(
 @router.post("/batch-jobs/{batch_id}/cancel", response_model=BatchJobOut)
 def cancel_batch_job_endpoint(
     batch_id: str,
+    request: Request,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
@@ -624,6 +683,30 @@ def cancel_batch_job_endpoint(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch job does not exist")
     ensure_job_owner(current_user, batch)
+    # Item locks serialize this request with the queue worker's conditional claim.
+    locked_items = session.scalars(
+        select(BatchItem)
+        .where(BatchItem.batch_job_id == batch_id)
+        .order_by(BatchItem.index)
+        .with_for_update()
+    ).all()
+    batch = session.scalar(
+        select(BatchJob)
+        .where(BatchJob.id == batch_id)
+        .options(selectinload(BatchJob.items))
+    )
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch job does not exist")
+    if batch.status in FINAL_STATUSES:
+        return serialize_batch_job(session, batch)
+    if batch.status != "queued" or any(item.status != "queued" for item in locked_items):
+        raise HTTPException(status_code=409, detail="批量任务正在生成中，无法取消")
+    try:
+        request.app.state.generation_queue_scheduler.remove_batch_items(
+            [item.id for item in locked_items]
+        )
+    except StorageUnavailableError:
+        raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
     return serialize_batch_job(session, cancel_batch_job(session, batch))
 
 
@@ -649,10 +732,15 @@ async def retry_failed_batch_job_endpoint(
             ref_id=batch.id,
             description="retry batch task",
         )
+    retry_items = [item for item in batch.items if item.status in {"failed", "partial_failed"}]
     retry_failed_batch_job(session, batch)
     batch = load_batch_job(session, batch_id)
-    if not request.app.state.settings.testing and hasattr(request.app.state, "batch_scheduler"):
-        await request.app.state.batch_scheduler.tick(wait=False)
+    scheduler = request.app.state.generation_queue_scheduler
+    try:
+        scheduler.enqueue_batch_items([item.id for item in retry_items])
+    except StorageUnavailableError:
+        _fail_closed_cancel_batches(request.app.state.session_factory, [batch_id])
+        raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
     return serialize_batch_job(session, batch)
 
 

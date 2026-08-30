@@ -53,7 +53,7 @@ Listingo/
 ## 关键决策
 
 - **单一持久化源 = SQLite**：运行时 DB、密钥、上传、结果、导出、构建产物均不提交 Git。
-- **进程内调度**：`BatchScheduler` 在应用 lifespan 启动（测试模式由显式 tick 驱动）；`ProviderConcurrencyLimiter` 进程级，普通/A+/子编辑/OCR/批量任务共享。
+- **统一队列调度**：生图队列（普通套图与批量 item）与视频队列各由一个进程内 worker 消费（测试模式由显式 tick 驱动）；`ProviderConcurrencyLimiter` 进程级，普通/A+/子编辑/OCR/批量任务共享。
 - **默认全局 Dryrun**：未配置有效 Provider 与密钥不得外调；`LISTINGO_GLOBAL_DRY_RUN` 控制。
 - **版本化资产**：Prompt（8 类）、Workflow、Provider route chain 全部版本化；后台启用新版本不影响历史任务。
 - **本地密钥加密**：API Key 经 Cryptography(Fernet) 本机加密，`.secret_key` 不提交。

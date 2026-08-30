@@ -61,9 +61,9 @@
 | OCR 改字 | 文本检测、文字替换版本、`image-text-edit`、RapidOCR 1.2.x/1.4.x 构造兼容 | `image_text_edit.py` |
 | 内容安全 | 本地关键词 + LLM 审查 | `content_safety.py` |
 | 水印 | AI 水印下载权限规则 | `watermarking.py` |
-| 批量托管 | `BatchJob`/`BatchItem`、调度、取消、恢复、ZIP | `batch_jobs.py`、`batch_scheduler.py` |
+| 批量托管 | `BatchJob`/`BatchItem`、入队、取消、重试、恢复、ZIP | `batch_jobs.py`、`batch_execution.py`、`generation_queue_service.py` |
 | 工作区恢复 | 重启后按 `provider_task_id` 续传/下载；保留 `queued` 任务以供队列重建，仅 `running`/`cancelling` 判定为中断 | `workspace_recovery.py` |
-| 生图 / 生视频缓冲队列 | `GenerationQueueScheduler`：两条相互独立的 Redis FIFO 队列（元素仅存 `job_id`）、`queued→running` 条件认领、每队列一个顺序 worker、启动按 `created_at,id` 重建、终态写入站内信；入队失败 fail-closed 并补偿释放额度 | `generation_queues.py`、`core/storage/keys.py`（`queue_key`） |
+| 生图 / 生视频缓冲队列 | `UnifiedGenerationQueueScheduler`：两条相互独立的 Redis FIFO 队列；生图队列同时保存普通生图 `job_id` 与批量 `batch_item:{item_id}` token，两条队列各一个顺序 worker，启动按 PostgreSQL 时间戳混合重建，终态写入站内信；入队失败 fail-closed 并补偿释放额度 | `generation_queue_service.py`、`generation_queues.py`、`core/storage/keys.py`（`queue_key`） |
 | Provider 目录 | 47 个源码预设、route roles、slot 映射 | `provider_catalog.py`、`provider_routing.py`、`providers.py` |
 | 并发限制 | 进程级 `ProviderConcurrencyLimiter`（普通/A+/子编辑/OCR/批量共享） | `provider_limiter.py` |
 | Prompt 资产 | 8 类 Prompt 版本化、契约校验、JSON 修复 | `prompt_contract.py`、`prompt_testing.py`、`workflow_registry.py` |
@@ -116,6 +116,7 @@
 
 | 日期 | 变更 | 来源 |
 |---|---|---|
+| 2026-08-30 | `changes/013-batch-generation-queue`：批量套图与批量 A+ item 以 `batch_item:{item_id}` 并入统一生图 Redis FIFO，与普通生图共用唯一顺序 worker；批量创建 / 重试只入队并立即返回，等待中可取消、生成中返回 409，父任务终态幂等通知；启动按 PostgreSQL 时间戳混合重建生图队列 | changes |
 | 2026-08-29 | `changes/012-unified-phone-login-registration`：短信登录与首次注册合并。未注册手机号通过 `purpose=login` 验证后自动创建 active/free 用户、注册通知、会话与 `sms` 登录事件；前端移除显式注册模式，保留密码登录与旧注册 API 兼容 | changes |
 | 2026-08-29 | `changes/010-generation-video-buffer-queues`：生图 / 生视频外部 API 调用改为两条独立 Redis FIFO 缓冲队列。创建与 retry-failed 入队后立即返回 `queued`（不再 `BackgroundTasks` 同步执行），worker 条件认领为 `running` 并顺序执行，终态写入站内信；取消语义收紧为「`queued` 可取消 / `running` 返回 409」，`workspace_recovery` 保留 `queued` 供队列重建；前端提交/重试后提示「任务已在后台运行」，取消入口仅 `queued` 可见。`docs/REDIS_KEYS.md` 新增「队列缓冲」键段与队列保护运维约定 | changes |
 | 2026-08-22 | 建立 `docs/CONTEXT_SUMMARY.md` 语义索引（响应 `/doc-update`）；确认 `SPEC.md`/`README.md` 保持删除，权威文档收敛为 `TASKS.md`/`TECH_STACK.md`/`开发计划.md` | doc-update |

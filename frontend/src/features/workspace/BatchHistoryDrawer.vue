@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { CheckOutlined, ClockCircleOutlined, ExperimentOutlined, EyeOutlined, LoadingOutlined } from '@ant-design/icons-vue'
+import { CheckOutlined, ClockCircleOutlined, ExperimentOutlined, EyeOutlined, LoadingOutlined, StopOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import {
   createBatchValidationFixtures,
+  cancelBatchJob,
   getBatchJob,
   listBatchJobs,
+  apiErrorStatus,
   userFacingApiErrorMessage,
   type BatchBusinessType,
   type BatchItem,
@@ -28,6 +30,7 @@ const selected = ref<BatchJob | null>(null)
 const checkedItemIds = ref<Set<string>>(new Set())
 const loading = ref(false)
 const fixtureLoading = ref(false)
+const cancelling = ref(false)
 let pollTimer: ReturnType<typeof window.setInterval> | null = null
 
 const visibleJobs = computed(() => jobs.value.filter((job) => job.business_type === props.businessType))
@@ -53,14 +56,14 @@ onUnmounted(stopPolling)
 
 function statusLabel(status: string): string {
   const labels: Record<string, string> = {
-    queued: '排队中',
+    queued: '等待中',
     running: '生成中',
-    succeeded: '已完成',
-    partial_failed: '部分失败',
+    succeeded: '已生成',
+    partial_failed: '失败',
     failed: '失败',
-    cancelling: '取消中',
+    cancelling: '生成中',
     cancelled: '已取消',
-    partial_cancelled: '部分取消',
+    partial_cancelled: '已取消',
   }
   return labels[status] ?? status
 }
@@ -154,6 +157,26 @@ function taskPayload(batch: BatchJob, item: BatchItem): BatchSelectionTask {
     batchStatus: batch.status,
     batchProgress: batch.progress,
     item,
+  }
+}
+
+async function cancelSelected() {
+  if (!selected.value || selected.value.status !== 'queued' || cancelling.value) return
+  cancelling.value = true
+  try {
+    const cancelled = await cancelBatchJob(selected.value.id)
+    selected.value = cancelled
+    await refresh(false)
+    message.success('批量任务已取消')
+  } catch (error: unknown) {
+    if (apiErrorStatus(error) === 409) {
+      message.error('批量任务正在生成中，无法取消')
+      await refresh(false)
+    } else {
+      message.error(userFacingApiErrorMessage(error) || '批量任务取消失败')
+    }
+  } finally {
+    cancelling.value = false
   }
 }
 
@@ -261,9 +284,22 @@ function thumbFor(item: BatchItem): string {
             <b>{{ businessLabel }}批次</b>
             <span>{{ new Date(selected.created_at).toLocaleString() }} · {{ statusLabel(selected.status) }} · {{ selected.completed_count }}/{{ selected.total_count }} 完成 · {{ selected.failed_count }} 失败</span>
           </div>
-          <button type="button" class="ghost-action" @click="toggleBatch(selected)">
-            <CheckOutlined v-if="batchChecked(selected)" />{{ batchChecked(selected) ? '清空整批' : '勾选整批' }}
-          </button>
+          <div class="batch-history-header-actions">
+            <button
+              v-if="selected.status === 'queued'"
+              type="button"
+              class="ghost-action"
+              :disabled="cancelling"
+              @click="cancelSelected"
+            >
+              <LoadingOutlined v-if="cancelling" spin />
+              <StopOutlined v-else />
+              取消
+            </button>
+            <button type="button" class="ghost-action" @click="toggleBatch(selected)">
+              <CheckOutlined v-if="batchChecked(selected)" />{{ batchChecked(selected) ? '清空整批' : '勾选整批' }}
+            </button>
+          </div>
         </header>
         <section class="batch-history-items">
           <article
@@ -275,7 +311,13 @@ function thumbFor(item: BatchItem): string {
             <button type="button" class="batch-task-check" :class="{ checked: taskChecked(item.id) }" :disabled="!taskSelectable(item)" @click.stop="toggleTask(item)">
               <CheckOutlined v-if="taskChecked(item.id)" />
             </button>
-            <img :src="thumbFor(item)" :alt="item.name || `商品任务${item.index}`" />
+            <span class="batch-task-thumb">
+              <img :src="thumbFor(item)" :alt="item.name || `商品任务${item.index}`" />
+              <small v-if="item.status === 'queued' || item.status === 'running'" class="batch-task-generating">
+                <LoadingOutlined v-if="item.status === 'running'" spin />
+                {{ statusLabel(item.status) }}
+              </small>
+            </span>
             <div>
               <b>商品任务{{ item.index }} · {{ item.name || '未命名商品' }}</b>
               <span :class="statusClass(item.status)">{{ statusLabel(item.status) }}</span>

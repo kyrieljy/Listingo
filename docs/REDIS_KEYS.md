@@ -19,8 +19,8 @@
 - **Redis 只保存可再生的派生态、短 TTL 状态与正确性令牌**：
   - 派生态（热点缓存 / 实时计数）：Provider 快照、Prompt/Workflow 激活版本、套餐与额度规则、OCR 结果、当日埋点计数。Redis 异常时回源 PostgreSQL 或跳过计数（**fail-open**），不放大故障。
   - 短 TTL 状态：会话元数据（`session_id`/`user_id`/`expires_at`，不含 token 明文）、批量任务详情快照。命中后仍回 PostgreSQL 校验事实行。
-  - 正确性令牌（分布式锁）：批量调度认领、额度预留、订单创建、模拟支付。Redis 异常时请求失败（**fail-closed，503**），避免无锁放行破坏一致性。
-  - 队列缓冲（任务排队顺序）：`queue:generation` / `queue:video` 保存待执行任务 ID，是**执行链路的正确性依赖**。与上面几类不同，它**不设 TTL、不参与淘汰**，也不是数据的副本——队列丢失时由 PostgreSQL 的 `queued` 任务按序重建；Redis 异常时创建 / 重试请求失败（**fail-closed，503**），见「队列缓冲（来自 010）」。
+  - 正确性令牌（分布式锁）：生图 / 生视频队列 worker 租约、额度预留、订单创建、模拟支付。Redis 异常时请求失败（**fail-closed，503**），避免无锁放行破坏一致性。
+  - 队列缓冲（任务排队顺序）：`queue:generation` 保存普通生图 ID 与 `batch_item:{item_id}` token，`queue:video` 保存视频任务 ID，是**执行链路的正确性依赖**。与上面几类不同，它**不设 TTL、不参与淘汰**，也不是数据的副本——队列丢失时由 PostgreSQL 的 `queued` 任务按序重建；Redis 异常时创建 / 重试请求失败（**fail-closed，503**），见「队列缓冲（来自 010）」。
 - memory 后端（`LISTINGO_STORAGE_BACKEND=memory`）复用现有 `MemoryStorage`，行为一致但无跨进程语义，仅用于本地/测试。
 
 ## 键清单
@@ -57,11 +57,11 @@
 
 | 构造器 | 内部键模板 | 完整键示例 | 用途 | TTL 来源 | 所属模块 |
 |---|---|---|---|---|---|
-| `queue_key(kind)` | `queue:{kind}` | `listingo:queue:generation` | 生图 / 生视频任务 FIFO 缓冲队列，元素仅保存 `job_id` | **无 TTL**：由 PostgreSQL 中仍为 `queued` 的任务重建 | `services/generation_queues.py` |
+| `queue_key(kind)` | `queue:{kind}` | `listingo:queue:generation` | 生图 / 生视频任务 FIFO 缓冲队列；生图元素为普通 `GenerationJob.id` 或 `batch_item:{BatchItem.id}`，视频元素为 `VideoJob.id` | **无 TTL**：由 PostgreSQL 中仍为 `queued` 的普通生图任务、批量 item 与视频任务重建 | `services/generation_queue_service.py`、`services/generation_queues.py` |
 
 > 说明：`kind` 取值仅为 `generation` / `video`，两个队列相互独立、各自顺序消费，因此一个长视频任务不会阻塞生图任务，但同类型任务严格按提交顺序执行。
 >
-> 队列**不是**派生态缓存，不适用本文件其余键的 TTL / 淘汰 / 版本失效语义：元素是任务的排队顺序而非数据副本，完整任务事实始终在 PostgreSQL。服务启动时先停旧 worker，再清空并按 `created_at, id` 从 PostgreSQL 中状态仍为 `queued` 的任务重建两类队列，因此队列丢失不会丢任务。Redis 入队失败时创建 / 重试接口 fail-closed 返回 503（见「降级语义」）。
+> 队列**不是**派生态缓存，不适用本文件其余键的 TTL / 淘汰 / 版本失效语义：元素是任务的排队顺序而非数据副本，完整任务事实始终在 PostgreSQL。服务启动时先停旧 worker，再清空并按 `created_at, id` 从 PostgreSQL 中状态仍为 `queued` 的普通生图任务、批量 item 与视频任务重建两类队列，因此队列丢失不会丢任务。Redis 入队失败时创建 / 重试接口 fail-closed 返回 503（见「降级语义」）。
 
 ## 失效策略（版本域模式）
 

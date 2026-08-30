@@ -519,7 +519,7 @@ async function submitBatch() {
     trackBatchEvent('batch_submit', 'submit', { submitted_tasks: tasks.value.length, estimated_outputs: summary.value.estimatedImages })
     await createBatchJob(payload)
     historyOpen.value = true
-    message.success('批量生成托管任务已提交')
+    message.success('任务已在后台运行，可在消息中心查看结果')
   } catch (error: unknown) {
     message.error(userFacingApiErrorMessage(error) || '批量生成托管提交失败')
   } finally {

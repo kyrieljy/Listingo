@@ -51,6 +51,7 @@ from backend.app.schemas import (
     SmsSettingsUpdate,
     SensitiveWordCreate,
     SensitiveWordSettingsUpdate,
+    SensitiveWordBulkCreate,
     SensitiveWordUpdate,
     WorkflowVersionCreate,
 )
@@ -673,6 +674,86 @@ def create_sensitive_word(
     result = _commit_sensitive_snapshot(session, runtime)
     word = session.get(SensitiveWord, word_id)
     return {**_word_response(session, word), **result}
+
+
+@router.post("/sensitive-words/bulk")
+def bulk_create_sensitive_words(
+    payload: SensitiveWordBulkCreate,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    runtime = getattr(request.app.state, "runtime_state", None)
+    created = 0
+    skipped = 0
+    errors: list[dict[str, str]] = []
+    config_id: str | None = None
+    try:
+        config = _locked_sensitive_config(session)
+        config_id = config.id
+        existing_norm: set[str] = set(session.scalars(select(SensitiveWord.normalized_term)).all())
+        for raw in payload.terms:
+            term = (raw or "").strip()
+            normalized = normalize_sensitive_text(term, compact=True) if term else ""
+            if not normalized:
+                if raw:
+                    errors.append({"term": raw, "error": "无效词"})
+                continue
+            if len(term) > 120:
+                errors.append({"term": raw, "error": "单个敏感词不能超过 120 个字符"})
+                continue
+            if normalized in existing_norm:
+                skipped += 1
+                continue
+            session.add(
+                SensitiveWord(
+                    term=term,
+                    normalized_term=normalized,
+                    aliases_json=json.dumps([], ensure_ascii=False),
+                    enabled=payload.enabled,
+                    note=payload.note,
+                )
+            )
+            existing_norm.add(normalized)
+            created += 1
+        session.flush()
+        # 词已落库即提交；重量级快照重建放到后台，避免大批量导入时请求长时间阻塞导致超时。
+        _commit_sensitive_snapshot(session, runtime)
+    except SensitiveWordError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        session.rollback()
+        logger.error("批量导入敏感词失败", exc_info=True)
+        raise HTTPException(status_code=503, detail="批量导入敏感词失败，请稍后再试") from exc
+    if config_id is not None:
+        background_tasks.add_task(_rebuild_sensitive_word_snapshot, request.app, runtime, config_id)
+    return {
+        "created": created,
+        "skipped": skipped,
+        "total": len(payload.terms),
+        "errors": errors,
+        "rebuild_scheduled": True,
+        "snapshot": sensitive_word_status(session, runtime),
+    }
+
+
+def _rebuild_sensitive_word_snapshot(app: Any, runtime: Any, config_id: str) -> None:
+    factory = getattr(app.state, "session_factory", None)
+    if factory is None:
+        return
+    try:
+        with factory() as session:
+            config = session.get(SensitiveWordConfig, config_id)
+            if config is None:
+                return
+            words = list(session.scalars(select(SensitiveWord).order_by(SensitiveWord.normalized_term)).all())
+            snapshot = build_sensitive_word_snapshot(config, words)
+            persist_sensitive_word_snapshot(session, snapshot)
+            sync_sensitive_word_snapshot(snapshot, runtime)
+            session.commit()
+    except Exception:
+        logger.error("后台重建敏感词快照失败", exc_info=True)
 
 
 @router.patch("/sensitive-words/settings")

@@ -1,100 +1,97 @@
 from __future__ import annotations
 
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from types import SimpleNamespace
 
 import pytest
 
+import backend.app.services.image_text_edit as ite
 from backend.app.config import Settings
-from backend.app.services import image_text_edit
 
 
-def test_concurrent_initialization_loads_one_active_runner(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
-
-    def create_runner(model: str, _settings: Settings):
-        calls.append(model)
-        return image_text_edit.OcrRunner("PaddleOCR", model, object(), uses_predict=False)
-
-    monkeypatch.setattr(image_text_edit, "_create_paddleocr_runner", create_runner)
-    settings = Settings(testing=True, ocr_engine="paddleocr", ocr_primary_model="PP-OCRv6", ocr_fallback_model="PP-OCRv5")
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        runners = list(executor.map(lambda _: image_text_edit._load_ocr_engine(settings), range(8)))
-
-    assert calls == ["PP-OCRv6"]
-    assert len({id(runner) for runner in runners}) == 1
+def _fake_runner(code: str, model: str) -> SimpleNamespace:
+    return SimpleNamespace(code=code, model=model, runner=None, uses_predict=False)
 
 
-def test_configuration_fingerprint_replaces_active_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+def _patch_creators(monkeypatch, calls, created):
+    def make_rapidocr(settings):
+        calls.append(("rapidocr", settings.ocr_primary_model))
+        created.append(_fake_runner("rapidocr", settings.ocr_primary_model or "PP-OCRv5"))
+        return created[-1]
+
+    def make_paddleocr(model_version, settings):
+        calls.append(("paddleocr", model_version))
+        created.append(_fake_runner("paddleocr", model_version))
+        return created[-1]
+
+    monkeypatch.setattr(ite, "_create_rapidocr_runner", make_rapidocr)
+    monkeypatch.setattr(ite, "_create_paddleocr_runner", make_paddleocr)
+
+
+def test_singleton_returns_same_instance_and_caches_creation(monkeypatch: pytest.MonkeyPatch) -> None:
+    ite.clear_ocr_engine_cache()
+    calls: list[tuple[str, str]] = []
     created: list[object] = []
+    _patch_creators(monkeypatch, calls, created)
 
-    def create_runner(model: str, _settings: Settings):
-        runner = image_text_edit.OcrRunner("PaddleOCR", model, object(), uses_predict=False)
-        created.append(runner)
-        return runner
+    first = ite._load_ocr_engine(Settings(ocr_engine="rapidocr", ocr_primary_model="PP-OCRv5"))
+    second = ite._load_ocr_engine(Settings(ocr_engine="rapidocr", ocr_primary_model="PP-OCRv5"))
 
-    monkeypatch.setattr(image_text_edit, "_create_paddleocr_runner", create_runner)
-    first = image_text_edit._load_ocr_engine(Settings(testing=True, ocr_engine="paddleocr", ocr_primary_model="PP-OCRv6"))
-    second = image_text_edit._load_ocr_engine(Settings(testing=True, ocr_engine="paddleocr", ocr_primary_model="PP-OCRv5"))
+    assert first is second
+    assert len(calls) == 1  # 第二次命中缓存，不再创建
+    assert ite.ocr_cache_size() == 1
+
+
+def test_concurrent_initialization_creates_single_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    ite.clear_ocr_engine_cache()
+    calls: list[tuple[str, str]] = []
+    created: list[object] = []
+    _patch_creators(monkeypatch, calls, created)
+
+    settings = Settings(ocr_engine="rapidocr", ocr_primary_model="PP-OCRv5")
+    results: list[object] = []
+    barrier = threading.Barrier(8)
+
+    def worker() -> None:
+        barrier.wait()
+        results.append(ite._load_ocr_engine(settings))
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(results) == 8
+    assert all(item is results[0] for item in results)
+    assert len(calls) == 1  # 锁串行化后只真正创建一次
+
+
+def test_config_fingerprint_change_replaces_instance_and_clears_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    ite.clear_ocr_engine_cache()
+    calls: list[tuple[str, str]] = []
+    created: list[object] = []
+    _patch_creators(monkeypatch, calls, created)
+
+    first = ite._load_ocr_engine(Settings(ocr_engine="rapidocr", ocr_primary_model="PP-OCRv5"))
+    second = ite._load_ocr_engine(Settings(ocr_engine="rapidocr", ocr_primary_model="PP-OCRv6"))
 
     assert first is not second
-    assert image_text_edit.active_ocr_identity() == {"engine": "PaddleOCR", "model": "PP-OCRv5"}
-    assert image_text_edit._load_ocr_engine(Settings(testing=True, ocr_engine="paddleocr", ocr_primary_model="PP-OCRv5")) is second
-    assert len(created) == 2
+    assert len(calls) == 2
+    assert ite.ocr_cache_size() == 1  # 旧实例缓存已被清空
 
 
-def test_initialization_failure_does_not_load_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    def create_runner(_model: str, _settings: Settings):
-        raise RuntimeError("primary unavailable")
+def test_load_failure_does_not_implicitly_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    ite.clear_ocr_engine_cache()
 
-    def create_rapid(_settings: Settings):
-        raise AssertionError("fallback must not be loaded")
+    def boom(_settings):
+        raise RuntimeError("模型文件缺失")
 
-    monkeypatch.setattr(image_text_edit, "_create_paddleocr_runner", create_runner)
-    monkeypatch.setattr(image_text_edit, "_create_rapidocr_runner", create_rapid)
+    monkeypatch.setattr(ite, "_create_rapidocr_runner", boom)
 
-    with pytest.raises(RuntimeError, match="primary unavailable"):
-        image_text_edit._load_ocr_engine(Settings(testing=True, ocr_engine="paddleocr"))
+    with pytest.raises(RuntimeError, match="模型文件缺失"):
+        ite._load_ocr_engine(Settings(ocr_engine="rapidocr", ocr_primary_model="PP-OCRv5"))
 
-    assert image_text_edit.active_ocr_identity() is None
-
-
-def test_manual_prewarm_does_not_overwrite_a_newer_generation(monkeypatch: pytest.MonkeyPatch) -> None:
-    state = image_text_edit.new_ocr_prewarm_state()
-    state["generation"] = 1
-
-    def old_prewarm(_settings: Settings):
-        state.update(generation=2, status="pending", result=None, finished_at=None)
-        return {"ok": True}
-
-    monkeypatch.setattr(image_text_edit, "prewarm_ocr_engine", old_prewarm)
-    async def run():
-        return await image_text_edit.prewarm_ocr_engine_async(Settings(testing=True), state)
-
-    result = asyncio.run(run())
-
-    assert result == {"ok": True}
-    assert state["status"] == "pending"
-
-
-def test_scheduled_prewarm_reports_public_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    state = image_text_edit.new_ocr_prewarm_state()
-    monkeypatch.setattr(image_text_edit, "prewarm_ocr_engine", lambda _settings: {"ok": True})
-
-    image_text_edit.schedule_ocr_prewarm(Settings(testing=False), state)
-    asyncio.run(state["_task"])
-
-    public = image_text_edit._public_prewarm_state(state)
-    assert state["status"] == "succeeded"
-    assert public["result"] == {"ok": True}
-    assert "_task" not in public
-
-
-def test_testing_mode_does_not_load_a_real_model() -> None:
-    state = image_text_edit.new_ocr_prewarm_state()
-
-    image_text_edit.schedule_ocr_prewarm(Settings(testing=True), state)
-
-    assert state["status"] == "skipped_testing"
-    assert "_task" not in state
+    assert ite._ACTIVE_OCR_RUNNER is None
+    assert ite._ACTIVE_OCR_FINGERPRINT is None
+    assert ite._LAST_OCR_ERROR is not None

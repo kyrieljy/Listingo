@@ -807,7 +807,7 @@ async def run_aplus_plan_job(
                 with session_factory() as session:
                     session.add(
                         ExecutionLog(
-                            job_id=job_id,
+                            aplus_job_id=job_id,
                             node="sensitive_image",
                             status="failed",
                             request_summary="{}",

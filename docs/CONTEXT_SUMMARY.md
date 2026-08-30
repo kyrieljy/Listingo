@@ -60,6 +60,7 @@
 | 视频 | `ecommerce-video-meta-15s` + Seedance 2.0 submit/poll/mp4 | `video_jobs.py` |
 | OCR 改字 | 文本检测、文字替换版本、`image-text-edit`、RapidOCR 1.2.x/1.4.x 构造兼容 | `image_text_edit.py` |
 | 内容安全 | 本地关键词 + LLM 审查 | `content_safety.py` |
+| 敏感词检测 | 运营可配置敏感词清单、变体生成、Aho-Corasick 快照匹配、套图/A+/视频卖点与上传 OCR 文本预检、图片安全布尔字段阻断；OCR 全局单例与启动自动预热 | `sensitive_words.py`、`sensitive_preflight.py`、`image_text_edit.py`（OCR 单例） |
 | 水印 | AI 水印下载权限规则 | `watermarking.py` |
 | 批量托管 | `BatchJob`/`BatchItem`、入队、取消、重试、恢复、ZIP | `batch_jobs.py`、`batch_execution.py`、`generation_queue_service.py` |
 | 工作区恢复 | 重启后按 `provider_task_id` 续传/下载；保留 `queued` 任务以供队列重建，仅 `running`/`cancelling` 判定为中断 | `workspace_recovery.py` |
@@ -92,7 +93,7 @@
 |---|---|---|
 | 工作台 `/app` | 四期统一工作台：套图、A+ 详情页、视频、Demo 面板、批量托管、OCR 改字、水印下载、结果网格、环境感知生成失败提示 | `workspace/WorkspaceView.vue`、`APlusPhasePanel.vue`、`VideoPhasePanel.vue`、`DemoPhasePanel.vue`、`BatchHostingModal.vue`、`BatchHistoryDrawer.vue`、`ImageTextEditPanel.vue`、`WatermarkDownloadMenu.vue`、`ResultGrid.vue`；状态 `workspace-model.ts`、`generation-errors.ts`、`batch-model.ts`、`analytics.ts` |
 | 账号 `/auth` | 统一登录/注册弹窗（短信登录自动开户、密码登录）、账号中心、套餐弹窗、用户菜单、会话 store | `auth/AuthModal.vue`、`AccountModal.vue`、`PricingModal.vue`、`UserMenu.vue`、`auth-store.ts`、`auth-model.ts` |
-| 运营后台 `/admin` | Provider 分组、Prompt 上传/版本比较/试跑、Workflow、日志、运行配置、短信/OCR/用户/套餐/订单、监控图表 | `admin/AdminView.vue`、`MonitoringDashboard.vue`、`MonitoringLineChart.vue`、`SharePieChart.vue`、`ComparisonMatrix.vue`、`MetricKpiStrip.vue`、`UserDrilldownPanel.vue`、`provider-display.ts`、`monitoring-data.ts` |
+| 运营后台 `/admin` | Provider 分组、Prompt 上传/版本比较/试跑、Workflow、日志、运行配置、短信/OCR/用户/套餐/订单、监控图表、敏感词检测（含批量导入） | `admin/AdminView.vue`、`SensitiveWordsPanel.vue`、`sensitive-words-model.ts`、`MonitoringDashboard.vue`、`MonitoringLineChart.vue`、`SharePieChart.vue`、`ComparisonMatrix.vue`、`MetricKpiStrip.vue`、`UserDrilldownPanel.vue`、`provider-display.ts`、`monitoring-data.ts` |
 | 基础设施 | HTTP 客户端、路由、全局样式 | `api/client.ts`、`router/index.ts`、`styles/` |
 
 ---
@@ -106,6 +107,7 @@
 | 账号/安全 | `User`、`UserSession`、`LoginEvent` |
 | 分析/通知 | `AnalyticsEvent`、`Notification` |
 | 短信配置 | `SmsConfig`（验证码本体与计数在 Redis） |
+| 敏感词检测 | `SensitiveWordConfig`（单例开关/上限）、`SensitiveWord`、`SensitiveWordSnapshot`（最近 20 版 JSON 回源，Redis 丢失时重建） |
 | 订阅/计费 | `SubscriptionPlan`、`PlanPrice`、`PlanQuotaRule`、`UserSubscription`、`PaymentOrder`、`QuotaLedger` |
 | Provider/Prompt | `Provider`、`Prompt`、`PromptVersion`、`PromptTestRun`、`Workflow`、`WorkflowVersion` |
 | 资产/任务 | `Asset`、`GenerationJob`、`GenerationItem`、`GenerationVersion`、`VideoJob`、`VideoItem`、`VideoVersion`、`AplusJob`、`AplusItem`、`AplusVersion`、`BatchJob`、`BatchItem`、`ExecutionLog` |
@@ -116,6 +118,8 @@
 
 | 日期 | 变更 | 来源 |
 |---|---|---|
+| 2026-08-30 | `archive/015-batch-import-sensitive-words`：运营后台「敏感词」新增「批量导入」卡片——多行文本框按换行或逗号（含中文逗号）切分，后端 `POST /admin/sensitive-words/bulk` 一次性建词（`terms/enabled/note`），按 `normalized_term` 去重、跳过已存在与空项、超长/无效计入 `errors`；为避免大批量超时，快照重建移交 `BackgroundTasks` 异步执行，请求立即返回 `rebuild_scheduled=true`，前端 `bulkCreateSensitiveWords` 单独设 `timeout:180_000`；返回 `created/skipped/total/errors/rebuild_scheduled/snapshot`。前端 `SensitiveWordsPanel.vue` 新增卡片与 `bulkCreateSensitiveWords`/`splitBulkTerms`（`sensitive-words-model.ts`），新增后端测试 `test_sensitive_word_bulk.py`（含 300 词大批量回归） | archive |
+| 2026-08-30 | `archive/014-sensitive-information-detection`：运营后台新增「敏感词」栏目（全局开关、词 CRUD、人工别名、实时变体预览、快照状态与重建）；套图/A+/视频/批量创建在 quota 预留与入队前完成卖点文本 + 上传图片 OCR 敏感词检测，命中返回 422「包含敏感信息」且不留 quota/不入队；新增 `SensitiveWordConfig`/`SensitiveWord`/`SensitiveWordSnapshot` 三表与无 TTL 常驻 Redis 快照（`sensitive:words:meta`/`snapshot`），检测仅消费快照、Aho-Corasick 一次扫描多文本视图；套图/A+ 商品视觉事实新增 `is_pornography`/`is_violence`/`is_politics` 布尔字段阻断（默认 0 兼容旧 Prompt）；OCR 改为进程级单例并启动自动预热，OCR 配置变更清理旧实例并重预热；`docs/REDIS_KEYS.md` 新增常驻快照键段 | archive |
 | 2026-08-30 | `changes/013-batch-generation-queue`：批量套图与批量 A+ item 以 `batch_item:{item_id}` 并入统一生图 Redis FIFO，与普通生图共用唯一顺序 worker；批量创建 / 重试只入队并立即返回，等待中可取消、生成中返回 409，父任务终态幂等通知；启动按 PostgreSQL 时间戳混合重建生图队列 | changes |
 | 2026-08-29 | `changes/012-unified-phone-login-registration`：短信登录与首次注册合并。未注册手机号通过 `purpose=login` 验证后自动创建 active/free 用户、注册通知、会话与 `sms` 登录事件；前端移除显式注册模式，保留密码登录与旧注册 API 兼容 | changes |
 | 2026-08-29 | `changes/010-generation-video-buffer-queues`：生图 / 生视频外部 API 调用改为两条独立 Redis FIFO 缓冲队列。创建与 retry-failed 入队后立即返回 `queued`（不再 `BackgroundTasks` 同步执行），worker 条件认领为 `running` 并顺序执行，终态写入站内信；取消语义收紧为「`queued` 可取消 / `running` 返回 409」，`workspace_recovery` 保留 `queued` 供队列重建；前端提交/重试后提示「任务已在后台运行」，取消入口仅 `queued` 可见。`docs/REDIS_KEYS.md` 新增「队列缓冲」键段与队列保护运维约定 | changes |
@@ -137,4 +141,4 @@
 
 - [ ] **`.coderules` §1 偏差**：仍写「`SPEC.md` 为权威摘要」，与 SPEC.md 已删除现状冲突；建议将 §1 改为引用 `TASKS.md`/`TECH_STACK.md` 为权威，或显式标注 SPEC.md 已弃用。
 - [ ] 内容型文档未建：`ARCHITECTURE.md`、`API_REFERENCE.md`、`DB_SCHEMA.md`、`BUSINESS_DOMAIN.md` 待后续 `doc-update` 从源码增量填充。
-- [ ] `archive/` 已收录 001、002、004 与 005；`changes/003-environment-config-files`、`changes/006-redis-rate-limit-verification`、`changes/007-sqlite-to-postgresql-migration` 因 Docker Compose 运行时验证尚未在有 Docker 的主机执行，仍保留在 `changes/`。
+- [ ] `archive/` 已收录 001、002、004、005、014 与 015；`changes/003-environment-config-files`、`changes/006-redis-rate-limit-verification`、`changes/007-sqlite-to-postgresql-migration` 因 Docker Compose 运行时验证尚未在有 Docker 的主机执行，仍保留在 `changes/`。

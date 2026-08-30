@@ -24,6 +24,14 @@
 
 > 后续每次 `archive` 在此追加：`### <编号>-<slug> — <一句话>` + 变更要点。请勿手工大段重写。
 
+## [Unreleased]
+
+### 014-sensitive-information-detection — 2026-08-30
+- 运营后台新增「敏感词」栏目：全局开关、词 CRUD、人工别名、实时变体预览、快照状态与重建；套图/A+/视频/批量创建在 quota 预留与入队前完成卖点文本 + 上传图片 OCR 敏感词检测，命中返回 422「包含敏感信息」且不留 quota/不入队。新增 `SensitiveWordConfig`/`SensitiveWord`/`SensitiveWordSnapshot` 三表与无 TTL 常驻 Redis 快照（`sensitive:words:meta`/`snapshot`）；Aho-Corasick 一次扫描多文本视图；套图/A+ 商品视觉事实新增 `is_pornography`/`is_violence`/`is_politics` 布尔字段阻断（默认 0 兼容旧 Prompt）。OCR 改为进程级单例并启动自动预热，配置变更清理旧实例并重预热。`docs/REDIS_KEYS.md` 新增常驻快照键段；迁移 head：`c0a1b2c3d4e5`。
+
+### 015-batch-import-sensitive-words — 2026-08-30
+- 运营后台「敏感词」新增「批量导入」卡片：多行文本框按换行或逗号（含中文逗号）切分，后端 `POST /admin/sensitive-words/bulk` 一次性建词（`terms/enabled/note`），按 `normalized_term` 去重、跳过已存在与空项、超长/无效计入 `errors`；快照重建移交 `BackgroundTasks` 异步执行，请求立即返回 `rebuild_scheduled=true`，前端 `bulkCreateSensitiveWords` 单独设 `timeout:180_000`。后续 UI 迭代：状态开关改为纯状态药丸（无文字）、「变体」列直接列举全部变体、清单顶部新增实时搜索（按敏感词/别名/变体匹配）。新增 `test_sensitive_word_bulk.py`（含 300 词大批量回归）。
+
 ### 001-report-driven-safe-optimizations — 2026-08-22
 
 - 基于审计批判性采纳低风险类型修复：后端目标入口/服务/路由补齐参数与返回类型，Workspace 请求错误从 `any` 收紧为 `unknown`，Provider 展示动态 JSON 使用具体类型。

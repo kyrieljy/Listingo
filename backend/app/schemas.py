@@ -932,3 +932,9 @@ class SensitiveWordSettingsUpdate(BaseModel):
     max_variants_per_word: int | None = Field(default=None, ge=1, le=1024)
     max_total_variants: int | None = Field(default=None, ge=1, le=1_000_000)
     max_snapshot_bytes: int | None = Field(default=None, ge=1024, le=100 * 1024 * 1024)
+
+
+class SensitiveWordBulkCreate(BaseModel):
+    terms: list[str] = Field(min_length=1, max_length=2000)
+    enabled: bool = True
+    note: str = Field(default="", max_length=500)

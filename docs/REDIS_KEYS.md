@@ -1,7 +1,7 @@
 # Redis 键命名规范与清单
 
 > 本文件是 Listingo「Redis 仅保存带 TTL 的临时态」约束的键层面事实来源。
-> 由 `changes/008-redis-usage-optimization` 建立安全态键规范；`changes/009-redis-scenario-expansion` 在保持同一约束的前提下，将 Redis 用途从「仅安全态」扩展为「安全态 + 派生态」，集中键构造器位于 `backend/app/core/storage/keys.py`。
+> 由 `changes/008-redis-usage-optimization` 建立安全态键规范；`changes/009-redis-scenario-expansion` 在保持同一约束的前提下，将 Redis 用途从「仅安全态」扩展为「安全态 + 派生态」；`changes/014-sensitive-information-detection` 引入敏感词检测常驻快照键（无 TTL、不参与淘汰），集中键构造器位于 `backend/app/core/storage/keys.py`。
 
 ## 命名约定
 
@@ -62,6 +62,21 @@
 > 说明：`kind` 取值仅为 `generation` / `video`，两个队列相互独立、各自顺序消费，因此一个长视频任务不会阻塞生图任务，但同类型任务严格按提交顺序执行。
 >
 > 队列**不是**派生态缓存，不适用本文件其余键的 TTL / 淘汰 / 版本失效语义：元素是任务的排队顺序而非数据副本，完整任务事实始终在 PostgreSQL。服务启动时先停旧 worker，再清空并按 `created_at, id` 从 PostgreSQL 中状态仍为 `queued` 的普通生图任务、批量 item 与视频任务重建两类队列，因此队列丢失不会丢任务。Redis 入队失败时创建 / 重试接口 fail-closed 返回 503（见「降级语义」）。
+
+### 常驻快照（来自 014）
+
+| 构造器 | 内部键模板 | 完整键示例 | 用途 | TTL 来源 | 所属模块 |
+|---|---|---|---|---|---|
+| `sensitive_word_meta_key()` | `sensitive:words:meta` | `listingo:sensitive:words:meta` | 敏感词快照元信息（enabled / source_digest / word_count / variant_count / payload_bytes），检测期只读 meta 决定是否跳过与是否需要 reload | **无 TTL**：常驻，由 `set_persistent_many` 原子替换 | `services/sensitive_words.py` + `core/storage/*` |
+| `sensitive_word_snapshot_key()` | `sensitive:words:snapshot` | `listingo:sensitive:words:snapshot` | 完整敏感词快照 JSON（含每个词的 variants / boundary），进程启动时按 digest 编译 Aho-Corasick 自动机 | **无 TTL**：常驻，同上 | `services/sensitive_words.py` + `core/storage/*` |
+
+> 架构边界：敏感词快照是「可被 PostgreSQL 重建的派生态」，但**检测路径要求常驻、低延迟、跨进程一致**，因此两个键与 `queue:*` 一样**不设 TTL、不参与淘汰**。两个键通过存储适配层的 `set_persistent_many` 用 pipeline 事务（Redis）或进程锁（memory）原子替换，保证 meta 与 snapshot 永远成对更新。
+>
+> **PostgreSQL fallback**：`SensitiveWordSnapshot` 表保存最近 20 版完整 JSON，是 Redis 丢失时的唯一回源；检测阶段若 Redis meta/快照不可读，则读取 PostgreSQL 最新有效快照并补偿写回 Redis，二者 digest 不一致时以 PostgreSQL 为准（回源重建）。
+>
+> **跳过检测策略（fail-open）**：检测开启但 Redis meta 与 snapshot 均不可读、且 PostgreSQL 快照也不可用或校验失败时，**跳过本次敏感词检测**、记 warning 指标、不阻断普通生成任务；这与「内容安全本地审查 + LLM 链路」相互独立，关闭敏感词检测不影响既有黄赌毒 / 政治固定审查。
+>
+> **运维保护**：`sensitive:words:*` 与 `queue:*` 同属无 TTL 常驻键，`volatile-lru` 不会淘汰它们；⚠️ 切勿将 `maxmemory-policy` 改为 `allkeys-lru` / `allkeys-random`，否则常驻快照可能被逐出导致检测退化为 PostgreSQL 回源或跳过。
 
 ## 失效策略（版本域模式）
 

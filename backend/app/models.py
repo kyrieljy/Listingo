@@ -573,6 +573,7 @@ class ExecutionLog(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_job.id"), nullable=True, index=True)
+    aplus_job_id: Mapped[str | None] = mapped_column(ForeignKey("aplus_job.id", ondelete="CASCADE"), nullable=True, index=True)
     item_id: Mapped[str | None] = mapped_column(ForeignKey("generation_item.id"), nullable=True, index=True)
     node: Mapped[str] = mapped_column(String(80), index=True)
     provider_id: Mapped[str | None] = mapped_column(ForeignKey("provider.id"), nullable=True, index=True)

@@ -3,10 +3,10 @@
 > 本文件是 Listingo 项目的**文档单一入口（语义索引）**，由 `.coderules` §1 规定为权威文档索引。
 > 职责：把「模块 / 能力 → 职责 → 关键文件路径」映射出来，让任何变更都能快速定位应同步的源码与文档。
 >
-> **文档状态说明（2026-08-22）**
-> - `SPEC.md` 与 `README.md` 已从工作树删除（仍保留在 `git HEAD`），按当前决策**保持删除**；业务事实以 `TASKS.md`、`TECH_STACK.md`、`开发计划.md` 与当前源码为准。
-> - 本索引的**内容型文档**（`ARCHITECTURE.md` / `API_REFERENCE.md` / `DB_SCHEMA.md` / `BUSINESS_DOMAIN.md`）尚未建立；本文件先行补齐语义索引，内容型文档按需由 `doc-update` 后续填充。
-> - ⚠️ 已知偏差：`.coderules` §1 仍引用 `SPEC.md` 为权威摘要，与「SPEC.md 已删除」的现状不符，待后续统一（见文末「待办」）。
+> **文档状态说明（2026-09-01 更新）**
+> - `README.md` 已从工作树删除；`spec.md`（即 `SPEC.md`，Windows 大小写不敏感视为同一文件）**存在且为现行项目摘要**。业务事实以 `spec.md`、`TASKS.md`、`TECH_STACK.md`、`开发计划.md` 与当前源码为准。
+> - 本索引的**内容型文档**（`ARCHITECTURE.md` / `API_REFERENCE.md` / `DB_SCHEMA.md` / `BUSINESS_DOMAIN.md`）均已建立（骨架 + 索引），细节由 `doc-update` 持续从源码增量填充。
+> - 架构已于 `changes/007` 由 SQLite 切换为外部 PostgreSQL-only，并于 `changes/006` / `009` / `010` / `013` 引入 Redis（限流 / 防重放 / 封禁 / 短信验证码 / 队列 / 缓存等临时派生状态）；本文其余章节据此同步。
 
 ---
 
@@ -20,7 +20,7 @@
 | `design-qa.md` | 现行 | 设计 QA 验收标准 |
 | `docs/CONTEXT_SUMMARY.md` | **本文件** | 语义索引（模块 → 职责 → 路径） |
 | `docs/REDIS_KEYS.md` | 现行 | Redis 键命名规范与清单（安全态临时键） |
-| `SPEC.md` | 已删除 | 原业务逻辑规格书（保留于 HEAD，不再作为工作树事实） |
+| `spec.md` | 现行 | 项目摘要（即 `SPEC.md`，Windows 大小写不敏感同一文件），权威摘要之一 |
 | `README.md` | 已删除 | 原项目说明（保留于 HEAD，不再作为工作树事实） |
 
 ---
@@ -79,7 +79,7 @@
 
 | 资产 | 路径 / 说明 |
 |---|---|
-| 源码 Provider 目录 | `backend/app/providers/`（共 47 个预设；5 个 legacy 仅存 DB，不计入源码事实） |
+| 源码 Provider 预设 | `backend/app/services/provider_catalog.py` · `providers.py` · `seed.py`（共 47 个预设；`providers/` 目录已废弃为空，5 个 legacy 仅存 DB） |
 | Prompt 资产（8 类） | `backend/app/prompts/`：`ecommerce-meta`、`aplus-meta`(→`aplus_meta_prompt_0729.md`)、`product-vision`、`copywriting-assist`、`edit-rewrite`、`image-text-edit`、`content-safety-review`、`ecommerce-video-meta-15s` |
 | 静态资源 | `backend/app/static/demo/`、`backend/app/static/watermarks/` |
 
@@ -100,7 +100,7 @@
 
 ## 4. 数据模型摘要（PostgreSQL · `backend/app/models.py`）
 
-> 当前 Alembic head 为 `a7c4e9f21b68`（补齐 PostgreSQL schema 索引与外键）。业务数据只允许外部 PostgreSQL；旧 SQLite 备份仅审计保留。
+> 当前 Alembic head 为 `d1e2f3a4b5c6`（add_task_notify_channels）。业务数据只允许外部 PostgreSQL；旧 SQLite 备份仅审计保留。
 
 | 分组 | 表 |
 |---|---|
@@ -145,8 +145,8 @@
 
 ## 6. 待办 / 偏差
 
-- [ ] **`.coderules` §1 偏差**：仍写「`SPEC.md` 为权威摘要」，与 SPEC.md 已删除现状冲突；建议将 §1 改为引用 `TASKS.md`/`TECH_STACK.md` 为权威，或显式标注 SPEC.md 已弃用。
-- [ ] 内容型文档未建：`ARCHITECTURE.md`、`API_REFERENCE.md`、`DB_SCHEMA.md`、`BUSINESS_DOMAIN.md` 待后续 `doc-update` 从源码增量填充。
+- [x] **已对齐**：`.coderules` §1 引用 `SPEC.md`（即 `spec.md`）为权威摘要，与现状一致（`spec.md` 存在于工作树）；`README.md` 已删除，相关引用已清除。
+- [x] 内容型文档已建立：`ARCHITECTURE.md`、`API_REFERENCE.md`、`DB_SCHEMA.md`、`BUSINESS_DOMAIN.md` 作为骨架存在，细节由 `doc-update` 从源码增量填充。
 - [ ] `changes/` 仍滞留 3 个变更，均因质量门禁未过而**未归档**：
   - `006-redis-rate-limit-verification` — 3 项 `[FAIL]`，Docker Compose 运行时验证未执行。
   - `007-sqlite-to-postgresql-migration` — 1 项 `[FAIL]`（Compose 后端连接校验外部 PostgreSQL）。

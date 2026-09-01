@@ -38,6 +38,7 @@
 | GET  | `/notifications` | 通知列表 |
 | POST | `/notifications/{notification_id}/read` | 标记已读 |
 | POST | `/notifications/read-all` | 全部已读 |
+| POST | `/account/feishu-webhook/test` | 飞书 Webhook 连通性测试 |
 
 ### 公开 / 工作台 — `public.py`（`/api/v1`）
 
@@ -133,5 +134,20 @@
 | POST | `/workflows/{workflow_id}/versions/{version_id}/activate` | 启用版本 |
 | POST | `/workflows/{workflow_id}/versions/{version_id}/dryrun` | Workflow 试跑 |
 | GET  | `/logs` | 运行日志 |
+
+#### 敏感词检测 — `admin.py`（`/api/v1/admin`，需 admin）
+
+> 由 `changes/014-sensitive-information-detection` / `015-batch-import-sensitive-words` 引入（套图/A+/视频/批量创建在 quota 预留与入队前完成卖点文本 + 上传图片 OCR 敏感词检测）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET  | `/sensitive-words` | 敏感词列表 |
+| POST | `/sensitive-words/preview` | 变体实时预览 |
+| POST | `/sensitive-words` | 新建敏感词 |
+| POST | `/sensitive-words/bulk` | 批量导入敏感词 |
+| PATCH| `/sensitive-words/settings` | 全局开关 / 上限配置 |
+| PATCH| `/sensitive-words/{word_id}` | 修改敏感词 |
+| DELETE | `/sensitive-words/{word_id}` | 删除敏感词 |
+| POST | `/sensitive-words/snapshot/rebuild` | 重建 Aho-Corasick 快照 |
 
 > 响应模型定义在 `backend/app/schemas.py`；完整字段与错误码待 `doc-update` 补全。

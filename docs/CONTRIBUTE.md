@@ -339,7 +339,7 @@ onBeforeUnmount(() => {
 
 ------
 
-## 三、后端规范（Python 3.10 + FastAPI）
+## 三、后端规范（Python 3.13 + FastAPI）
 
 ### 3.1 编码风格与格式化
 
@@ -510,7 +510,7 @@ class UserResponse(BaseModel):
 
 ### 3.5 SQLAlchemy 2.0 模型规范
 
-**异步优先**：必须使用 `AsyncSession`，禁止使用同步 `Session`-[-50](https://dev.to/myougatheaxo/pythonfastapi-development-with-claude-code-claudemd-setup-hooks-and-best-practices-1f11#1)
+**会话架构**：本项目采用同步 SQLAlchemy `Session`（`database.py` 的 `sessionmaker(class_=Session)`），外部模型调用经 `httpx.AsyncClient` 在进程内异步任务中执行；暂缓 `AsyncSession` 全量迁移，禁止将既有同步会话盲目改写为 `AsyncSession`。
 
 **模型定义**（使用 `Mapped` 注解）-：
 
@@ -544,7 +544,7 @@ class User(Base):
 
 - 使用 `select()` 风格（非旧的 `query()` 风格）
 - 使用 `selectinload()` 进行预加载
-- 始终将 `AsyncSession` 作为上下文管理器使用
+- 始终将（同步）`Session` 作为上下文管理器使用（本项目为同步会话架构）
 
 python
 
@@ -557,8 +557,8 @@ python
 下载
 
 ```
-async def get_user_posts(db: AsyncSession, user_id: int) -> list[Post]:
-    result = await db.execute(
+def get_user_posts(db: Session, user_id: int) -> list[Post]:
+    result = db.execute(
         select(Post)
         .where(Post.user_id == user_id)
         .options(selectinload(Post.author))

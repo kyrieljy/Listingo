@@ -1,15 +1,15 @@
 # DB_SCHEMA — 数据库设计
 
 > 本文件为骨架，权威 DDL 见 `backend/app/models.py`。完整字段由后续 `doc-update` 从模型抽取补全。
-> 当前 Alembic 单头以 `TASKS.md` 记为 `4d5e6f7a8b9c`。
+> 当前 Alembic head 为 `d1e2f3a4b5c6`（add_task_notify_channels）。
 
 ## 约定
 
-- 数据库类型：SQLite（本机/私有化唯一持久化源）。
+- 数据库类型：PostgreSQL 17（本机/私有化唯一持久化源）。
 - ORM：SQLAlchemy 2.0（同步会话）。
-- 迁移：Alembic（`backend/alembic.ini`，`backend/alembic/versions/`）。
+- 迁移：Alembic（`backend/alembic.ini`，script_location = `backend/migrations`，版本位于 `backend/migrations/versions/`）。
 - 命名：`Base` + `TimestampMixin`（含 `created_at`/`updated_at`）；表名 snake_case。
-- 不提交：运行时 `data/listingo.sqlite3`、`.secret_key` 不进入 Git。
+- 不提交：`.secret_key` 不进入 Git；运行时 DB 为外部 PostgreSQL。`data/listingo.sqlite3` 为 SQLite→PostgreSQL 切换前的遗留库（已 gitignore、非运行时库、可删），审计备份仅 `data/backups/*.sqlite3` 不提交。
 
 ## 表结构（按业务分组）
 
@@ -31,8 +31,7 @@
 ### 短信
 | 表 | 职责 |
 |---|---|
-| `SmsConfig` | 短信渠道配置 |
-| `SmsVerificationCode` | 短信验证码（含管理员二次验证） |
+| `SmsConfig` | 短信渠道配置（验证码本体与计数在 Redis，见 `docs/REDIS_KEYS.md`） |
 
 ### 订阅 / 计费
 | 表 | 职责 |

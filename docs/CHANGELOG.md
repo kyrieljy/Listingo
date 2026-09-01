@@ -6,7 +6,7 @@
 ## 文档骨架建立（2026-08-22 · init / doc-update）
 
 - 建立 `docs/` 全套骨架：`CONTEXT_SUMMARY.md`（语义索引）、`ARCHITECTURE.md`、`API_REFERENCE.md`、`DB_SCHEMA.md`、`BUSINESS_DOMAIN.md`、`AGENTS.md`、`CHANGELOG.md`。
-- 确认 `SPEC.md`/`README.md` 保持删除；权威事实源收敛为 `TASKS.md` / `TECH_STACK.md` / `开发计划.md` 与当前源码。
+- 确认 `README.md` 已删除（`spec.md` 即 `SPEC.md`，Windows 大小写不敏感视为同一文件，为现行项目摘要）；权威事实源收敛为 `spec.md` / `TASKS.md` / `TECH_STACK.md` / `开发计划.md` 与当前源码。
 
 ## 近期 Git 历史锚点（节选）
 
@@ -45,7 +45,7 @@
 - 新增逐项注释的 `.env.local` 与 `.env.production`（含义 / 使用位置 / 变量配置 三行注释）。`Settings` 默认加载 `.env.local`，经 `LISTINGO_ENV_FILE` 切换生产文件，真实环境变量优先于 dotenv。CORS 白名单、会话 / 刷新 TTL、Cookie Secure、调试短信码（移除内置 `246810`，空值时随机生成）、短信 HTTP 超时、后端端口改为读取配置；Compose 以 `${LISTINGO_ENV_FILE:-.env.local}` 注入，Uvicorn、Vite 开发代理与前端 Nginx 模板统一读 `LISTINGO_PORT`。新增 `test_config.py`（配置解析、CORS、会话 Cookie、短信配置引用），后端全量 169 passed，前端 typecheck 与 build 通过。遗留：`docker compose config` 运行时校验因本机无 Docker CLI 未执行。关联模块：配置、应用装配、认证会话、短信、部署编排。
 
 ### 014-sensitive-information-detection — 2026-08-30
-- 运营后台新增「敏感词」栏目：全局开关、词 CRUD、人工别名、实时变体预览、快照状态与重建；套图/A+/视频/批量创建在 quota 预留与入队前完成卖点文本 + 上传图片 OCR 敏感词检测，命中返回 422「包含敏感信息」且不留 quota/不入队。新增 `SensitiveWordConfig`/`SensitiveWord`/`SensitiveWordSnapshot` 三表与无 TTL 常驻 Redis 快照（`sensitive:words:meta`/`snapshot`）；Aho-Corasick 一次扫描多文本视图；套图/A+ 商品视觉事实新增 `is_pornography`/`is_violence`/`is_politics` 布尔字段阻断（默认 0 兼容旧 Prompt）。OCR 改为进程级单例并启动自动预热，配置变更清理旧实例并重预热。`docs/REDIS_KEYS.md` 新增常驻快照键段；迁移 head：`c0a1b2c3d4e5`。
+- 运营后台新增「敏感词」栏目：全局开关、词 CRUD、人工别名、实时变体预览、快照状态与重建；套图/A+/视频/批量创建在 quota 预留与入队前完成卖点文本 + 上传图片 OCR 敏感词检测，命中返回 422「包含敏感信息」且不留 quota/不入队。新增 `SensitiveWordConfig`/`SensitiveWord`/`SensitiveWordSnapshot` 三表与无 TTL 常驻 Redis 快照（`sensitive:words:meta`/`snapshot`）；Aho-Corasick 一次扫描多文本视图；套图/A+ 商品视觉事实新增 `is_pornography`/`is_violence`/`is_politics` 布尔字段阻断（默认 0 兼容旧 Prompt）。OCR 改为进程级单例并启动自动预热，配置变更清理旧实例并重预热。`docs/REDIS_KEYS.md` 新增常驻快照键段；迁移：`b9f4d2a6c7e8`（敏感词三表）/ `c0a1b2c3d4e5`（`ExecutionLog.aplus_job_id` 关联，同变更 014 的 A+ 子项）。
 
 ### 015-batch-import-sensitive-words — 2026-08-30
 - 运营后台「敏感词」新增「批量导入」卡片：多行文本框按换行或逗号（含中文逗号）切分，后端 `POST /admin/sensitive-words/bulk` 一次性建词（`terms/enabled/note`），按 `normalized_term` 去重、跳过已存在与空项、超长/无效计入 `errors`；快照重建移交 `BackgroundTasks` 异步执行，请求立即返回 `rebuild_scheduled=true`，前端 `bulkCreateSensitiveWords` 单独设 `timeout:180_000`。后续 UI 迭代：状态开关改为纯状态药丸（无文字）、「变体」列直接列举全部变体、清单顶部新增实时搜索（按敏感词/别名/变体匹配）。新增 `test_sensitive_word_bulk.py`（含 300 词大批量回归）。

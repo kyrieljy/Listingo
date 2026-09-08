@@ -127,11 +127,14 @@ class MemoryStorage(RateLimitStorage):
 
     def _make_room(self, key: str, *, allow_eviction: bool) -> bool:
         self._remove_expired_locked()
-        if key in self._items or len(self._items) < self._max_size:
+        # Persistent facts are configuration visibility, not bounded request
+        # state, so they do not consume nonce/LRU capacity.
+        bounded_count = sum(1 for entry in self._items.values() if entry.evictable or entry.expires_at is not None)
+        if key in self._items or bounded_count < self._max_size:
             return True
         # Correctness keys (nonce, locks) opt out of LRU; only derived-state
-        # entries may surrender their slot. The new entry still records whether
-        # it can be evicted by a later derived-state write.
+        # entries may surrender their slot, even when the incoming key itself is
+        # correctness state. The new entry still records its own eviction class.
         for candidate, entry in self._items.items():
             if entry.evictable:
                 del self._items[candidate]

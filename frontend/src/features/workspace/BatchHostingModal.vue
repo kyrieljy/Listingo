@@ -521,6 +521,7 @@ async function submitBatch() {
     historyOpen.value = true
     message.success('任务已在后台运行，可在消息中心查看结果')
   } catch (error: unknown) {
+    if (authStore.showInsufficientBeans(error)) return
     message.error(userFacingApiErrorMessage(error) || '批量生成托管提交失败')
   } finally {
     submitting.value = false

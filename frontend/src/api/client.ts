@@ -87,6 +87,12 @@ export function apiErrorStatus(error: unknown): number | undefined {
   return apiError.response?.status
 }
 
+export function isInsufficientBeansError(error: unknown): boolean {
+  const detail = (error as { response?: { data?: ApiErrorPayload | { detail?: { code?: unknown } } } })?.response?.data
+  const nested = (detail as { detail?: { code?: unknown } } | undefined)?.detail
+  return typeof nested === 'object' && nested !== null && nested.code === 'INSUFFICIENT_BEANS'
+}
+
 api.interceptors.response.use(
   (response) => response,
   (error: AxiosError<ApiErrorPayload>) => {
@@ -239,7 +245,22 @@ export type BatchJob = {
 
 export type UserRole = 'user' | 'admin'
 export type UserStatus = 'active' | 'disabled'
-export type PlanCode = 'free' | 'standard' | 'advanced' | 'enterprise' | 'internal'
+export type PlanCode =
+  | 'free'
+  | 'internal'
+  | 'monthly_basic'
+  | 'monthly_standard'
+  | 'monthly_pro'
+  | 'yearly_basic'
+  | 'yearly_standard'
+  | 'yearly_flagship'
+  | 'enterprise_custom'
+  | 'standard'
+  | 'advanced'
+  | 'enterprise'
+export type BillingCycle = 'monthly' | 'yearly'
+export type EntitlementValue = boolean | string | number
+export type PlanEntitlements = Record<string, EntitlementValue>
 
 export type AuthUserDto = {
   id: string
@@ -266,7 +287,7 @@ export type AuthUserDto = {
 export type AuthMeResponse = { user: AuthUserDto | null; unread_count: number }
 export type SmsPurpose = 'login' | 'register' | 'reset_password' | 'change_phone' | 'admin'
 export type SmsSendResponse = { ok: boolean; expires_in: number; message: string; debug_code?: string | null }
-export type PlanPriceDto = { id: string; billing_cycle: 'monthly' | 'yearly'; amount_cents: number | null; currency: string; price_label: string; period_label: string }
+export type PlanPriceDto = { id: string; billing_cycle: BillingCycle; amount_cents: number | null; currency: string; price_label: string; period_label: string }
 export type PlanQuotaRuleDto = { id: string; action_key: string; action_label: string; unit: string; monthly_limit: number | null; cost_multiplier: number; warning_threshold: number; enabled: boolean }
 export type SubscriptionPlanDto = {
   id: string
@@ -279,21 +300,51 @@ export type SubscriptionPlanDto = {
   visible: boolean
   is_internal: boolean
   is_enterprise: boolean
+  billing_cycle: BillingCycle | 'none' | 'custom' | 'internal' | 'legacy'
+  beans: number | null
+  recommended: boolean
+  contact_sales: boolean
   features: string[]
+  entitlements: PlanEntitlements
   contact_text: string
   contact_phone: string
   prices: PlanPriceDto[]
   quota_rules: PlanQuotaRuleDto[]
   sort_order: number
 }
-export type QuotaRowDto = PlanQuotaRuleDto & { used: number; remaining: number | null; period: string }
-export type QuotaSummaryDto = { plan: SubscriptionPlanDto; period: string; rows: QuotaRowDto[] }
+export type BeanExpiryBatchDto = { id: string; remaining_beans: number; expires_at: string | null; source_type: string; description: string }
+export type QuotaSummaryDto = {
+  plan: SubscriptionPlanDto
+  subscription_ends_at: string | null
+  beans_per_image: number
+  available_beans: number | null
+  reserved_beans: number | null
+  unlimited: boolean
+  expiring_batches: BeanExpiryBatchDto[]
+}
+export type BeanPackDto = {
+  id: string
+  code: string
+  name: string
+  description: string
+  amount_cents: number
+  currency: string
+  beans: number
+  recommended: boolean
+  enabled: boolean
+  visible: boolean
+  sort_order: number
+}
 export type PaymentOrderDto = {
   id: string
   order_no: string
+  product_type: 'subscription' | 'bean_pack' | string
+  bean_pack_code: string
+  bean_pack_name: string
+  beans: number | null
   plan_code: PlanCode
   plan_name: string
-  billing_cycle: 'monthly' | 'yearly'
+  billing_cycle: string
   amount_cents: number | null
   currency: string
   status: string
@@ -301,6 +352,27 @@ export type PaymentOrderDto = {
   expires_at: string | null
   created_at: string
 }
+export type EnterpriseLeadMonthlyUsage = 'under_1000' | '1000_5000' | '5000_20000' | 'over_20000' | 'unsure'
+export type EnterpriseLeadPayload = {
+  name: string
+  phone: string
+  wechat: string
+  company_or_shop: string
+  monthly_usage: EnterpriseLeadMonthlyUsage
+  requirement: string
+}
+export type EnterpriseLeadDto = EnterpriseLeadPayload & {
+  id: string
+  user_id: string | null
+  account_phone: string
+  source: string
+  status: 'pending' | 'following' | 'converted' | 'invalid'
+  note: string
+  created_at: string
+  updated_at: string
+}
+export type CommercialBillingConfigDto = { beans_per_image: number; refund_on_system_failure: boolean; video_enabled: boolean }
+export type AdminCommercialConfigDto = CommercialBillingConfigDto & { plans: SubscriptionPlanDto[]; bean_packs: BeanPackDto[] }
 export type NotificationDto = { id: string; category: string; title: string; body: string; unread: boolean; metadata: Record<string, unknown>; created_at: string; read_at: string | null }
 export type LoginEventDto = { id: string; method: string; status: string; ip_address: string; user_agent: string; message: string; created_at: string }
 export type MonitoringGranularity = 'hour' | 'day' | 'week'
@@ -592,12 +664,20 @@ export async function getQuotaMeApi(): Promise<QuotaSummaryDto> {
   return (await api.get('/quota/me')).data
 }
 
-export async function createSubscriptionOrderApi(payload: { plan_code: string; billing_cycle: 'monthly' | 'yearly' }): Promise<PaymentOrderDto> {
+export async function createSubscriptionOrderApi(payload: { plan_code?: string; billing_cycle?: BillingCycle; bean_pack_code?: string }): Promise<PaymentOrderDto> {
   return (await api.post('/subscription/orders', payload)).data
 }
 
 export async function mockPayOrderApi(orderId: string): Promise<PaymentOrderDto> {
   return (await api.post(`/subscription/orders/${orderId}/mock-pay`, undefined, { headers: { 'X-Request-Nonce': createRequestNonce() } })).data
+}
+
+export async function listBeanPacksApi(): Promise<BeanPackDto[]> {
+  return (await api.get('/bean-packs')).data
+}
+
+export async function createEnterpriseLeadApi(payload: EnterpriseLeadPayload): Promise<EnterpriseLeadDto> {
+  return (await api.post('/enterprise-leads', payload)).data
 }
 
 export async function listNotificationsApi(): Promise<NotificationDto[]> {
@@ -624,8 +704,40 @@ export async function adminListPlansApi(): Promise<SubscriptionPlanDto[]> {
   return (await api.get('/admin/subscription-plans')).data
 }
 
-export async function adminUpdatePlanApi(id: string, payload: Partial<Pick<SubscriptionPlanDto, 'name' | 'description' | 'badge' | 'cta' | 'visible' | 'enabled' | 'features' | 'contact_text' | 'contact_phone'>>): Promise<SubscriptionPlanDto> {
+export async function adminUpdatePlanApi(id: string, payload: Partial<Pick<SubscriptionPlanDto, 'name' | 'description' | 'badge' | 'cta' | 'visible' | 'enabled' | 'features' | 'contact_text' | 'contact_phone' | 'billing_cycle' | 'beans' | 'recommended' | 'contact_sales' | 'entitlements'>> & { amount_cents?: number | null }): Promise<SubscriptionPlanDto> {
   return (await api.patch(`/admin/subscription-plans/${id}`, payload)).data
+}
+
+export async function adminListBeanPacksApi(): Promise<BeanPackDto[]> {
+  return (await api.get('/admin/bean-packs')).data
+}
+
+export async function adminCreateBeanPackApi(payload: Partial<BeanPackDto> & { code: string; name: string; amount_cents: number; beans: number }): Promise<BeanPackDto> {
+  return (await api.post('/admin/bean-packs', payload)).data
+}
+
+export async function adminUpdateBeanPackApi(id: string, payload: Partial<BeanPackDto>): Promise<BeanPackDto> {
+  return (await api.patch(`/admin/bean-packs/${id}`, payload)).data
+}
+
+export async function adminGetCommercialConfigApi(): Promise<AdminCommercialConfigDto> {
+  return (await api.get('/admin/commercial-config')).data
+}
+
+export async function adminListEnterpriseLeadsApi(params?: { status?: string; q?: string; created_from?: string; created_to?: string }): Promise<EnterpriseLeadDto[]> {
+  return (await api.get('/admin/enterprise-leads', { params })).data
+}
+
+export async function adminUpdateEnterpriseLeadStatusApi(id: string, status: EnterpriseLeadDto['status']): Promise<EnterpriseLeadDto> {
+  return (await api.patch(`/admin/enterprise-leads/${id}/status`, { status })).data
+}
+
+export async function adminUpdateEnterpriseLeadNoteApi(id: string, note: string): Promise<EnterpriseLeadDto> {
+  return (await api.patch(`/admin/enterprise-leads/${id}/note`, { note })).data
+}
+
+export async function adminExportEnterpriseLeadsApi(): Promise<Blob> {
+  return (await api.get('/admin/enterprise-leads/export', { responseType: 'blob' })).data
 }
 
 export async function adminUpdateQuotaRuleApi(id: string, payload: { monthly_limit?: number | null; cost_multiplier?: number; warning_threshold?: number; enabled?: boolean }): Promise<PlanQuotaRuleDto> {

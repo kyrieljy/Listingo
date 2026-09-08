@@ -30,7 +30,6 @@ from backend.app.services.runtime_cache import active_prompt_version_id
 from backend.app.services.providers import HELLOBABYGO_VIDEO_ADAPTER, ProviderClient
 from backend.app.services.redaction import safe_json
 from backend.app.services.storage import public_file_url
-from backend.app.services.subscriptions import confirm_quota, release_quota
 
 
 FINAL_STATUSES = {"succeeded", "partial_failed", "failed", "cancelled", "partial_cancelled"}
@@ -306,10 +305,8 @@ def finalize_video_cancellation(session: Session, job: VideoJob) -> None:
 
 
 def sync_video_quota(session: Session, job: VideoJob) -> None:
-    if job.status in {"succeeded", "partial_failed"}:
-        confirm_quota(session, ref_type="video_job", ref_id=job.id)
-    elif job.status in {"failed", "cancelled", "partial_cancelled"}:
-        release_quota(session, ref_type="video_job", ref_id=job.id)
+    # Video generation is disabled for V1; preserved jobs remain audit-only.
+    return
 
 
 def cancel_video_job(session: Session, job: VideoJob) -> VideoJob:

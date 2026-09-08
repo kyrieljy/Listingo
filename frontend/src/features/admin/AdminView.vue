@@ -13,6 +13,8 @@ import {
   PlusOutlined, SaveOutlined, SettingOutlined, ThunderboltOutlined, UploadOutlined, DashboardOutlined,
 } from '@ant-design/icons-vue'
 import BrandLogo from '../../components/BrandLogo.vue'
+import CommercialCatalogPanel from './CommercialCatalogPanel.vue'
+import EnterpriseLeadsPanel from './EnterpriseLeadsPanel.vue'
 import { api, assistCopywriting, assistVideoCopywriting, userFacingApiErrorMessage } from '../../api/client'
 import MonitoringDashboard from './MonitoringDashboard.vue'
 import SensitiveWordsPanel from './SensitiveWordsPanel.vue'
@@ -76,11 +78,10 @@ const clearingOcrCache=ref(false)
 const ocrEngineOptions=[{value:'paddleocr',label:'PaddleOCR（PP-OCRv6 优先）'},{value:'auto',label:'Auto（PaddleOCR + RapidOCR）'},{value:'rapidocr',label:'RapidOCR 兼容模式'}]
 const ocrModelOptions=computed(()=>ocrSettings.value.supported_models?.length?ocrSettings.value.supported_models:defaultOcrSettings.supported_models)
 const adminUsers=ref<any[]>([]); const adminPlans=ref<any[]>([]); const adminOrders=ref<any[]>([]); const smsSettings=ref<any>({}); const smsTest=ref({phone:'18928268686',purpose:'login'}); const smsTesting=ref(false); const smsTestResult=ref<any|null>(null); const broadcast=ref({title:'',body:''})
-const nav=[{key:'providers',label:'模型配置',icon:ApiOutlined},{key:'ops-monitoring',label:'运维监控',icon:DashboardOutlined},{key:'business-metrics',label:'运营指标监控',icon:BarChartOutlined},{key:'users',label:'用户管理',icon:SettingOutlined},{key:'subscriptions',label:'订阅额度',icon:FileTextOutlined},{key:'payments',label:'支付订单管理',icon:FileTextOutlined},{key:'sms',label:'短信服务',icon:SettingOutlined},{key:'notifications',label:'站内信',icon:FileTextOutlined},{key:'provider-health',label:'中转站健康',icon:ThunderboltOutlined},{key:'workflow',label:'Workflow',icon:BranchesOutlined},{key:'prompts',label:'提示词资产',icon:CodeOutlined},{key:'sensitive-words',label:'敏感词',icon:SafetyOutlined},{key:'ocr',label:'OCR配置',icon:FileTextOutlined},{key:'logs',label:'执行日志',icon:FileTextOutlined},{key:'settings',label:'基础配置',icon:SettingOutlined}]
+const nav=[{key:'providers',label:'模型配置',icon:ApiOutlined},{key:'ops-monitoring',label:'运维监控',icon:DashboardOutlined},{key:'business-metrics',label:'运营指标监控',icon:BarChartOutlined},{key:'users',label:'用户管理',icon:SettingOutlined},{key:'subscriptions',label:'商业化目录',icon:FileTextOutlined},{key:'enterprise-leads',label:'企业线索',icon:FileTextOutlined},{key:'payments',label:'支付订单管理',icon:FileTextOutlined},{key:'sms',label:'短信服务',icon:SettingOutlined},{key:'notifications',label:'站内信',icon:FileTextOutlined},{key:'provider-health',label:'中转站健康',icon:ThunderboltOutlined},{key:'workflow',label:'Workflow',icon:BranchesOutlined},{key:'prompts',label:'提示词资产',icon:CodeOutlined},{key:'sensitive-words',label:'敏感词',icon:SafetyOutlined},{key:'ocr',label:'OCR配置',icon:FileTextOutlined},{key:'logs',label:'执行日志',icon:FileTextOutlined},{key:'settings',label:'基础配置',icon:SettingOutlined}]
 const sectionTitle=computed(()=>nav.find((item)=>item.key===section.value)?.label||'运营后台')
-const adminSectionDescription=computed(()=>section.value==='ops-monitoring'?'按中转站、节点、业务链路和队列状态监控成功率、失败率与耗时':section.value==='business-metrics'?'观察用户画像、核心功能点击率、平台偏好、尺寸偏好、A+ 模块和视频类型表现':section.value==='providers'?'统一配置 LLM 与图片模型，密钥加密保存':section.value==='workflow'?'低代码节点画布、版本与启用校验':section.value==='prompts'?'唯一来源为用户上传 MD；Artflo 提示词不参与执行':section.value==='sensitive-words'?'运营维护敏感词清单与检测开关，覆盖套图、A+ 与视频文本的敏感信息预检':section.value==='ocr'?'管理 OCR 引擎、模型回退、噪声过滤和模型预热':section.value==='settings'?'配置视频 Live 模式所需的公网资源地址':'按任务、节点、模型与状态追踪执行链路')
+const adminSectionDescription=computed(()=>section.value==='ops-monitoring'?'按中转站、节点、业务链路和队列状态监控成功率、失败率与耗时':section.value==='business-metrics'?'观察用户画像、核心功能点击率、平台偏好、尺寸偏好、A+ 模块和视频类型表现':section.value==='providers'?'统一配置 LLM 与图片模型，密钥加密保存':section.value==='workflow'?'低代码节点画布、版本与启用校验':section.value==='prompts'?'唯一来源为用户上传 MD；Artflo 提示词不参与执行':section.value==='sensitive-words'?'运营维护敏感词清单与检测开关，覆盖套图、A+ 与视频文本的敏感信息预检':section.value==='ocr'?'管理 OCR 引擎、模型回退、噪声过滤和模型预热':section.value==='subscriptions'?'维护月付 / 年付套餐、企业联系套餐、补豆包与固定计费规则':section.value==='enterprise-leads'?'跟进匿名或登录提交的企业定制线索，并导出 CSV':section.value==='payments'?'查看订阅和补豆包订单的商品、金额与支付状态':section.value==='settings'?'配置视频 Live 模式所需的公网资源地址':'按任务、节点、模型与状态追踪执行链路')
 const adminUserStats=computed(()=>[{label:'用户总数',value:adminUsers.value.length},{label:'管理员',value:adminUsers.value.filter((user)=>user.role==='admin').length},{label:'正常账号',value:adminUsers.value.filter((user)=>user.status==='active').length},{label:'套餐数量',value:adminPlans.value.length}])
-const subscriptionStats=computed(()=>[{label:'套餐总数',value:adminPlans.value.length},{label:'前端展示',value:adminPlans.value.filter((plan)=>plan.visible&&!plan.is_internal).length},{label:'内部套餐',value:adminPlans.value.filter((plan)=>plan.is_internal).length},{label:'额度规则',value:adminPlans.value.filter(planShowsQuotaRules).reduce((total,plan)=>total+(plan.quota_rules?.length||0),0)}])
 const paymentStats=computed(()=>[{label:'订单总数',value:adminOrders.value.length},{label:'已支付',value:adminOrders.value.filter((order)=>order.status==='paid').length},{label:'待支付',value:adminOrders.value.filter((order)=>order.status==='pending').length}])
 const providerCategories=computed(()=>groupProviderCategoriesByBusinessRoute(providers.value,selectedProviderGroups.value))
 const selectedProviderRoutes=computed(()=>selectedProvider.value?providerRoutesForCapability(selectedProvider.value.capability):[])
@@ -108,22 +109,15 @@ async function loadLogs(){const params:Record<string,string>={};if(logFilters.va
 async function loadSection(){ loading.value=true; try{ if(section.value==='providers'||section.value==='provider-health'){providers.value=(await api.get('/admin/providers')).data;providerGroups.value=(await api.get('/admin/provider-groups')).data} if(section.value==='users'){adminUsers.value=(await api.get('/admin/users')).data;adminPlans.value=(await api.get('/admin/subscription-plans')).data} if(section.value==='subscriptions')adminPlans.value=(await api.get('/admin/subscription-plans')).data; if(section.value==='payments')adminOrders.value=(await api.get('/admin/payment-orders')).data; if(section.value==='sms')smsSettings.value=(await api.get('/admin/sms-settings')).data; if(section.value==='prompts'){prompts.value=(await api.get('/admin/prompts')).data;if(prompts.value[0])await loadPrompt(prompts.value[0].id)} if(section.value==='workflow'){workflows.value=(await api.get('/admin/workflows')).data;if(workflows.value[0])await loadWorkflow(workflows.value[0].id)} if(section.value==='ocr')ocrSettings.value={...defaultOcrSettings,...(await api.get('/admin/ocr-settings')).data}; if(section.value==='logs')await loadLogs(); if(section.value==='settings')runtimeSettings.value=(await api.get('/admin/runtime-settings')).data }catch{message.error('后台数据加载失败，请确认 API 已启动')}finally{loading.value=false}}
 function go(key:string){router.push(`/admin/${key}`)}
 async function saveAdminUser(user:any){await api.patch(`/admin/users/${user.id}`,{role:user.role,status:user.status,plan_code:user.plan});await loadSection();message.success('用户已保存')}
-async function saveAdminPlan(plan:any){await api.patch(`/admin/subscription-plans/${plan.id}`,{name:plan.name,description:plan.description,badge:plan.badge,cta:plan.cta,visible:plan.visible,enabled:plan.enabled,features:plan.features,contact_text:plan.contact_text,contact_phone:plan.contact_phone});await loadSection();message.success('套餐已保存')}
-async function saveQuotaRule(rule:any){await api.patch(`/admin/quota-rules/${rule.id}`,{monthly_limit:rule.monthly_limit,cost_multiplier:rule.cost_multiplier,warning_threshold:rule.warning_threshold,enabled:rule.enabled});message.success('额度规则已保存')}
 async function saveSmsSettings(){smsSettings.value=(await api.patch('/admin/sms-settings',smsSettings.value)).data;message.success('短信配置已保存')}
 function adminApiErrorMessage(error:any,fallback:string){const text=userFacingApiErrorMessage(error);return text==='操作失败，请稍后重试'?fallback:text}
 async function testSmsSettings(){if(!smsTest.value.phone.trim())return message.warning('请输入测试手机号');smsTesting.value=true;smsTestResult.value=null;try{const result=(await api.post('/admin/sms-settings/test-send',smsTest.value)).data;smsTestResult.value=result;message.success(result.debug_code?`测试发送成功，调试验证码 ${result.debug_code}`:result.message)}catch(error:any){const text=adminApiErrorMessage(error,'测试发送失败，请检查短信配置');smsTestResult.value={ok:false,message:text};message.error(text)}finally{smsTesting.value=false}}
 async function sendBroadcast(){if(!broadcast.value.title.trim())return message.warning('请输入通知标题');const result=(await api.post('/admin/notifications/broadcast',{title:broadcast.value.title,body:broadcast.value.body})).data;broadcast.value={title:'',body:''};message.success(`已发送 ${result.count} 条站内信`)}
 function adminPlanOptions(user:any){return adminPlans.value.length?adminPlans.value:[{code:user.plan,name:user.plan}]}
 function userInitial(user:any){return String(user.display_name||user.username||user.uid||'用').slice(0,1).toUpperCase()}
-function planPriceLabel(plan:any,cycle:'monthly'|'yearly'){if(plan.is_enterprise)return '商务报价';const price=plan.prices?.find((item:any)=>item.billing_cycle===cycle)||plan.prices?.[0];if(!price)return '未配置';if(price.amount_cents===null)return price.price_label||'内部';return price.price_label||`¥${(price.amount_cents/100).toFixed(0)}`}
-function planPeriodLabel(plan:any,cycle:'monthly'|'yearly'){if(plan.is_enterprise)return '';const price=plan.prices?.find((item:any)=>item.billing_cycle===cycle)||plan.prices?.[0];return price?.period_label||''}
-function quotaLimitLabel(rule:any){return rule.monthly_limit===null||rule.monthly_limit===undefined?'不限':`${rule.monthly_limit}${rule.unit||''}`}
-function planMonthlyQuotaTotal(plan:any){const rules=plan.quota_rules||[];if(rules.some((rule:any)=>rule.monthly_limit===null||rule.monthly_limit===undefined))return '不限';return rules.reduce((total:number,rule:any)=>total+Number(rule.monthly_limit||0),0)}
-function featurePreview(plan:any){return Array.isArray(plan.features)?plan.features.slice(0,4):[]}
-function planToneClass(plan:any){return plan.is_internal?'internal':plan.is_enterprise?'enterprise':plan.code==='advanced'?'advanced':plan.code==='standard'?'standard':'free'}
-function planShowsQuotaRules(plan:any){return !plan.is_enterprise&&!plan.is_internal}
 function moneyLabel(cents:number|null|undefined){return cents===null||cents===undefined?'企业联系':`¥${(cents/100).toFixed(2)}`}
+function orderProductLabel(order:any){return order.product_type==='bean_pack'?'补豆包':order.product_type==='subscription'?'订阅套餐':order.product_type||'历史订单'}
+function orderProductDetail(order:any){return order.product_type==='bean_pack'?`${order.bean_pack_name || order.bean_pack_code} · ${order.beans ?? 0} 豆`:`${order.plan_name || order.plan_code}`}
 function billingCycleLabel(cycle:string){return cycle==='yearly'?'年付':cycle==='monthly'?'月付':cycle}
 function orderStatusLabel(status:string){return status==='paid'?'已支付':status==='pending'?'待支付':status==='cancelled'?'已取消':status==='expired'?'已过期':status}
 function orderStatusClass(status:string){return ['paid','pending','cancelled','expired'].includes(status)?status:'default'}
@@ -219,67 +213,20 @@ function ocrAutoPrewarmSummary(){const status=ocrSettings.value?.prewarm_status;
         </div>
       </section>
       <section v-else-if="section==='subscriptions'" class="admin-module-shell">
-        <div class="admin-module-hero">
-          <div><span>PLANS & QUOTAS</span><h2>订阅额度管理</h2><p>套餐文案、展示开关、企业联系信息和每个业务动作的月额度都在这里维护。</p></div>
-          <div class="admin-hero-metrics"><article v-for="stat in subscriptionStats" :key="stat.label"><small>{{ stat.label }}</small><b>{{ stat.value }}</b></article></div>
-        </div>
-        <section class="admin-plan-board">
-          <article v-for="plan in adminPlans" :key="plan.id" :class="['admin-plan-card', 'tone-' + planToneClass(plan)]">
-            <header class="admin-plan-card-head">
-              <div class="admin-plan-kicker"><span>{{ plan.code }}</span><em v-if="plan.badge">{{ plan.badge }}</em><em v-if="plan.is_internal">内部</em></div>
-              <input v-model="plan.name" class="admin-plan-name-input" aria-label="套餐名称" />
-              <p>{{ plan.description || '未填写套餐描述' }}</p>
-              <div class="admin-plan-price-row">
-                <strong>{{ planPriceLabel(plan,'monthly') }}<small>{{ planPeriodLabel(plan,'monthly') }}</small></strong>
-                <span>{{ planPriceLabel(plan,'yearly') }}{{ planPeriodLabel(plan,'yearly') }}</span>
-              </div>
-              <div class="admin-plan-flags">
-                <label class="admin-switch"><input v-model="plan.enabled" type="checkbox" /><span></span>启用</label>
-                <label class="admin-switch"><input v-model="plan.visible" type="checkbox" /><span></span>前端展示</label>
-              </div>
-            </header>
-            <div class="admin-plan-fields">
-              <label>套餐描述<textarea v-model="plan.description" rows="3"></textarea></label>
-              <div>
-                <label>角标<input v-model="plan.badge" /></label>
-                <label>按钮文案<input v-model="plan.cta" /></label>
-              </div>
-              <template v-if="plan.is_enterprise">
-                <label>企业联系方式<input v-model="plan.contact_phone" placeholder="企业版可填写手机号或微信" /></label>
-                <label>企业联系文案<textarea v-model="plan.contact_text" rows="3" placeholder="企业定制、团队账号、私有化部署、专属支持等"></textarea></label>
-              </template>
-            </div>
-            <div v-if="featurePreview(plan).length" class="admin-feature-row"><span v-for="feature in featurePreview(plan)" :key="feature">{{ feature }}</span></div>
-            <button class="admin-save-button" @click="saveAdminPlan(plan)">保存套餐</button>
-            <section v-if="planShowsQuotaRules(plan)" class="admin-quota-stack">
-              <header><b>额度规则</b><small>月总额 {{ planMonthlyQuotaTotal(plan) }}</small></header>
-              <div v-for="rule in plan.quota_rules" :key="rule.id" class="admin-quota-row" :class="{off:!rule.enabled}">
-                <div class="admin-quota-row-head">
-                  <div class="admin-quota-title"><b>{{ rule.action_label }}</b><small>{{ quotaLimitLabel(rule) }} / {{ rule.action_key }}</small></div>
-                  <div class="admin-quota-actions">
-                    <label class="admin-mini-switch" title="启用额度规则"><input v-model="rule.enabled" type="checkbox" /><span></span></label>
-                    <button class="admin-text-button" @click="saveQuotaRule(rule)">保存</button>
-                  </div>
-                </div>
-                <div class="admin-quota-controls">
-                  <label><span>月额度</span><input v-model.number="rule.monthly_limit" type="number" min="0" /></label>
-                  <label><span>倍率</span><input v-model.number="rule.cost_multiplier" type="number" min="1" max="100" /></label>
-                  <label><span>告警%</span><input v-model.number="rule.warning_threshold" type="number" min="1" max="100" /></label>
-                </div>
-              </div>
-            </section>
-          </article>
-        </section>
+        <CommercialCatalogPanel />
+      </section>
+      <section v-else-if="section==='enterprise-leads'" class="admin-module-shell">
+        <EnterpriseLeadsPanel />
       </section>
       <section v-else-if="section==='payments'" class="admin-module-shell">
         <div class="admin-module-hero">
-          <div><span>PAYMENT ORDERS</span><h2>支付订单管理</h2><p>集中查看订阅订单、支付状态、套餐绑定和支付消息触发情况。</p></div>
+          <div><span>PAYMENT ORDERS</span><h2>支付订单管理</h2><p>集中查看订阅订单、补豆包订单、商品信息、金额与支付状态。</p></div>
           <div class="admin-hero-metrics"><article v-for="stat in paymentStats" :key="stat.label"><small>{{ stat.label }}</small><b>{{ stat.value }}</b></article></div>
         </div>
         <div class="admin-table-card">
           <table class="admin-data-table">
-            <thead><tr><th>订单号</th><th>套餐</th><th>周期</th><th>金额</th><th>状态</th><th>创建时间</th></tr></thead>
-            <tbody><tr v-for="order in adminOrders" :key="order.id"><td><code>{{ order.order_no }}</code></td><td><b>{{ order.plan_name }}</b><small>{{ order.plan_code }}</small></td><td>{{ billingCycleLabel(order.billing_cycle) }}</td><td>{{ moneyLabel(order.amount_cents) }}</td><td><span :class="['admin-status-pill','order-'+orderStatusClass(order.status)]">{{ orderStatusLabel(order.status) }}</span></td><td>{{ formatAdminTime(order.created_at) }}</td></tr></tbody>
+            <thead><tr><th>订单号</th><th>商品类型</th><th>商品</th><th>周期</th><th>金额</th><th>状态</th><th>创建时间</th></tr></thead>
+            <tbody><tr v-for="order in adminOrders" :key="order.id"><td><code>{{ order.order_no }}</code></td><td>{{ orderProductLabel(order) }}</td><td><b>{{ orderProductDetail(order) }}</b></td><td>{{ order.product_type === 'bean_pack' ? '--' : billingCycleLabel(order.billing_cycle) }}</td><td>{{ moneyLabel(order.amount_cents) }}</td><td><span :class="['admin-status-pill','order-'+orderStatusClass(order.status)]">{{ orderStatusLabel(order.status) }}</span></td><td>{{ formatAdminTime(order.created_at) }}</td></tr></tbody>
           </table>
         </div>
       </section>

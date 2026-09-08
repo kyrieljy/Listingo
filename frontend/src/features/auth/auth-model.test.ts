@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { userFacingApiErrorMessage } from '../../api/client'
-import { fallbackPlans, maskPhone, planFromDto, quotaFromDto, resolvePasswordRole } from './auth-model'
+import { fallbackPlans, hasEntitlement, maskPhone, planFromDto, resolvePasswordRole } from './auth-model'
 import authModalSource from './AuthModal.vue?raw'
 import authStoreSource from './auth-store.ts?raw'
 import userMenuSource from './UserMenu.vue?raw'
@@ -16,38 +16,63 @@ describe('auth model', () => {
     expect(maskPhone('+852 6123 4567')).toBe('+852 61****4567')
   })
 
-  it('keeps the requested plan catalog and quota buckets', () => {
-    expect(fallbackPlans.map((plan) => plan.key)).toEqual(['free', 'standard', 'advanced', 'enterprise'])
-    const rows = [
-      quotaFromDto({ id: '1', action_key: 'image_generation', action_label: '商品套图', unit: '张', monthly_limit: 330, used: 0, remaining: 330, period: '2026-08', cost_multiplier: 1, warning_threshold: 80, enabled: true }),
-      quotaFromDto({ id: '2', action_key: 'aplus_generation', action_label: 'A+', unit: '张', monthly_limit: 60, used: 0, remaining: 60, period: '2026-08', cost_multiplier: 1, warning_threshold: 80, enabled: true }),
-      quotaFromDto({ id: '3', action_key: 'video_generation', action_label: '视频', unit: '条', monthly_limit: 12, used: 0, remaining: 12, period: '2026-08', cost_multiplier: 1, warning_threshold: 80, enabled: true }),
-      quotaFromDto({ id: '4', action_key: 'edit_generation', action_label: '二次编辑', unit: '次', monthly_limit: 160, used: 0, remaining: 160, period: '2026-08', cost_multiplier: 1, warning_threshold: 80, enabled: true }),
-    ]
-    expect(rows.map((row) => row.key)).toEqual([
-      'image_generation',
-      'aplus_generation',
-      'video_generation',
-      'edit_generation',
+  it('keeps the commercial V1 plan catalog and bean entitlements', () => {
+    expect(fallbackPlans.map((plan) => plan.key)).toEqual([
+      'free',
+      'monthly_basic',
+      'monthly_standard',
+      'monthly_pro',
+      'yearly_basic',
+      'yearly_standard',
+      'yearly_flagship',
+      'enterprise_custom',
     ])
-    expect(planFromDto({ id: 'internal', code: 'internal', name: 'Internal', description: '', badge: '', cta: '', enabled: true, visible: false, is_internal: true, is_enterprise: false, features: [], contact_text: '', contact_phone: '', prices: [], quota_rules: [{ id: 'q', action_key: 'image_generation', action_label: '商品套图', unit: '张', monthly_limit: null, cost_multiplier: 1, warning_threshold: 80, enabled: true }], sort_order: 99 }).quota.image_generation).toBe('unlimited')
+    expect(fallbackPlans.find((plan) => plan.key === 'monthly_standard')?.beans).toBe(1560)
+    expect(hasEntitlement(fallbackPlans.find((plan) => plan.key === 'monthly_standard'), 'batch_generation')).toBe(true)
+    expect(hasEntitlement(fallbackPlans.find((plan) => plan.key === 'monthly_basic'), 'batch_generation')).toBe(false)
+
+    const internal = planFromDto({
+      id: 'internal-id',
+      code: 'internal',
+      name: 'Internal',
+      description: '',
+      badge: '',
+      cta: '',
+      enabled: true,
+      visible: false,
+      is_internal: true,
+      is_enterprise: false,
+      billing_cycle: 'internal',
+      beans: null,
+      recommended: false,
+      contact_sales: false,
+      features: [],
+      entitlements: { image_generation: true },
+      contact_text: '',
+      contact_phone: '',
+      prices: [],
+      quota_rules: [],
+      sort_order: 99,
+    })
+    expect(internal.adminOnly).toBe(true)
+    expect(internal.beans).toBeNull()
+    expect(hasEntitlement(internal, 'batch_generation')).toBe(true)
   })
 
-  it('keeps quota summary text aligned with account body copy size', () => {
-    const planTitleRule = [...authCssSource.matchAll(/\.account-line-modal \.quota-plan-line div b\s*\{([^}]*)\}/g)].at(-1)?.[1]?.replace(/\s+/g, '') ?? ''
-    const percentRule = [...authCssSource.matchAll(/\.account-line-modal \.quota-plan-line strong\s*\{([^}]*)\}/g)].at(-1)?.[1]?.replace(/\s+/g, '') ?? ''
-    const remainingRule = [...authCssSource.matchAll(/\.account-line-modal \.quota-plan-line p\s*\{([^}]*)\}/g)].at(-1)?.[1]?.replace(/\s+/g, '') ?? ''
-    const remainingValueRule = [...authCssSource.matchAll(/\.account-line-modal \.quota-plan-line p b\s*\{([^}]*)\}/g)].at(-1)?.[1]?.replace(/\s+/g, '') ?? ''
+  it('keeps bean summary styles readable in the account modal', () => {
+    const summaryRule = authCssSource.match(/\.account-line-modal \.bean-summary-grid article\s*\{([^}]*)\}/)?.[1]?.replace(/\s+/g, '') ?? ''
+    const expiryRule = authCssSource.match(/\.account-line-modal \.bean-expiry-list article\s*\{([^}]*)\}/)?.[1]?.replace(/\s+/g, '') ?? ''
+    const ruleText = authCssSource.match(/\.account-line-modal \.bean-rule-line p\s*\{([^}]*)\}/)?.[1]?.replace(/\s+/g, '') ?? ''
 
-    expect(planTitleRule).toContain('font-size:14px')
-    expect(percentRule).toContain('font-size:13px')
-    expect(remainingRule).toContain('font-size:13px')
-    expect(remainingValueRule).toContain('font-size:13px')
+    expect(summaryRule).toContain('min-height:96px')
+    expect(expiryRule).toContain('grid-template-columns:minmax(0,1fr)autoauto')
+    expect(ruleText).toContain('font-size:12px')
   })
 
-  it('allows watermark-free export only for paid and internal plans', () => {
+  it('matches backend watermark-free plan codes', () => {
     expect(authStoreSource).toContain('canExportWithoutWatermark')
-    expect(authStoreSource).toContain("['standard', 'advanced', 'enterprise', 'internal'].includes(user.value.plan)")
+    expect(authStoreSource).toContain('paidExportPlans.has(user.value.plan)')
+    expect(authStoreSource).not.toContain("user.value.plan !== 'free'")
   })
 
   it('marks admin password identities for the two-step login flow', () => {

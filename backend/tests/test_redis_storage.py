@@ -49,7 +49,7 @@ def test_redis_persistent_many_is_atomic_without_ttl(storage: RedisStorage, fake
     assert storage.get(sensitive_word_meta_key()).expires_in_seconds is None
 
 
-def test_memory_persistent_many_ignores_ttl_and_lru_eviction() -> None:
+def test_memory_persistent_many_ignores_ttl_lru_and_capacity() -> None:
     memory = MemoryStorage(max_size=2, start_cleanup_thread=False)
 
     memory.set_persistent_many(
@@ -58,7 +58,13 @@ def test_memory_persistent_many_ignores_ttl_and_lru_eviction() -> None:
             sensitive_word_snapshot_key(): "snapshot",
         }
     )
-    assert not memory.setex("derived", "value", 60).success
+
+    assert memory.setex("derived-a", "value", 60).success
+    assert memory.setex("derived-b", "value", 60).success
+    assert memory.setex("derived-c", "value", 60).success
+    assert memory.get("derived-a") is None
+    assert memory.get("derived-b") is not None
+    assert memory.get("derived-c") is not None
 
     assert memory.get(sensitive_word_meta_key()).expires_in_seconds is None
     assert memory.exists(sensitive_word_snapshot_key())

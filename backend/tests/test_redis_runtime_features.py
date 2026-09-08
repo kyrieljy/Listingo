@@ -24,7 +24,6 @@ from backend.app.core.storage.redis import RedisStorage
 from backend.app.models import (
     BatchJob,
     PaymentOrder,
-    PlanQuotaRule,
     Provider,
     SmsConfig,
     SubscriptionPlan,
@@ -46,7 +45,7 @@ from backend.app.services.runtime_cache import (
 )
 from backend.app.services.subscriptions import (
     mock_pay_order,
-    reserve_quota,
+    reserve_beans,
 )
 
 
@@ -179,14 +178,14 @@ def test_admin_updates_invalidate_provider_prompt_workflow_and_plan_caches(clien
         assert active_workflow_version_id(session, workflow["code"]) == workflow_version["id"]
 
     plans = client.get("/api/v1/admin/subscription-plans").json()
-    plan = next(item for item in plans if item["code"] == "standard")
+    plan = next(item for item in plans if item["code"] == "monthly_standard")
     updated = client.patch(
         f"/api/v1/admin/subscription-plans/{plan['id']}",
         json={"description": "Redis cache invalidated plan"},
     )
     assert updated.status_code == 200, updated.text
     refreshed = client.get("/api/v1/admin/subscription-plans").json()
-    refreshed_plan = next(item for item in refreshed if item["code"] == "standard")
+    refreshed_plan = next(item for item in refreshed if item["code"] == "monthly_standard")
     assert refreshed_plan["description"] == "Redis cache invalidated plan"
 
 
@@ -281,18 +280,17 @@ def test_quota_and_order_locks_preserve_payment_idempotency(client) -> None:
     with client.app.state.session_factory() as session:
         user = session.scalar(select(User).where(User.username == "admin"))
         assert user is not None
-        plan = session.scalar(select(SubscriptionPlan).where(SubscriptionPlan.code == "standard"))
+        plan = session.scalar(select(SubscriptionPlan).where(SubscriptionPlan.code == "monthly_standard"))
         assert plan is not None
-        assert session.scalar(select(PlanQuotaRule).where(PlanQuotaRule.plan_id == plan.id).limit(1)) is not None
+        assert plan.beans == 1560
 
-        quota_key = lock_key("quota", f"{user.id}:image_generation:{utcnow().strftime('%Y-%m')}")
+        quota_key = lock_key("beans", user.id)
         quota_token = runtime.acquire_lock(quota_key, 10)
         assert quota_token is not None
         try:
-            reserve_quota(
+            reserve_beans(
                 session,
                 user,
-                action_key="image_generation",
                 amount=1,
                 ref_type="redis-test",
                 ref_id="quota-1",

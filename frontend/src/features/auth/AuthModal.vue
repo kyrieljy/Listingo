@@ -96,7 +96,7 @@ function buildPhoneNumber(countryCode: string, phone: string): string {
   const digits = phoneDigits(phone)
   if (!digits) return ''
   if (digits.startsWith(countryCode) && digits.length > countryCode.length + 4) return `+${digits}`
-  return `+${countryCode} ${digits}`
+  return `+${countryCode}${digits}`
 }
 
 function phoneCountryPrefix(countryCode: string): string {

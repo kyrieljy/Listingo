@@ -359,6 +359,12 @@
   font-weight: 700;
 }
 
+/* 订阅无批量生成权益时按钮保持可见但禁用；不禁用 pointer-events 以便点击仍触发升级引导 */
+.batch-hosting-locked {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .batch-hosting-modal-wrap .ant-modal {
   max-width: calc(100vw - 32px);
   top: 28px;

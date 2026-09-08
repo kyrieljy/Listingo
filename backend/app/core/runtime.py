@@ -149,7 +149,7 @@ class RuntimeStateService:
         """Invalidation is optional: TTL still bounds staleness if Redis is down."""
         try:
             self.invalidate(domain, self.ttls.cache_version)
-        except StorageUnavailableError:
+        except RuntimeError:
             logger.warning("Runtime cache invalidation failed; TTL will bound staleness", exc_info=True)
 
     def acquire_lock(self, key: str, ttl: int) -> str | None:

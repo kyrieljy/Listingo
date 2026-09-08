@@ -1,14 +1,15 @@
-import type { AuthUserDto, NotificationDto, PlanCode, QuotaRowDto, SubscriptionPlanDto, UserRole, UserStatus } from '../../api/client'
+import type {
+  AuthUserDto,
+  BillingCycle,
+  NotificationDto,
+  PlanCode,
+  PlanEntitlements,
+  SubscriptionPlanDto,
+  UserRole,
+  UserStatus,
+} from '../../api/client'
 
 export type { PlanCode as PlanKey, UserRole, UserStatus }
-
-export type QuotaKey =
-  | 'image_generation'
-  | 'aplus_generation'
-  | 'video_generation'
-  | 'edit_generation'
-  | 'batch_suite'
-  | 'batch_aplus'
 
 export type AuthUser = {
   id: string
@@ -42,21 +43,14 @@ export type MembershipPlan = {
   featured?: boolean
   adminOnly?: boolean
   enterprise?: boolean
+  billingCycle: BillingCycle | 'none' | 'custom' | 'internal' | 'legacy'
+  beans: number | null
+  contactSales: boolean
   contactText?: string
   contactPhone?: string
-  quota: Record<string, number | 'unlimited'>
+  entitlements: PlanEntitlements
   features: string[]
   source?: SubscriptionPlanDto
-}
-
-export type QuotaUsage = {
-  key: string
-  label: string
-  used: number
-  total: number | 'unlimited'
-  remaining: number | null
-  unit: string
-  period: string
 }
 
 export type AccountHistoryItem = {
@@ -76,54 +70,51 @@ export type AccountMessage = {
   category: string
 }
 
+const emptyEntitlements: PlanEntitlements = { image_generation: true, image_edit: true, batch_generation: false }
+
+function plan(options: Pick<MembershipPlan, 'key' | 'name' | 'price' | 'period' | 'description'> & Partial<MembershipPlan>): MembershipPlan {
+  return {
+    cta: options.enterprise ? '联系我们' : '立即订阅',
+    billingCycle: 'monthly',
+    beans: 0,
+    contactSales: Boolean(options.enterprise),
+    entitlements: emptyEntitlements,
+    features: [],
+    ...options,
+  }
+}
+
 export const fallbackPlans: MembershipPlan[] = [
-  {
+  plan({
     key: 'free',
     name: '免费版',
     price: '¥0',
-    period: '/月',
-    description: '适合先体验 Listingo 的基础内容生成流程。',
-    cta: '当前可用',
-    quota: { image_generation: 20, aplus_generation: 4, video_generation: 2, edit_generation: 10, batch_suite: 2, batch_aplus: 1 },
-    features: ['免费体验商品套图', '少量 A+ 详情生成', '基础二次编辑', '历史任务保留 7 天'],
-  },
-  {
-    key: 'standard',
-    name: '标准会员',
-    price: '¥30.0',
-    period: '/月',
-    badge: 'VIP',
-    description: '适合稳定上新的个人卖家和小型电商团队。',
-    cta: '立即订阅',
-    quota: { image_generation: 330, aplus_generation: 60, video_generation: 12, edit_generation: 160, batch_suite: 20, batch_aplus: 8 },
-    features: ['包含免费版所有权益', '个人商业授权', '付费模板/素材', '智能抠图与二次编辑', '每月赠送生成额度'],
-  },
-  {
-    key: 'advanced',
-    name: '高级会员',
-    price: '¥88.0',
-    period: '/月',
-    badge: 'PRO',
-    featured: true,
-    description: '适合高频 SKU、批量上新和多平台内容生产。',
-    cta: '立即订阅',
-    quota: { image_generation: 1000, aplus_generation: 240, video_generation: 60, edit_generation: 520, batch_suite: 80, batch_aplus: 30 },
-    features: ['包含标准会员所有权益', '更高月度额度', '批量任务优先', '大图与视频生产支持', '额度告急提醒'],
-  },
-  {
-    key: 'enterprise',
+    period: '',
+    description: '未开通会员时可使用已购买的豆子生成图片。',
+    cta: '购买豆子',
+    billingCycle: 'none',
+  }),
+  plan({ key: 'monthly_basic', name: '轻量版', price: '¥49', period: '/月', description: '适合刚开始尝试 AI 商品图的个人卖家，满足少量商品上新需求。', beans: 480 }),
+  plan({ key: 'monthly_standard', name: '标准版', price: '¥129', period: '/月', badge: '推荐', description: '适合稳定上新的电商卖家，支持商品图、详情图和图片编辑。', featured: true, beans: 1560, entitlements: { ...emptyEntitlements, batch_generation: true, priority_queue: 'basic' } }),
+  plan({ key: 'monthly_pro', name: '高级版', price: '¥699', period: '/月', description: '适合多 SKU 上新、批量商品图生产和小团队协作。', beans: 9600, entitlements: { ...emptyEntitlements, batch_generation: true, priority_queue: true, team_collaboration: 'basic' } }),
+  plan({ key: 'yearly_basic', name: '轻量年付', price: '¥499', period: '/年', badge: '年付更省', description: '适合少量商品上新，全年豆子可用于商品图、详情图和图片编辑。', billingCycle: 'yearly', beans: 5760, entitlements: { ...emptyEntitlements, batch_generation: true, priority_queue: true } }),
+  plan({ key: 'yearly_standard', name: '标准年付', price: '¥1299', period: '/年', badge: '推荐', description: '适合持续上新的卖家，全年更划算，支持批量上传和批量生成。', billingCycle: 'yearly', featured: true, beans: 18000, entitlements: { ...emptyEntitlements, batch_generation: true, priority_queue: true } }),
+  plan({ key: 'yearly_flagship', name: '旗舰年付', price: '¥19999', period: '/年', badge: '团队首选', description: '适合团队批量生产电商内容，支持大额豆子、批量任务和团队协作。', billingCycle: 'yearly', beans: 288000, entitlements: { ...emptyEntitlements, batch_generation: 'advanced', priority_queue: true, team_collaboration: true, exclusive_support: true } }),
+  plan({
+    key: 'enterprise_custom',
     name: '企业定制版',
     price: '联系我们',
     period: '',
-    badge: 'TEAM',
+    badge: '企业定制',
+    description: '面向品牌方、代运营团队和批量内容生产团队，根据用量与需求定制方案。',
+    billingCycle: 'custom',
+    beans: null,
     enterprise: true,
-    description: '面向团队协作、私有化部署和定制化开发需求。',
-    cta: '联系我们',
+    contactText: '企业版不展示固定价格，请联系商务获取专属报价。',
     contactPhone: '18928268686',
-    contactText: '联系商务获取企业定制方案，可支持团队账号、品牌模板、私有化部署、定制化开发和专属额度配置。',
-    quota: { image_generation: 20000, aplus_generation: 3000, video_generation: 800, edit_generation: 10000, batch_suite: 1000, batch_aplus: 500 },
-    features: ['企业商业授权', '团队账号与额度共享', '品牌导航与工作流定制', 'SSO / 私有化部署方案', '专属支持与定制化开发'],
-  },
+    features: ['团队协作', 'API 接入可沟通', '定制工作流', '专属客服'],
+    entitlements: { ...emptyEntitlements, batch_generation: 'custom', priority_queue: true, team_collaboration: true, api_access: 'negotiable', custom_workflow: true, exclusive_support: true },
+  }),
 ]
 
 export function toAuthUser(dto: AuthUserDto): AuthUser {
@@ -149,39 +140,35 @@ export function toAuthUser(dto: AuthUserDto): AuthUser {
   }
 }
 
-export function planFromDto(plan: SubscriptionPlanDto, billing: 'monthly' | 'yearly' = 'monthly'): MembershipPlan {
-  const price = plan.prices.find((item) => item.billing_cycle === billing) || plan.prices[0]
-  const quota: Record<string, number | 'unlimited'> = {}
-  for (const rule of plan.quota_rules) quota[rule.action_key] = rule.monthly_limit ?? 'unlimited'
+export function planFromDto(source: SubscriptionPlanDto, billing: BillingCycle = 'monthly'): MembershipPlan {
+  const price = source.prices.find((item) => item.billing_cycle === billing) || source.prices[0]
+  const enterprise = source.contact_sales || source.is_enterprise
   return {
-    key: plan.code,
-    name: plan.name,
-    price: plan.is_enterprise ? '联系我们' : price?.price_label || '',
-    period: plan.is_enterprise ? '' : price?.period_label || '',
-    badge: plan.badge || undefined,
-    description: plan.description,
-    cta: plan.cta || (plan.is_enterprise ? '联系我们' : '立即订阅'),
-    featured: plan.code === 'advanced',
-    adminOnly: plan.is_internal,
-    enterprise: plan.is_enterprise,
-    contactText: plan.contact_text,
-    contactPhone: plan.contact_phone,
-    quota,
-    features: plan.features,
-    source: plan,
+    key: source.code,
+    name: source.name,
+    price: enterprise ? '联系我们' : price?.price_label || '',
+    period: enterprise ? '' : price?.period_label || '',
+    badge: source.badge || undefined,
+    description: source.description,
+    cta: source.cta || (enterprise ? '联系我们' : '立即订阅'),
+    featured: source.recommended,
+    adminOnly: source.is_internal,
+    enterprise,
+    billingCycle: source.billing_cycle,
+    beans: source.beans,
+    contactSales: source.contact_sales,
+    contactText: source.contact_text,
+    contactPhone: source.contact_phone,
+    entitlements: source.entitlements,
+    features: source.features,
+    source,
   }
 }
 
-export function quotaFromDto(row: QuotaRowDto): QuotaUsage {
-  return {
-    key: row.action_key,
-    label: row.action_label,
-    used: row.used,
-    total: row.monthly_limit ?? 'unlimited',
-    remaining: row.remaining,
-    unit: row.unit,
-    period: row.period,
-  }
+export function hasEntitlement(plan: MembershipPlan | null | undefined, key: string): boolean {
+  if (!plan) return false
+  if (plan.key === 'internal') return true
+  return Boolean(plan.entitlements[key])
 }
 
 export function messageFromDto(row: NotificationDto): AccountMessage {
@@ -195,8 +182,8 @@ export function messageFromDto(row: NotificationDto): AccountMessage {
   }
 }
 
-export function planByKey(plans: MembershipPlan[], plan: PlanCode): MembershipPlan {
-  return plans.find((item) => item.key === plan) || fallbackPlans[0]
+export function planByKey(plans: MembershipPlan[], planCode: PlanCode): MembershipPlan {
+  return plans.find((item) => item.key === planCode) || fallbackPlans[0]
 }
 
 export function maskPhone(phone: string): string {

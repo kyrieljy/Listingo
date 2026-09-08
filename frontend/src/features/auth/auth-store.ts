@@ -4,10 +4,13 @@ import { message } from 'ant-design-vue'
 import {
   changePasswordApi,
   confirmChangePhoneApi,
+  createEnterpriseLeadApi,
   createSubscriptionOrderApi,
   getAuthMeApi,
   getQuotaMeApi,
+  isInsufficientBeansError,
   listLoginEventsApi,
+  listBeanPacksApi,
   listNotificationsApi,
   listSubscriptionPlansApi,
   loginWithPasswordApi,
@@ -22,42 +25,50 @@ import {
   startChangePhoneApi,
   updateProfileApi,
   type LoginEventDto,
+  type BeanPackDto,
+  type EnterpriseLeadPayload,
   type PaymentOrderDto,
+  type QuotaSummaryDto,
   type SmsPurpose,
   type SubscriptionPlanDto,
 } from '../../api/client'
 import {
   fallbackPlans,
+  hasEntitlement,
   messageFromDto,
   planByKey,
   planFromDto,
-  quotaFromDto,
   toAuthUser,
   type AccountHistoryItem,
   type AccountMessage,
   type AuthUser,
   type MembershipPlan,
   type PlanKey,
-  type QuotaUsage,
 } from './auth-model'
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<AuthUser | null>(null)
   const avatarDataUrl = ref('')
   const plansRaw = ref<SubscriptionPlanDto[]>([])
-  const quotaUsage = ref<QuotaUsage[]>([])
+  const beanPacks = ref<BeanPackDto[]>([])
+  const beanSummary = ref<QuotaSummaryDto | null>(null)
   const accountMessages = ref<AccountMessage[]>([])
   const loginEvents = ref<LoginEventDto[]>([])
   const unreadCount = ref(0)
   const lastMockCode = ref('')
   const loading = ref(false)
+  const insufficientBeansOpen = ref(false)
 
   const plans = computed<MembershipPlan[]>(() => plansRaw.value.length ? plansRaw.value.map((plan) => planFromDto(plan)) : fallbackPlans)
   const isAuthenticated = computed(() => Boolean(user.value))
   const isAdmin = computed(() => user.value?.role === 'admin')
   const currentPlan = computed(() => planByKey(plans.value, user.value?.plan ?? 'free'))
   const userAvatarUrl = computed(() => avatarDataUrl.value)
-  const canExportWithoutWatermark = computed(() => Boolean(user.value && ['standard', 'advanced', 'enterprise', 'internal'].includes(user.value.plan)))
+  const canExportWithoutWatermark = computed(() => Boolean(
+    user.value
+    && (user.value.role === 'admin' || paidExportPlans.has(user.value.plan)),
+  ))
+  const canUseBatchGeneration = computed(() => hasEntitlement(currentPlan.value, 'batch_generation'))
   const historyItems = computed<AccountHistoryItem[]>(() => [])
 
   function avatarStorageKey(id: string): string {
@@ -117,16 +128,18 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function loadPlans(): Promise<void> {
-    plansRaw.value = await listSubscriptionPlansApi()
+    const [plans, packs] = await Promise.all([listSubscriptionPlansApi(), listBeanPacksApi()])
+    plansRaw.value = plans
+    beanPacks.value = packs
   }
 
   async function loadQuota(): Promise<void> {
     if (!user.value) {
-      quotaUsage.value = []
+      beanSummary.value = null
       return
     }
     const data = await getQuotaMeApi()
-    quotaUsage.value = data.rows.map(quotaFromDto)
+    beanSummary.value = data
     const backendPlan = data.plan
     if (!plansRaw.value.some((plan) => plan.code === backendPlan.code)) plansRaw.value = [...plansRaw.value, backendPlan]
   }
@@ -253,6 +266,28 @@ export const useAuthStore = defineStore('auth', () => {
     return order
   }
 
+  async function purchaseBeanPack(packCode: string): Promise<PaymentOrderDto> {
+    if (!user.value) throw new Error('请先登录后再购买补豆包')
+    const order = await createSubscriptionOrderApi({ bean_pack_code: packCode })
+    const paid = order.status === 'pending' ? await mockPayOrderApi(order.id) : order
+    applyAuthResponse(await getAuthMeApi())
+    await loadQuota()
+    await loadNotifications()
+    message.success('支付成功，补豆包已到账')
+    return paid
+  }
+
+  async function submitEnterpriseLead(payload: EnterpriseLeadPayload): Promise<void> {
+    await createEnterpriseLeadApi(payload)
+    message.success('已收到您的企业定制申请，商务顾问会尽快联系您。')
+  }
+
+  function showInsufficientBeans(error: unknown): boolean {
+    if (!isInsufficientBeansError(error)) return false
+    insufficientBeansOpen.value = true
+    return true
+  }
+
   async function markNotificationRead(id: string): Promise<void> {
     await readNotificationApi(id)
     await loadNotifications()
@@ -267,7 +302,7 @@ export const useAuthStore = defineStore('auth', () => {
     await logoutApi()
     user.value = null
     avatarDataUrl.value = ''
-    quotaUsage.value = []
+    beanSummary.value = null
     accountMessages.value = []
     loginEvents.value = []
     unreadCount.value = 0
@@ -282,17 +317,20 @@ export const useAuthStore = defineStore('auth', () => {
     user,
     plans,
     plansRaw,
-    quotaUsage,
+    beanPacks,
+    beanSummary,
     accountMessages,
     loginEvents,
     unreadCount,
     lastMockCode,
     loading,
+    insufficientBeansOpen,
     isAuthenticated,
     isAdmin,
     currentPlan,
     userAvatarUrl,
     canExportWithoutWatermark,
+    canUseBatchGeneration,
     historyItems,
     hydrate,
     loadPlans,
@@ -309,9 +347,25 @@ export const useAuthStore = defineStore('auth', () => {
     changePassword,
     confirmChangePhone,
     choosePlan,
+    purchaseBeanPack,
+    submitEnterpriseLead,
+    showInsufficientBeans,
     markNotificationRead,
     markAllNotificationsRead,
     logout,
     logoutOtherDevices,
   }
 })
+
+const paidExportPlans = new Set<PlanKey>([
+  'standard',
+  'advanced',
+  'enterprise',
+  'internal',
+  'monthly_basic',
+  'monthly_standard',
+  'monthly_pro',
+  'yearly_basic',
+  'yearly_standard',
+  'yearly_flagship',
+])

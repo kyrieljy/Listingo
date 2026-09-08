@@ -104,10 +104,12 @@ from backend.app.services.sensitive_preflight import (
     prewarm_uploaded_asset_ocr,
 )
 from backend.app.services.batch_jobs import (
+    batch_retry_billing,
     cancel_batch_job,
     cached_batch_job_payload,
     create_batch_job_record,
     create_validation_fixture_batches,
+    estimate_batch_image_count,
     aggregate_batch_job,
     invalidate_batch_status,
     load_batch_job,
@@ -140,7 +142,15 @@ from backend.app.services.video_jobs import (
 )
 from backend.app.services.watermarking import apply_ai_watermark
 from backend.app.services.auth import ensure_owner_access, get_current_user, get_optional_user
-from backend.app.services.subscriptions import confirm_quota, release_quota, reserve_quota
+from backend.app.services.subscriptions import (
+    BEANS_PER_IMAGE,
+    assert_beans_sufficient,
+    confirm_beans,
+    plan_entitlement,
+    release_beans,
+    reserve_beans,
+    video_feature_enabled,
+)
 from backend.app.core.storage.base import StorageUnavailableError
 
 
@@ -153,7 +163,7 @@ def _fail_closed_compensate(session_factory, job_id: str, model, ref_type: str) 
     with session_factory() as session:
         job = session.get(model, job_id)
         if job and job.status == "queued":
-            release_quota(session, ref_type=ref_type, ref_id=job.id)
+            release_beans(session, ref_type=ref_type, ref_id=job.id)
             job.status = "cancelled"
             job.completed_at = utcnow()
             for item in job.items:
@@ -231,7 +241,18 @@ def raise_task_creation_error(exc: TaskCreationError) -> None:
     raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
-PAID_EXPORT_PLANS = {"standard", "advanced", "enterprise", "internal"}
+PAID_EXPORT_PLANS = {
+    "standard",
+    "advanced",
+    "enterprise",
+    "internal",
+    "monthly_basic",
+    "monthly_standard",
+    "monthly_pro",
+    "yearly_basic",
+    "yearly_standard",
+    "yearly_flagship",
+}
 MONITORING_FIXTURE_JOB_ID_PREFIX = "demo-monitor-"
 
 
@@ -263,11 +284,10 @@ def visible_history_job_filters(
 
 def reserve_edit_quota(session: Session, current_user: User, *, description: str = "") -> str | None:
     quota_ref = str(uuid4())
-    reserve_quota(
+    reserve_beans(
         session,
         current_user,
-        action_key="edit_generation",
-        amount=1,
+        amount=BEANS_PER_IMAGE,
         ref_type="edit_generation",
         ref_id=quota_ref,
         description=description,
@@ -277,12 +297,19 @@ def reserve_edit_quota(session: Session, current_user: User, *, description: str
 
 def confirm_edit_quota(session: Session, quota_ref: str | None) -> None:
     if quota_ref:
-        confirm_quota(session, ref_type="edit_generation", ref_id=quota_ref)
+        confirm_beans(session, ref_type="edit_generation", ref_id=quota_ref)
 
 
 def release_edit_quota(session: Session, quota_ref: str | None) -> None:
     if quota_ref:
-        release_quota(session, ref_type="edit_generation", ref_id=quota_ref)
+        release_beans(session, ref_type="edit_generation", ref_id=quota_ref)
+
+
+def ensure_video_feature_available(session: Session, current_user: User | None) -> None:
+    if current_user and current_user.role == "admin":
+        return
+    if not video_feature_enabled(session):
+        raise HTTPException(status_code=404, detail="视频生成功能暂不可用")
 
 
 @router.get("/workspace-config", response_model=WorkspaceConfigOut)
@@ -535,6 +562,8 @@ async def create_batch_job(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     settings = request.app.state.settings
+    if not plan_entitlement(session, current_user, "batch_generation"):
+        raise HTTPException(status_code=403, detail="当前套餐不支持批量生成")
     try:
         scan_texts = []
         scan_asset_ids: list[str] = []
@@ -554,11 +583,10 @@ async def create_batch_job(
             user_id=current_user.id,
         )
         batch = create_batch_job_record(session, payload, settings, user_id=current_user.id)
-        reserve_quota(
+        reserve_beans(
             session,
             current_user,
-            action_key="batch_suite" if payload.business_type == "suite" else "batch_aplus",
-            amount=len(payload.items),
+            amount=estimate_batch_image_count(payload) * BEANS_PER_IMAGE,
             ref_type="batch_job",
             ref_id=batch.id,
             description="batch task",
@@ -748,16 +776,16 @@ async def retry_failed_batch_job_endpoint(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch job does not exist")
     ensure_job_owner(current_user, batch)
-    failed_count = sum(1 for item in batch.items if item.status in {"failed", "partial_failed"})
-    if failed_count:
-        reserve_quota(
+    retry_beans, retry_refs = batch_retry_billing(session, batch)
+    if retry_beans:
+        reserve_beans(
             session,
             current_user,
-            action_key="batch_suite" if batch.business_type == "suite" else "batch_aplus",
-            amount=failed_count,
+            amount=retry_beans,
             ref_type="batch_job",
             ref_id=batch.id,
-            description="retry batch task",
+            description="retry batch generation",
+            refs=retry_refs,
         )
     retry_items = [item for item in batch.items if item.status in {"failed", "partial_failed"}]
     retry_failed_batch_job(session, batch)
@@ -789,6 +817,17 @@ def download_batch_results(
     return FileResponse(destination, media_type="application/zip", filename=f"batch-{batch.id}.zip")
 
 
+def _resolve_effective_dry_run(request: Request, payload_dry_run: bool) -> bool:
+    """计算生效的 dry_run：`global_dry_run` 为 True 时硬性覆盖为 dryrun。
+
+    这是部署级安全开关（spec「未配置有效 Provider 与密钥不得外调」）：
+    只要部署配置 global_dry_run=True，无论请求是否要求 live，一律按 dryrun 执行。
+    结果在创建入口落库为 job.dry_run，worker 之后只读 job.dry_run。
+    """
+    settings = getattr(request.app.state, "settings", None)
+    return bool(payload_dry_run or getattr(settings, "global_dry_run", False))
+
+
 @router.post("/generation-jobs", response_model=GenerationJobOut, status_code=201)
 async def create_generation_job(
     payload: GenerationJobCreate,
@@ -809,16 +848,18 @@ async def create_generation_job(
             asset_ids=payload.asset_ids,
             user_id=current_user.id,
         )
+        payload.dry_run = _resolve_effective_dry_run(request, payload.dry_run)
         job = create_generation_job_record(session, payload, max_asset_count=6, user_id=current_user.id)
-        reserve_quota(
-            session,
-            current_user,
-            action_key="image_generation",
-            amount=payload.count,
-            ref_type="generation_job",
-            ref_id=job.id,
-            description="product suite generation",
-        )
+        # 豆子预留与 dry_run 解耦：dryrun 仅跳过外部调用，余额不足仍须拦截（admin 仍豁免）。
+        if current_user.role != "admin":
+            reserve_beans(
+                session,
+                current_user,
+                amount=payload.count * BEANS_PER_IMAGE,
+                ref_type="generation_job",
+                ref_id=job.id,
+                description="product suite generation",
+            )
     except TaskCreationError as exc:
         session.rollback()
         raise_task_creation_error(exc)
@@ -903,6 +944,14 @@ async def assist_copywriting(
         ensure_content_safe(run_local_text_safety_review(user_prompt), "输入内容安全拦截")
     except ContentSafetyBlocked as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # 非计费入口（文案辅助）：本身不预留、不扣豆，但按商品图数量预检余额能否支撑后续生图。
+    # 该预检属本地校验，不随 dry_run 跳过；internal/admin 视为无限额度。
+    assert_beans_sufficient(
+        session,
+        current_user,
+        required=max(1, len(payload.asset_ids)) * BEANS_PER_IMAGE,
+    )
 
     if payload.dry_run:
         source = payload.selling_points.strip() or "突出产品用途、材质体验与使用场景"
@@ -1035,6 +1084,12 @@ async def create_aplus_plan_job(
             asset_ids=payload.asset_ids,
             user_id=current_user.id,
         )
+        payload.dry_run = _resolve_effective_dry_run(request, payload.dry_run)
+        # 非计费入口（A+ plan）：本身不预留、不扣豆，但须预检余额能否支撑后续生图
+        # （required = 产出模块数 × BEANS_PER_IMAGE）。该预检属本地校验，不随 dry_run 跳过。
+        assert_beans_sufficient(
+            session, current_user, required=payload.module_total * BEANS_PER_IMAGE
+        )
         job = create_aplus_plan_job_record(session, payload, max_asset_count=6, user_id=current_user.id)
     except TaskCreationError as exc:
         session.rollback()
@@ -1146,16 +1201,18 @@ async def create_aplus_generation_job(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     try:
+        payload.dry_run = _resolve_effective_dry_run(request, payload.dry_run)
         job = create_aplus_generation_job_record(session, payload, user_id=current_user.id)
-        reserve_quota(
-            session,
-            current_user,
-            action_key="aplus_generation",
-            amount=job.count,
-            ref_type="aplus_job",
-            ref_id=job.id,
-            description="A+ generation",
-        )
+        # 豆子预留与 dry_run 解耦：dryrun 仅跳过外部调用，余额不足仍须拦截（admin 仍豁免）。
+        if current_user.role != "admin":
+            reserve_beans(
+                session,
+                current_user,
+                amount=job.count * BEANS_PER_IMAGE,
+                ref_type="aplus_job",
+                ref_id=job.id,
+                description="A+ generation",
+            )
     except TaskCreationError as exc:
         session.rollback()
         raise_task_creation_error(exc)
@@ -1264,15 +1321,17 @@ async def retry_failed_aplus_generation_job(
         raise HTTPException(status_code=404, detail="A+ 生成任务不存在")
     if not any(item.status == "failed" for item in job.items):
         return serialize_aplus_job(job)
-    reserve_quota(
-        session,
-        current_user,
-        action_key="aplus_generation",
-        amount=sum(1 for item in job.items if item.status == "failed"),
-        ref_type="aplus_job",
-        ref_id=job.id,
-        description="retry A+ generation",
-    )
+    if current_user.role != "admin":
+        failed_ids = [item.id for item in job.items if item.status == "failed"]
+        reserve_beans(
+            session,
+            current_user,
+            amount=len(failed_ids) * BEANS_PER_IMAGE,
+            ref_type="aplus_job",
+            ref_id=job.id,
+            description="retry A+ generation",
+            refs=failed_ids,
+        )
     session.commit()
     await retry_failed_aplus_items(
         job.id,
@@ -1298,15 +1357,16 @@ async def retry_single_aplus_item(
     if job.job_type != "generation":
         raise HTTPException(status_code=404, detail="A+ 生成任务不存在")
     if item.status == "failed":
-        reserve_quota(
-            session,
-            current_user,
-            action_key="aplus_generation",
-            amount=1,
-            ref_type="aplus_job",
-            ref_id=job.id,
-            description="retry A+ item",
-        )
+        if current_user.role != "admin":
+            reserve_beans(
+                session,
+                current_user,
+                amount=BEANS_PER_IMAGE,
+                ref_type="aplus_job",
+                ref_id=job.id,
+                description="retry A+ item",
+                refs=[item.id],
+            )
         session.commit()
         retried_job_id = await retry_aplus_item(
             item.id,
@@ -1433,7 +1493,7 @@ async def create_aplus_text_version(
     if not job:
         raise HTTPException(status_code=404, detail="A+ job not found")
     ensure_job_owner(current_user, job)
-    quota_ref = reserve_edit_quota(session, current_user, description="A+ text edit")
+    quota_ref = None if current_user.role == "admin" else reserve_edit_quota(session, current_user, description="A+ text edit")
     try:
         if job.dry_run:
             version = create_dryrun_aplus_text_version(session, item, payload.lines, request.app.state.settings)
@@ -1480,7 +1540,7 @@ async def create_aplus_version(
     instruction = payload.instruction.strip()
     if len(instruction) < 2:
         raise HTTPException(status_code=422, detail="Instruction must be at least 2 characters")
-    quota_ref = reserve_edit_quota(session, current_user, description="A+ image edit")
+    quota_ref = None if current_user.role == "admin" else reserve_edit_quota(session, current_user, description="A+ image edit")
     if job.dry_run:
         version = create_dryrun_aplus_child_version(session, item, instruction, request.app.state.settings)
         confirm_edit_quota(session, quota_ref)
@@ -1508,11 +1568,19 @@ async def assist_video_copywriting(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    ensure_video_feature_available(session, current_user)
     user_prompt = build_video_copywriting_user_prompt(payload)
     try:
         ensure_content_safe(run_local_text_safety_review(user_prompt), "输入内容安全拦截")
     except ContentSafetyBlocked as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # 非计费入口（视频文案辅助）：本身不预留、不扣豆，但按商品图数量预检余额能否支撑后续产出。
+    assert_beans_sufficient(
+        session,
+        current_user,
+        required=max(1, len(payload.asset_ids)) * BEANS_PER_IMAGE,
+    )
 
     if payload.dry_run:
         text = payload.selling_points.strip() or "请突出商品核心痛点、适用人群、使用场景和 15 秒视频转化目标。"
@@ -1627,6 +1695,7 @@ async def create_video_job(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    ensure_video_feature_available(session, current_user)
     _consume_generation_rate_limit(request, response)
     assets = session.scalars(asset_query_for_user(payload.asset_ids, current_user)).all()
     if len(assets) != len(payload.asset_ids):
@@ -1685,15 +1754,6 @@ async def create_video_job(
                 status="queued",
             )
         )
-    reserve_quota(
-        session,
-        current_user,
-        action_key="video_generation",
-        amount=len(payload.video_types),
-        ref_type="video_job",
-        ref_id=job.id,
-        description="video generation",
-    )
     session.commit()
     session.refresh(job)
     scheduler = request.app.state.generation_queue_scheduler
@@ -1707,6 +1767,7 @@ async def create_video_job(
 
 @router.get("/video-jobs", response_model=list[VideoJobOut])
 def list_video_jobs(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    ensure_video_feature_available(session, current_user)
     query = (
         select(VideoJob)
         .where(VideoJob.is_admin_test.is_(False), *visible_history_job_filters(VideoJob))
@@ -1725,6 +1786,7 @@ def get_video_job(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    ensure_video_feature_available(session, current_user)
     job = load_video_job(session, job_id)
     ensure_job_owner(current_user, job)
     return serialize_video_job(job)
@@ -1737,6 +1799,7 @@ def cancel_video_generation_job(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    ensure_video_feature_available(session, current_user)
     job = load_video_job(session, job_id)
     ensure_job_owner(current_user, job)
     scheduler = request.app.state.generation_queue_scheduler
@@ -1759,19 +1822,11 @@ async def retry_failed_video_job(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    ensure_video_feature_available(session, current_user)
     job = load_video_job(session, job_id)
     ensure_job_owner(current_user, job)
     if not any(item.status == "failed" for item in job.items):
         return serialize_video_job(job)
-    reserve_quota(
-        session,
-        current_user,
-        action_key="video_generation",
-        amount=sum(1 for item in job.items if item.status == "failed"),
-        ref_type="video_job",
-        ref_id=job.id,
-        description="retry video generation",
-    )
     for item in job.items:
         if item.status == "failed":
             item.status = "queued"
@@ -1796,6 +1851,7 @@ def download_video_results(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> FileResponse:
+    ensure_video_feature_available(session, current_user)
     job = load_video_job(session, job_id)
     enforce_watermark_access(current_user, include_watermark=True)
     ensure_job_owner(current_user, job)
@@ -1827,6 +1883,7 @@ async def create_video_version(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    ensure_video_feature_available(session, current_user)
     item = session.scalar(
         select(VideoItem).where(VideoItem.id == item_id).options(selectinload(VideoItem.versions))
     )
@@ -1839,7 +1896,7 @@ async def create_video_version(
     instruction = payload.instruction.strip()
     if len(instruction) < 2:
         raise HTTPException(status_code=422, detail="Instruction must be at least 2 characters")
-    quota_ref = reserve_edit_quota(session, current_user, description="video edit")
+    quota_ref = None if current_user.role == "admin" else reserve_edit_quota(session, current_user, description="video edit")
     try:
         if job.dry_run:
             version = create_dryrun_video_child_version(session, item, instruction)
@@ -1937,15 +1994,16 @@ async def retry_failed(
         return serialize_job(job)
     if job.dry_run:
         raise HTTPException(status_code=409, detail="Dryrun 不会产生可重试的模型失败项")
-    reserve_quota(
-        session,
-        current_user,
-        action_key="image_generation",
-        amount=len(failed),
-        ref_type="generation_job",
-        ref_id=job.id,
-        description="retry image generation",
-    )
+    if current_user.role != "admin":
+        reserve_beans(
+            session,
+            current_user,
+            amount=len(failed) * BEANS_PER_IMAGE,
+            ref_type="generation_job",
+            ref_id=job.id,
+            description="retry image generation",
+            refs=[item.id for item in failed],
+        )
     # Re-queue the job but deliberately keep the failed items in `failed`: the worker
     # detects failed items on claim and routes to `retry_failed_live_items`, which
     # redoes only those. Resetting them here would make the worker regenerate the
@@ -1977,15 +2035,16 @@ async def retry_single_generation_item(
     job = load_job(session, item.job_id)
     ensure_job_owner(current_user, job)
     if item.status == "failed":
-        reserve_quota(
-            session,
-            current_user,
-            action_key="image_generation",
-            amount=1,
-            ref_type="generation_job",
-            ref_id=job.id,
-            description="retry image item",
-        )
+        if current_user.role != "admin":
+            reserve_beans(
+                session,
+                current_user,
+                amount=BEANS_PER_IMAGE,
+                ref_type="generation_job",
+                ref_id=job.id,
+                description="retry image item",
+                refs=[item.id],
+            )
         session.commit()
         retried_job_id = await retry_live_item(
             item.id,
@@ -2092,7 +2151,7 @@ async def create_generation_text_version(
     if not job:
         raise HTTPException(status_code=404, detail="Generation job not found")
     ensure_job_owner(current_user, job)
-    quota_ref = reserve_edit_quota(session, current_user, description="image text edit")
+    quota_ref = None if current_user.role == "admin" else reserve_edit_quota(session, current_user, description="image text edit")
     try:
         if job.dry_run:
             version = create_dryrun_generation_text_version(session, item, payload.lines, request.app.state.settings)
@@ -2143,7 +2202,7 @@ async def create_generation_version(
     instruction = payload.instruction.strip()
     if instruction and len(instruction) < 2:
         raise HTTPException(status_code=422, detail="Instruction must be at least 2 characters")
-    quota_ref = reserve_edit_quota(session, current_user, description="image edit")
+    quota_ref = None if current_user.role == "admin" else reserve_edit_quota(session, current_user, description="image edit")
     if job.dry_run:
         version = create_dryrun_child_version(session, item, instruction, request.app.state.settings)
         confirm_edit_quota(session, quota_ref)

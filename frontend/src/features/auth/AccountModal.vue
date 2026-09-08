@@ -8,28 +8,24 @@ import {
   CloudUploadOutlined,
   CreditCardOutlined,
   ExclamationCircleOutlined,
-  BarChartOutlined,
   HistoryOutlined,
   LeftOutlined,
   MailOutlined,
-  PictureOutlined,
   RightOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
   UserOutlined,
-  VideoCameraOutlined,
 } from '@ant-design/icons-vue'
 import {
   listAplusGenerationJobs,
   listJobs,
-  listVideoJobs,
   testFeishuWebhookApi,
   userFacingApiErrorMessage,
   type AplusJob,
   type Job,
   type LoginEventDto,
 } from '../../api/client'
-import { maskPhone, type AccountMessage, type QuotaUsage } from './auth-model'
+import { maskPhone, type AccountMessage } from './auth-model'
 import { useAuthStore } from './auth-store'
 
 type AccountTab = 'profile' | 'quota' | 'settings' | 'history' | 'messages' | 'privacy'
@@ -41,13 +37,6 @@ type TaskRow = {
   status: TaskStatus
   createdAt: string
   rawId?: string
-}
-
-type UsageStats = {
-  totalImages: number
-  totalVideos: number
-  monthImages: number
-  monthVideos: number
 }
 
 const props = withDefaults(defineProps<{
@@ -73,9 +62,6 @@ const tasksLoaded = ref(false)
 const taskRows = ref<TaskRow[]>([])
 const taskPage = ref(1)
 const taskPageSize = ref(5)
-const loadingQuotaStats = ref(false)
-const quotaStatsLoaded = ref(false)
-const quotaStats = ref<UsageStats | null>(null)
 const messageTab = ref<'unread' | 'read' | 'all'>('unread')
 const messagePage = ref(1)
 const messagePageSize = ref(5)
@@ -101,7 +87,7 @@ const dialogOpen = computed({
 
 const navItems = [
   { key: 'profile' as const, label: '账户信息', icon: UserOutlined },
-  { key: 'quota' as const, label: '套餐额度', icon: CreditCardOutlined },
+  { key: 'quota' as const, label: '豆子与套餐', icon: CreditCardOutlined },
   { key: 'settings' as const, label: '账号设置', icon: SettingOutlined },
   { key: 'history' as const, label: '任务历史', icon: HistoryOutlined },
   { key: 'messages' as const, label: '消息中心', icon: BellOutlined },
@@ -121,7 +107,7 @@ const sampleTasks: TaskRow[] = [
 
 const sampleMessages: AccountMessage[] = [
   { id: 'sample-1', category: '任务完成通知', title: '任务完成通知', body: '任务 TASK-20240813-001 已完成', createdAt: '2024-08-13T09:32:00+08:00', unread: true },
-  { id: 'sample-2', category: '系统通知', title: '系统通知', body: '套餐额度已更新', createdAt: '2024-08-13T08:41:00+08:00', unread: true },
+  { id: 'sample-2', category: '系统通知', title: '系统通知', body: '套餐豆子已更新', createdAt: '2024-08-13T08:41:00+08:00', unread: true },
   { id: 'sample-3', category: '账户安全提醒', title: '账户安全提醒', body: '检测到新设备登录', createdAt: '2024-08-13T07:15:00+08:00', unread: true },
   { id: 'sample-4', category: '系统通知', title: '系统通知', body: '欢迎使用 Listingo', createdAt: '2024-08-12T16:22:00+08:00', unread: false },
   { id: 'sample-5', category: '任务失败通知', title: '任务失败通知', body: '任务 TASK-20240812-015 处理失败', createdAt: '2024-08-12T15:10:00+08:00', unread: false },
@@ -151,30 +137,14 @@ const taskPageRows = computed(() => {
 })
 const taskPageNumbers = computed(() => pageWindow(taskPage.value, taskTotalPages.value))
 
-const quotaRows = computed<QuotaUsage[]>(() => authStore.quotaUsage.length ? authStore.quotaUsage : [{
-  key: 'image_generation',
-  label: '图片生成积分',
-  used: 420,
-  total: 1000,
-  remaining: 580,
-  unit: '积分',
-  period: '',
-}])
-
-const mainQuota = computed(() => quotaRows.value.find((item) => typeof item.total === 'number') || quotaRows.value[0])
-const quotaPercent = computed(() => {
-  const row = mainQuota.value
-  if (!row || typeof row.total !== 'number' || row.total <= 0) return 0
-  return Math.min(100, Math.round((row.used / row.total) * 100))
+const beanSummary = computed(() => authStore.beanSummary)
+const beanExpiryText = computed(() => {
+  const value = beanSummary.value?.subscription_ends_at
+  return value ? formatDateTime(value) : '--'
 })
-const quotaUsageMetrics = computed(() => {
-  const stats = quotaStats.value
-  return [
-    { label: '历史生成图片', value: formatMetric(stats?.totalImages), unit: '张', icon: PictureOutlined },
-    { label: '历史生成视频', value: formatMetric(stats?.totalVideos), unit: '个', icon: VideoCameraOutlined },
-    { label: '本月生成', monthImages: formatMetric(stats?.monthImages), monthVideos: formatMetric(stats?.monthVideos), icon: BarChartOutlined },
-  ]
-})
+const availableBeansText = computed(() => beanSummary.value?.unlimited ? '不限' : (beanSummary.value?.available_beans ?? 0).toLocaleString())
+const reservedBeansText = computed(() => beanSummary.value?.unlimited ? '--' : (beanSummary.value?.reserved_beans ?? 0).toLocaleString())
+const beanBatches = computed(() => beanSummary.value?.expiring_batches ?? [])
 
 const settingsRows = computed(() => [
   { label: '登录手机号', value: userPhone.value || '未绑定', action: '更换' },
@@ -242,7 +212,7 @@ function selectTab(tab: AccountTab): void {
 
 async function ensureTabData(tab: AccountTab): Promise<void> {
   try {
-    if (tab === 'quota') await Promise.all([authStore.loadQuota(), loadQuotaStats()])
+    if (tab === 'quota') await authStore.loadQuota()
     if (tab === 'messages') {
       await authStore.loadNotifications()
       syncMessageDefaultTab()
@@ -310,18 +280,6 @@ async function handleAvatarFile(event: Event): Promise<void> {
   }
 }
 
-function planExpiry(): string {
-  const date = new Date()
-  date.setMonth(date.getMonth() + 1)
-  return formatDateOnly(date.toISOString())
-}
-
-function formatDateOnly(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '--'
-  return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}`
-}
-
 function formatDateTime(value: string): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '--'
@@ -336,76 +294,6 @@ function formatShortTime(value: string): string {
 
 function pad(value: number): string {
   return String(value).padStart(2, '0')
-}
-
-function quotaTotal(row: QuotaUsage): string {
-  return row.total === 'unlimited' ? '不限' : `${row.total.toLocaleString()}`
-}
-
-function quotaRemaining(row: QuotaUsage): string {
-  if (row.remaining === null) return '不限'
-  return `${row.remaining.toLocaleString()}`
-}
-
-function formatMetric(value: number | undefined): string {
-  return typeof value === 'number' ? value.toLocaleString() : '--'
-}
-
-async function loadQuotaStats(): Promise<void> {
-  if (quotaStatsLoaded.value || loadingQuotaStats.value) return
-  loadingQuotaStats.value = true
-  try {
-    const [suite, aplusGeneration, videos] = await Promise.all([
-      listJobs(),
-      listAplusGenerationJobs(),
-      listVideoJobs(),
-    ])
-    const suiteImageRows = suite.map((item) => ({
-      count: successItemCount(item.items, item.count, item.status),
-      createdAt: item.created_at,
-    }))
-    const aplusImageRows = aplusGeneration.map((item) => ({
-      count: successItemCount(item.items, item.count, item.status),
-      createdAt: item.created_at,
-    }))
-    const videoRows = videos.map((item) => ({
-      count: successItemCount(item.items, item.count, item.status),
-      createdAt: item.created_at,
-    }))
-    const imageRows = [...suiteImageRows, ...aplusImageRows]
-
-    quotaStats.value = {
-      totalImages: sumCounts(imageRows),
-      totalVideos: sumCounts(videoRows),
-      monthImages: sumCounts(imageRows.filter((item) => isCurrentMonth(item.createdAt))),
-      monthVideos: sumCounts(videoRows.filter((item) => isCurrentMonth(item.createdAt))),
-    }
-  } catch {
-    quotaStats.value = null
-  } finally {
-    quotaStatsLoaded.value = true
-    loadingQuotaStats.value = false
-  }
-}
-
-function successItemCount<T extends { status: string }>(items: T[] | null | undefined, fallbackCount: number, jobStatus: string): number {
-  if (items?.length) return items.filter((item) => isSuccessfulStatus(item.status)).length
-  return isSuccessfulStatus(jobStatus) ? fallbackCount : 0
-}
-
-function sumCounts(rows: Array<{ count: number }>): number {
-  return rows.reduce((total, item) => total + item.count, 0)
-}
-
-function isSuccessfulStatus(status: string): boolean {
-  return ['succeeded', 'completed'].includes(status)
-}
-
-function isCurrentMonth(value: string): boolean {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return false
-  const now = new Date()
-  return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth()
 }
 
 async function loadTasks(): Promise<void> {
@@ -547,7 +435,7 @@ function openPricingFromQuota(): void {
 
 function messageType(item: AccountMessage): string {
   if (item.category === 'security') return '账户安全提醒'
-  if (item.category === 'quota') return '额度通知'
+  if (item.category === 'quota') return '豆子通知'
   if (item.category === 'payment') return '支付通知'
   if (item.category === 'register') return '系统通知'
   return item.category || item.title || '系统通知'
@@ -678,28 +566,36 @@ function deleteAccount(): void {
         <section v-else-if="activeTab === 'quota'" class="account-section account-quota-section">
           <div class="account-plan-line quota-plan-line">
             <div>
-              <b>{{ authStore.currentPlan.name }}（有效期至 {{ planExpiry() }}）</b>
+              <b>{{ authStore.currentPlan.name }}（有效期至 {{ beanExpiryText }}）</b>
             </div>
             <button class="quota-plan-action" type="button" @click="openPricingFromQuota">变更套餐 <RightOutlined /></button>
-            <strong>{{ quotaPercent }}%</strong>
-            <i><em :style="{ width: `${quotaPercent}%` }" /></i>
-            <p>剩余额度 <b>{{ quotaRemaining(mainQuota) }} / {{ quotaTotal(mainQuota) }} {{ mainQuota.unit }}</b></p>
           </div>
-          <div class="quota-usage-metrics" :class="{ loading: loadingQuotaStats && !quotaStats }">
-            <article v-for="item in quotaUsageMetrics" :key="item.label">
-              <i class="quota-metric-mark" />
-              <span class="quota-metric-icon"><component :is="item.icon" /></span>
-              <span>{{ item.label }}</span>
-              <div v-if="'value' in item" class="quota-metric-value">
-                <b>{{ item.value }}</b>
-                <small>{{ item.unit }}</small>
-              </div>
-              <div v-else class="quota-metric-month">
-                <small>图片 <b>{{ item.monthImages }}</b></small>
-                <em />
-                <small>视频 <b>{{ item.monthVideos }}</b></small>
-              </div>
+          <div class="bean-summary-grid">
+            <article>
+              <small>可用豆子</small>
+              <strong>{{ availableBeansText }}</strong>
             </article>
+            <article>
+              <small>处理中预留</small>
+              <strong>{{ reservedBeansText }}</strong>
+            </article>
+            <article>
+              <small>12 豆 / 张</small>
+              <strong>高清商品图</strong>
+            </article>
+          </div>
+          <div v-if="beanBatches.length" class="bean-expiry-list">
+            <article v-for="batch in beanBatches" :key="batch.id">
+              <span>{{ batch.description || batch.source_type }}</span>
+              <b>{{ batch.remaining_beans.toLocaleString() }} 豆</b>
+              <time>{{ batch.expires_at ? formatDateTime(batch.expires_at) : '--' }}</time>
+            </article>
+          </div>
+          <div v-else class="quota-empty">
+            <p>暂无有效期内的豆子批次</p>
+          </div>
+          <div class="bean-rule-line">
+            <p>系统生成失败不扣豆，已扣豆将自动返还。</p>
           </div>
         </section>
 

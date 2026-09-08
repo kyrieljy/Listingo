@@ -1,4 +1,4 @@
-export type PhaseKey = 'suite' | 'aplus' | 'video' | 'agent'
+export type PhaseKey = 'suite' | 'aplus' | 'agent'
 export type SuiteMode = 'smart' | 'custom'
 export type ModelPreference = 'fidelity' | 'layout'
 export type CustomCountKey = 'white_background' | 'scene' | 'selling_point' | 'other'
@@ -23,22 +23,6 @@ export type WorkspaceForm = {
   smartCount: number
   customCounts: CustomCounts
   modelPreference: ModelPreference
-  dryRun: boolean
-}
-
-export type VideoForm = {
-  platform: string
-  market: string
-  country: string
-  language: string
-  ratio: string
-  sellingPoints: string
-  productName: string
-  category: string
-  targetAudience: string
-  videoTypes: string[]
-  duration: number
-  resolution: string
   dryRun: boolean
 }
 
@@ -81,7 +65,6 @@ export function latestActiveWorkspaceJob<T extends { status: string; created_at:
 export const phaseDefinitions = [
   { key: 'suite' as const, label: '商品套图', short: '套图' },
   { key: 'aplus' as const, label: 'A+详情', short: 'A+' },
-  { key: 'video' as const, label: '爆款视频生成', short: '视频' },
   { key: 'agent' as const, label: 'Agent与画布', short: 'Agent' },
 ]
 
@@ -204,7 +187,7 @@ export function createDefaultAplusForm(): AplusForm {
     selectedModules: [...defaultAplusModules],
     outputSpec: 'amazon_aplus_standard',
     advancedTargets: ['web'],
-    dryRun: true,
+    dryRun: false,
   }
 }
 
@@ -283,25 +266,7 @@ export function createDefaultWorkspaceForm(): WorkspaceForm {
     smartCount: 7,
     customCounts: { white_background: 1, scene: 2, selling_point: 2, other: 2 },
     modelPreference: 'fidelity',
-    dryRun: true,
-  }
-}
-
-export function createDefaultVideoForm(): VideoForm {
-  return {
-    platform: 'TikTok',
-    market: '北美',
-    country: '美国',
-    language: '英语',
-    ratio: '9:16',
-    sellingPoints: '',
-    productName: '',
-    category: '',
-    targetAudience: '',
-    videoTypes: ['UGC 种草'],
-    duration: 15,
-    resolution: '1080p',
-    dryRun: true,
+    dryRun: false,
   }
 }
 
@@ -344,25 +309,6 @@ export function buildGenerationPayload(
     count,
     custom_counts: form.mode === 'custom' ? form.customCounts : undefined,
     model_preference: form.modelPreference,
-    dry_run: form.dryRun,
-  }
-}
-
-export function buildVideoPayload(assetIds: string[], form: VideoForm) {
-  return {
-    asset_ids: assetIds,
-    platform: form.platform,
-    market: form.market,
-    country: form.country,
-    language: form.language,
-    aspect_ratio: form.ratio,
-    selling_points: form.sellingPoints,
-    product_name: form.productName,
-    category: form.category,
-    target_audience: form.targetAudience,
-    video_types: form.videoTypes,
-    duration: form.duration,
-    resolution: form.resolution,
     dry_run: form.dryRun,
   }
 }

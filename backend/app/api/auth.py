@@ -18,11 +18,14 @@ from backend.app.core.rate_limit import (
     rate_limit_headers,
 )
 from backend.app.core.storage.keys import session_cache_key
-from backend.app.models import LoginEvent, Notification, User, UserSession, utcnow
+from backend.app.models import EnterpriseLead, LoginEvent, Notification, User, UserSession, utcnow
 from backend.app.schemas import (
     AuthMeOut,
+    BeanPackOut,
     ChangePhoneConfirmCreate,
     ChangePhoneStartCreate,
+    EnterpriseLeadCreate,
+    EnterpriseLeadOut,
     FirstPasswordCreate,
     FeishuWebhookTestCreate,
     NotificationOut,
@@ -64,6 +67,7 @@ from backend.app.services.sms import normalize_phone, send_sms_code, verify_sms_
 from backend.app.services.subscriptions import (
     create_payment_order,
     current_quota_summary,
+    list_bean_packs,
     list_subscription_plans,
     mock_pay_order,
     plan_by_code,
@@ -490,6 +494,11 @@ def subscription_plans(session: Session = Depends(get_session)) -> list[dict[str
     return list_subscription_plans(session, include_internal=False)
 
 
+@router.get("/bean-packs", response_model=list[BeanPackOut])
+def bean_packs(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    return list_bean_packs(session)
+
+
 @router.get("/subscription/me", response_model=QuotaSummaryOut)
 def subscription_me(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)) -> dict[str, Any]:
     return current_quota_summary(session, current_user)
@@ -506,9 +515,52 @@ def create_order(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    order = create_payment_order(session, current_user, plan_code=payload.plan_code, billing_cycle=payload.billing_cycle)
+    order = create_payment_order(
+        session,
+        current_user,
+        plan_code=payload.plan_code,
+        billing_cycle=payload.billing_cycle,
+        bean_pack_code=payload.bean_pack_code,
+    )
     session.commit()
     return serialize_order(session, order)
+
+
+@router.post("/enterprise-leads", response_model=EnterpriseLeadOut, status_code=201)
+def create_enterprise_lead(
+    payload: EnterpriseLeadCreate,
+    current_user: User | None = Depends(get_optional_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    lead = EnterpriseLead(
+        contact_name=payload.name.strip(),
+        phone=payload.phone.strip(),
+        wechat=payload.wechat.strip(),
+        company_or_shop=payload.company_or_shop.strip(),
+        monthly_usage=payload.monthly_usage,
+        requirement=payload.requirement.strip(),
+        user_id=current_user.id if current_user else None,
+        account_phone=current_user.phone if current_user else "",
+    )
+    session.add(lead)
+    session.commit()
+    session.refresh(lead)
+    return {
+        "id": lead.id,
+        "contact_name": lead.contact_name,
+        "phone": lead.phone,
+        "wechat": lead.wechat,
+        "company_or_shop": lead.company_or_shop,
+        "monthly_usage": lead.monthly_usage,
+        "requirement": lead.requirement,
+        "user_id": lead.user_id,
+        "account_phone": lead.account_phone,
+        "source": lead.source,
+        "status": lead.status,
+        "note": lead.note,
+        "created_at": lead.created_at,
+        "updated_at": lead.updated_at,
+    }
 
 
 @router.post("/subscription/orders/{order_id}/mock-pay", response_model=PaymentOrderOut)

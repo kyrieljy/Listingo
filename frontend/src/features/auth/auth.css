@@ -1292,6 +1292,182 @@
   line-height: 1.6;
 }
 
+.bean-pack-section {
+  margin-top: 34px;
+  padding-top: 24px;
+  border-top: 1px solid #edf0f6;
+}
+
+.bean-pack-section > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.bean-pack-section > header h3 {
+  margin: 0;
+  color: #1f2430;
+  font-size: 18px;
+}
+
+.bean-pack-section > header p,
+.bean-pack-rules {
+  margin: 0;
+  color: #7d8491;
+  font-size: 12px;
+}
+
+.bean-pack-grid {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.bean-pack-grid article {
+  min-height: 168px;
+  padding: 16px;
+  border: 1px solid #e5e8ee;
+  border-radius: 8px;
+  background: #fbfcff;
+  display: flex;
+  flex-direction: column;
+}
+
+.bean-pack-grid article.recommended {
+  border-color: #6c5ce7;
+  background: #f5f4ff;
+}
+
+.bean-pack-grid article > div {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.bean-pack-grid b {
+  color: #252b36;
+  font-size: 14px;
+}
+
+.bean-pack-grid strong {
+  color: #1f2430;
+  font-size: 20px;
+}
+
+.bean-pack-grid span {
+  margin-top: 12px;
+  color: #6c5ce7;
+  font-weight: 800;
+}
+
+.bean-pack-grid small {
+  margin-top: 5px;
+  color: #7d8491;
+  font-size: 12px;
+}
+
+.bean-pack-grid button {
+  height: 34px;
+  margin-top: auto;
+  border-radius: 7px;
+  background: #242a38;
+  color: #fff;
+  font-weight: 780;
+}
+
+.bean-pack-rules {
+  margin-top: 14px;
+  text-align: center;
+}
+
+.enterprise-lead-card {
+  padding: 30px 28px 24px;
+  background: #fff;
+}
+
+.enterprise-lead-card header {
+  text-align: center;
+}
+
+.enterprise-lead-card h3 {
+  margin: 0;
+  color: #1f2430;
+  font-size: 20px;
+}
+
+.enterprise-lead-card header p {
+  margin: 8px 0 0;
+  color: #7d8491;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.enterprise-lead-fields {
+  margin-top: 20px;
+  display: grid;
+  gap: 12px;
+}
+
+.enterprise-lead-fields label {
+  display: grid;
+  gap: 6px;
+  color: #5d6572;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.enterprise-lead-fields input,
+.enterprise-lead-fields select,
+.enterprise-lead-fields textarea {
+  width: 100%;
+  border: 1px solid #dfe3ea;
+  border-radius: 7px;
+  padding: 9px 10px;
+  color: #242a35;
+  font-size: 13px;
+  outline: none;
+}
+
+.enterprise-lead-fields textarea {
+  resize: none;
+}
+
+.enterprise-lead-error {
+  margin: 10px 0 0;
+  color: #d83a3a;
+  font-size: 12px;
+}
+
+.enterprise-lead-card footer {
+  margin-top: 18px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.enterprise-lead-card .secondary,
+.enterprise-lead-card .primary {
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 7px;
+  font-weight: 780;
+}
+
+.enterprise-lead-card .secondary {
+  border: 1px solid #dfe3ea;
+  background: #fff;
+  color: #5d6572;
+}
+
+.enterprise-lead-card .primary {
+  background: #6c5ce7;
+  color: #fff;
+}
+
 @keyframes pricing-card-pop {
   0% { transform: translateY(0) scale(.985); }
   52% { transform: translateY(-18px) scale(1.055); }
@@ -5411,4 +5587,88 @@
   background: #f5f6f8;
   color: #a2a9b5;
   cursor: not-allowed;
+}
+
+.account-line-modal .bean-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.account-line-modal .bean-summary-grid article {
+  display: grid;
+  gap: 6px;
+  min-height: 96px;
+  align-content: center;
+  padding: 15px;
+  border: 1px solid #e8ebf1;
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.account-line-modal .bean-summary-grid small {
+  color: #7c8493;
+  font-size: 12px;
+}
+
+.account-line-modal .bean-summary-grid strong {
+  color: #182031;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.account-line-modal .bean-expiry-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.account-line-modal .bean-expiry-list article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 12px;
+  border: 1px solid #e9ecf2;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.account-line-modal .bean-expiry-list span {
+  min-width: 0;
+  overflow: hidden;
+  color: #40495a;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-line-modal .bean-expiry-list b,
+.account-line-modal .bean-expiry-list time {
+  color: #1b2334;
+  font-size: 12px;
+}
+
+.account-line-modal .bean-expiry-list time {
+  color: #7b8392;
+}
+
+.account-line-modal .bean-rule-line {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f6f8fb;
+}
+
+.account-line-modal .bean-rule-line p {
+  margin: 0;
+  color: #626b7b;
+  font-size: 12px;
+}
+
+.pricing-modal-wrap .bean-pack-section.focused {
+  outline: 2px solid rgba(23, 32, 54, .18);
+  outline-offset: 3px;
 }

@@ -6,11 +6,9 @@ import {
   buildAplusPlanPayload,
   buildCustomTypes,
   buildGenerationPayload,
-  buildVideoPayload,
   aplusModuleTotal,
   aplusModules,
   createDefaultAplusForm,
-  createDefaultVideoForm,
   createDefaultWorkspaceForm,
   generationFailureMessage,
   generationCount,
@@ -25,8 +23,6 @@ import {
   renderMarkdown,
   ratioOptions,
   ratioValues,
-  videoPlatformOptions,
-  videoTypeOptions,
 } from './workspace-model'
 import {
   BATCH_UPLOAD_CONCURRENCY,
@@ -47,7 +43,6 @@ import batchModalRawSource from './BatchHostingModal.vue?raw'
 import batchTaskCardSource from './BatchTaskCard.vue?raw'
 import imageTextEditPanelSource from './ImageTextEditPanel.vue?raw'
 import watermarkMenuSource from './WatermarkDownloadMenu.vue?raw'
-import videoPanelRawSource from './VideoPhasePanel.vue?raw'
 import workspaceRawSource from './WorkspaceView.vue?raw'
 import apiClientSource from '../../api/client.ts?raw'
 
@@ -55,20 +50,20 @@ const normalizeSourceLineEndings = (source: string) => source.replace(/\r\n/g, '
 const aplusPanelSource = normalizeSourceLineEndings(aplusPanelRawSource)
 const batchHistorySource = normalizeSourceLineEndings(batchHistoryRawSource)
 const batchModalSource = normalizeSourceLineEndings(batchModalRawSource)
-const videoPanelSource = normalizeSourceLineEndings(videoPanelRawSource)
 const workspaceSource = normalizeSourceLineEndings(workspaceRawSource)
 const workspaceSuiteCss = readFileSync(new URL('./workspace-suite.css', import.meta.url), 'utf8')
-const workspaceVideoCss = readFileSync(new URL('./workspace-video.css', import.meta.url), 'utf8')
 const frontendNginxConf = readFileSync(new URL('../../../nginx.conf', import.meta.url), 'utf8')
 
 describe('workspace model', () => {
-  it('keeps the four planned phase entries in order', () => {
+  it('keeps the three user-facing phase entries in order', () => {
     expect(phaseDefinitions.map((item) => item.label)).toEqual([
       '商品套图',
       'A+详情',
-      '爆款视频生成',
       'Agent与画布',
     ])
+    expect(phaseDefinitions.map((item) => item.key)).not.toContain('video')
+    expect(workspaceSource).not.toContain('VideoPhasePanel')
+    expect(workspaceSource).not.toContain('listVideoJobs')
   })
 
   it('closes the Agent phase entry as a disabled coming soon nav item', () => {
@@ -105,9 +100,10 @@ describe('workspace model', () => {
     expect(latestActiveWorkspaceJob(jobs)?.id).toBe('queued-new')
   })
 
-  it('builds a valid default dryrun payload', () => {
+  it('builds a valid default payload with live generation (dry_run defaults to false)', () => {
     const payload = buildGenerationPayload(['asset-1'], '通勤保温，防滑握持')
-    expect(payload.dry_run).toBe(true)
+    // 变更 018：请求默认真实出图（dry_run 默认翻转 false），dryrun 改为显式调试开关。
+    expect(payload.dry_run).toBe(false)
     expect(payload.count).toBe(7)
     expect(payload.aspect_ratio).toBe('1:1')
     expect(payload.asset_ids).toEqual(['asset-1'])
@@ -318,7 +314,6 @@ describe('workspace model', () => {
     expect(aplusPanelSource).not.toContain('class="image-size-badge"')
     expect(workspaceSuiteCss).not.toContain('.image-size-badge')
     expect(workspaceSource).toContain('sellingPointsEditing.value = false')
-    expect(videoPanelSource).toContain('sellingPointsEditing.value = false')
     expect(aplusPanelSource).toContain('productInfoEditing.value = false')
   })
 
@@ -439,19 +434,15 @@ describe('workspace model', () => {
     expect(PRODUCT_IMAGE_UPLOAD_LIMIT).toBe(6)
     expect(workspaceSource).toContain('const uploadLimitReached = computed(() => assets.value.length >= PRODUCT_IMAGE_UPLOAD_LIMIT)')
     expect(aplusPanelSource).toContain('const uploadLimitReached = computed(() => assets.value.length >= PRODUCT_IMAGE_UPLOAD_LIMIT)')
-    expect(videoPanelSource).toContain('const uploadLimitReached = computed(() => assets.value.length >= PRODUCT_IMAGE_UPLOAD_LIMIT)')
     expect(workspaceSource).toContain('const remaining = PRODUCT_IMAGE_UPLOAD_LIMIT - assets.value.length')
     expect(aplusPanelSource).toContain('const remaining = PRODUCT_IMAGE_UPLOAD_LIMIT - assets.value.length')
-    expect(videoPanelSource).toContain('const remaining = PRODUCT_IMAGE_UPLOAD_LIMIT - assets.value.length')
     expect(workspaceSource).toContain(':disabled="uploadLimitReached || uploading"')
     expect(workspaceSource).toContain(':aria-disabled="uploadLimitReached || uploading"')
     expect(workspaceSource).toContain("uploadLimitReached ? `最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张`")
     expect(aplusPanelSource).toContain("uploadLimitReached ? `最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张`")
-    expect(videoPanelSource).toContain("uploadLimitReached ? `最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张`")
     expect(workspaceSource).toContain("uploadLimitReached ? '删除已有图片后可继续上传'")
     expect(workspaceSource).toContain('最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张商品图，请先删除已有图片')
     expect(aplusPanelSource).toContain('最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张商品图，本次只添加 ${remaining} 张')
-    expect(videoPanelSource).toContain('最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张商品图，本次只添加 ${remaining} 张')
     expect(normalizedDisabledRule).toContain('cursor:not-allowed')
     expect(normalizedDisabledRule).toContain('opacity:.68')
   })
@@ -558,10 +549,8 @@ describe('workspace model', () => {
   it('removes product category from workspace inputs and upload analytics payloads', () => {
     expect(workspaceSource).not.toContain('商品类目')
     expect(aplusPanelSource).not.toContain('商品类目')
-    expect(videoPanelSource).not.toContain('商品类目')
     expect(workspaceSource).not.toContain('product_category: form.value.category')
     expect(aplusPanelSource).not.toContain('product_category: form.value.category')
-    expect(videoPanelSource).not.toContain('product_category: form.value.category')
   })
 
   it('keeps smart matching on the meta prompt default seven images without a count selector', () => {
@@ -667,8 +656,6 @@ describe('workspace model', () => {
     expect(aplusPanelSource).toContain('aplus_output_spec_click')
     expect(aplusPanelSource).toContain('aplus_module_click')
     expect(aplusPanelSource).toContain('aplus_generate_submit')
-    expect(videoPanelSource).toContain('video_type_click')
-    expect(videoPanelSource).toContain('video_generate_submit')
     expect(batchModalSource).toContain('batch_submit')
   })
 
@@ -680,25 +667,25 @@ describe('workspace model', () => {
     )
     expect(workspaceSource).toContain('@require-auth="requireAuthForModelAction"')
     expect(workspaceSource).toContain('<APlusPhasePanel v-if="phase===\'aplus\'" ref="aplusPanel" @open-pricing="openPricing" @require-auth="requireAuthForModelAction" />')
-    expect(workspaceSource).toContain('<VideoPhasePanel v-if="phase===\'video\'" ref="videoPanel" @require-auth="requireAuthForModelAction" />')
     expect(workspaceSource).toContain('<BatchHostingModal v-model:open="suiteBatchOpen" business-type="suite" :suite-form="form" @select-history="openSuiteBatchSelection" @require-auth="requireAuthForModelAction" />')
 
     expect(aplusPanelSource).toContain("'require-auth': []")
     expect(aplusPanelSource).toContain('function openBatchHosting()')
     expect(aplusPanelSource).toContain("trackAplusEvent('aplus_batch_click', 'click', 'batch_aplus')")
-    expect(aplusPanelSource).toContain('@click="openBatchHosting"')
+    // 订阅无批量权益时按钮保持可见但禁用，点击引导升级订阅而非直接打开批量托管
+    expect(aplusPanelSource).toContain('function onBatchHostingEntryClick()')
+    expect(aplusPanelSource).toContain('@click="onBatchHostingEntryClick"')
+    expect(aplusPanelSource).toContain('需要升级订阅解锁批量生成功能')
+    expect(aplusPanelSource).toContain('a-tooltip')
     expect(aplusPanelSource).toContain('@require-auth="emit(\'require-auth\')"')
-    expect(videoPanelSource).toContain("const emit = defineEmits<{ 'require-auth': [] }>()")
     expect(batchModalSource).toContain("'require-auth': []")
     expect(batchModalSource).toMatch(/emit\('update:open', false\)\s*emit\('require-auth'\)/)
 
     expect((workspaceSource.match(/if \(requireAuthForModelAction\(\)\) return/g) ?? []).length).toBeGreaterThanOrEqual(8)
     expect((aplusPanelSource.match(/if \(requireAuthForModelAction\(\)\) return/g) ?? []).length).toBeGreaterThanOrEqual(7)
-    expect((videoPanelSource.match(/if \(requireAuthForModelAction\(\)\) return/g) ?? []).length).toBeGreaterThanOrEqual(4)
     expect((batchModalSource.match(/if \(requireAuthForModelAction\(\)\) return/g) ?? []).length).toBeGreaterThanOrEqual(2)
 
     expect(aplusPanelSource).toContain('async function regenerateCopywriting() {\n  await aiWrite()\n}')
-    expect(videoPanelSource).toContain('async function regenerateCopywriting() {\n  await aiWrite()\n}')
     expect(batchModalSource).toContain('async function aiWriteTask(index: number) {\n  if (requireAuthForModelAction()) return')
   })
 
@@ -716,8 +703,6 @@ describe('workspace model', () => {
     expect(workspaceSource).toContain('window.setTimeout(resolve, IMAGE_JOB_POLL_INTERVAL_MS)')
     expect(aplusPanelSource).toContain('const APLUS_JOB_POLL_INTERVAL_MS = 500')
     expect(aplusPanelSource).toContain('window.setTimeout(resolve, APLUS_JOB_POLL_INTERVAL_MS)')
-    expect(videoPanelSource).toContain('const VIDEO_JOB_POLL_INTERVAL_MS = 1000')
-    expect(videoPanelSource).toContain('window.setTimeout(resolve, VIDEO_JOB_POLL_INTERVAL_MS)')
   })
 
   it('keeps polling when terminal jobs still lack renderable result URLs', () => {
@@ -728,10 +713,6 @@ describe('workspace model', () => {
     expect(aplusPanelSource).toContain('function aplusJobNeedsRefresh')
     expect(aplusPanelSource).toContain("item.status === 'succeeded' && !currentUrl(item)")
     expect(aplusPanelSource).toContain('if (!aplusJobNeedsRefresh(latest)) return latest')
-
-    expect(videoPanelSource).toContain('function videoJobNeedsRefresh')
-    expect(videoPanelSource).toContain("item.status === 'succeeded' && !currentVideoUrl(item)")
-    expect(videoPanelSource).toContain('if (!videoJobNeedsRefresh(latest)) return latest')
   })
 
   it('resumes job polling from history and kept-alive module returns', () => {
@@ -741,9 +722,6 @@ describe('workspace model', () => {
     expect(aplusPanelSource).toContain('onActivated(() => { void resumeCurrentAplusJobRefresh() })')
     expect(aplusPanelSource).toContain('void resumeAplusGenerationRefresh(generationJob.value.id)')
     expect(aplusPanelSource).toContain('void resumeAplusPlanRefresh(planJob.value.id)')
-
-    expect(videoPanelSource).toContain('onActivated(() => { void resumeCurrentVideoJobRefresh() })')
-    expect(videoPanelSource).toContain('void resumeVideoJobRefresh(job.value.id)')
   })
 
   it('restores the latest unfinished generation task after page refresh', () => {
@@ -770,11 +748,6 @@ describe('workspace model', () => {
     expect(aplusPanelSource).toContain("if (item.status === 'cancelled') return '已取消'")
     expect(aplusPanelSource).toContain("if (item.status === 'succeeded') return '结果同步中'")
     expect(aplusPanelSource).toContain('v-if="aplusPlaceholderSpinning(item)"')
-
-    expect(videoPanelSource).toContain("if (item.status === 'failed') return '生成失败'")
-    expect(videoPanelSource).toContain("if (item.status === 'cancelled') return '已取消'")
-    expect(videoPanelSource).toContain("if (item.status === 'succeeded') return '结果同步中'")
-    expect(videoPanelSource).toContain('v-else-if="!videoPlaceholderSpinning(item)"')
   })
 
   it('removes user-facing progress percentages from active generation buttons', () => {
@@ -784,22 +757,16 @@ describe('workspace model', () => {
     expect(aplusPanelSource).toContain("planning ? '生成方案中' : generating ? '生成图片中'")
     expect(aplusPanelSource).not.toContain('生成方案 ${planJob?.progress')
     expect(aplusPanelSource).not.toContain('生成图片 ${generationJob?.progress')
-    expect(videoPanelSource).toContain("generating ? '正在生成视频'")
-    expect(videoPanelSource).not.toContain('正在生成 ${job?.progress')
   })
 
   it('routes generation and content-safety failures through the top message area', () => {
     expect(workspaceSource).not.toContain('Modal.error')
     expect(aplusPanelSource).not.toContain('Modal.error')
-    expect(videoPanelSource).not.toContain('Modal.error')
     expect(workspaceSource).toContain("message.error(generationFailureMessageFor('image', source))")
     expect(aplusPanelSource).toContain("message.error(generationFailureMessageFor('image', source))")
-    expect(videoPanelSource).toContain("message.error(generationFailureMessageFor('video', source))")
     expect(generationErrorsRawSource).toContain("image: '生成图片失败，请稍后重试'")
-    expect(generationErrorsRawSource).toContain("video: '生成视频失败，请稍后重试'")
     expect(generationErrorsRawSource).toContain('import.meta.env.DEV')
     expect(generationErrorsRawSource).toContain("import.meta.env.VITE_SHOW_DETAILED_GENERATION_ERRORS === 'true'")
-    expect(videoPanelSource).not.toContain('{{ item.error }}')
     expect(aplusPanelSource).not.toContain('{{ item.error }}')
     expect(workspaceSource).not.toContain('{{ item.error }}')
   })
@@ -815,7 +782,6 @@ describe('workspace model', () => {
     expect(workspaceSource).toContain("aiSuggestion.value = ''")
     expect(workspaceSource).toContain('sellingPointsEditing.value = true')
     expect(aplusPanelSource).toContain('productInfoEditing.value = true')
-    expect(videoPanelSource).toContain('sellingPointsEditing.value = true')
     expect(workspaceSource).not.toContain('form.value.sellingPoints = result.selling_points')
   })
 
@@ -824,16 +790,12 @@ describe('workspace model', () => {
     expect(workspaceSource).toContain('class="markdown-input-frame selling-points-markdown-frame"')
     expect(workspaceSource).toContain('v-model="form.sellingPoints" class="selling-points-input"')
     expect(aplusPanelSource).toContain('v-model="form.productInfo" class="aplus-product-info selling-points-input"')
-    expect(videoPanelSource).toContain('v-model="form.sellingPoints" class="selling-points-input video-selling-points-input"')
     expect(workspaceSource).toContain('form.sellingPoints.trim() && !sellingPointsEditing')
     expect(aplusPanelSource).toContain('form.productInfo.trim() && !productInfoEditing')
-    expect(videoPanelSource).toContain('form.sellingPoints.trim() && !sellingPointsEditing')
     expect(workspaceSource).toContain('@focus="sellingPointsEditing = true" @blur="sellingPointsEditing = false"')
     expect(aplusPanelSource).toContain('@focus="productInfoEditing = true" @blur="productInfoEditing = false"')
-    expect(videoPanelSource).toContain('@focus="sellingPointsEditing = true" @blur="sellingPointsEditing = false"')
     expect(workspaceSource).toContain('v-html="renderMarkdown(form.sellingPoints)"')
     expect(aplusPanelSource).toContain('v-html="renderMarkdown(form.productInfo)"')
-    expect(videoPanelSource).toContain('v-html="renderMarkdown(form.sellingPoints)"')
     expect(workspaceSource).toContain('showSellingPointsEditor')
     expect(aplusPanelSource).toContain('showProductInfoEditor')
     expect(workspaceSuiteCss).not.toContain('.markdown-editor-toggle')
@@ -859,38 +821,25 @@ describe('workspace model', () => {
     expect(workspaceSource).toContain('inputValid')
   })
 
-  it('wires the video phase to the real video workspace instead of the demo panel', () => {
-    expect(workspaceSource).toContain("import VideoPhasePanel from './VideoPhasePanel.vue'")
-    expect(workspaceSource).toContain('<KeepAlive>')
-    expect(workspaceSource).toContain('<VideoPhasePanel v-if="phase===\'video\'" ref="videoPanel" @require-auth="requireAuthForModelAction" />')
-    expect(workspaceSource).toContain('APlusPhasePanel v-if="phase===\'aplus\'" ref="aplusPanel"')
-  })
-
-  it('wires best-effort cancellation for suite, A+ and video jobs', () => {
+  it('wires best-effort cancellation for suite and A+ jobs', () => {
     expect(apiClientSource).toContain('cancelJob')
     expect(apiClientSource).toContain('api.post(`/generation-jobs/${id}/cancel`)')
     expect(apiClientSource).toContain('api.post(`/aplus-plan-jobs/${id}/cancel`)')
     expect(apiClientSource).toContain('api.post(`/aplus-generation-jobs/${id}/cancel`)')
-    expect(apiClientSource).toContain('api.post(`/video-jobs/${id}/cancel`)')
     expect(workspaceSource).toContain('cancelRequested.value')
     expect(workspaceSource).toContain('cancelGeneration')
     expect(aplusPanelSource).toContain('cancelAplusPlanJob')
     expect(aplusPanelSource).toContain('cancelAplusGenerationJob')
-    expect(videoPanelSource).toContain('cancelVideoJob')
     expect(workspaceSource).toContain('取消任务')
     expect(aplusPanelSource).toContain('取消任务')
-    expect(videoPanelSource).toContain('取消任务')
   })
 
   it('dispatches the topbar new-task action to the active module only', () => {
     expect(workspaceSource).toContain("if (phase.value === 'aplus')")
     expect(workspaceSource).toContain('aplusPanel.value?.startNewTask()')
-    expect(workspaceSource).toContain("if (phase.value === 'video')")
-    expect(workspaceSource).toContain('videoPanel.value?.startNewTask()')
     expect(workspaceSource).toContain('function resetSuiteTask')
     expect(workspaceSource).toContain('currentDryRun')
     expect(aplusPanelSource).toContain('defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })')
-    expect(videoPanelSource).toContain('defineExpose({ openHistoryJob, startNewTask, dryRun })')
   })
 
   it('clears AI copywriting and main inputs when product images change', () => {
@@ -900,19 +849,13 @@ describe('workspace model', () => {
     expect(aplusPanelSource).toContain('function clearCopywritingState')
     expect(aplusPanelSource).toContain("form.value.productInfo = ''")
     expect(aplusPanelSource).toContain('@click="removeAsset(asset.id)"')
-    expect(videoPanelSource).toContain('function clearCopywritingState')
-    expect(videoPanelSource).toContain("form.value.sellingPoints = ''")
-    expect(videoPanelSource).toContain('@click="removeAsset(asset.id)"')
   })
 
   it('loads topbar history from the current workspace phase', () => {
     expect(apiClientSource).toContain("api.get('/aplus-generation-jobs')")
-    expect(workspaceSource).toContain("if (phase.value === 'video') history.value = await listVideoJobs()")
-    expect(workspaceSource).toContain("else if (phase.value === 'aplus') history.value = await listAplusGenerationJobs()")
+    expect(workspaceSource).toContain("if (phase.value === 'aplus') history.value = await listAplusGenerationJobs()")
     expect(workspaceSource).toContain("else if (phase.value === 'suite') history.value = await listJobs()")
-    expect(workspaceSource).toContain("phase.value === 'video' ? '视频历史'")
     expect(workspaceSource).toContain("phase.value === 'aplus' ? 'A+ 详情历史'")
-    expect(workspaceSource).toContain("await videoPanel.value?.openHistoryJob(entry as VideoJob)")
     expect(workspaceSource).toContain("await aplusPanel.value?.openHistoryJob(entry as AplusJob)")
   })
 
@@ -1097,57 +1040,6 @@ describe('workspace model', () => {
     expect(aplusPanelSource).not.toContain('严格按文字事实')
   })
 
-  it('uses the prior skincare video detail empty state', () => {
-    expect(videoPanelSource).toContain('/demo/video-skincare-source.png')
-    expect(videoPanelSource).toContain('/demo/video-skincare-hero.png')
-    expect(videoPanelSource).toContain('/demo/video-skincare-result.png')
-    expect(videoPanelSource).toContain('/demo/video-skincare-frame-01.png')
-    expect(videoPanelSource).toContain('/demo/video-skincare-frame-02.png')
-    expect(videoPanelSource).toContain('/demo/video-skincare-frame-03.png')
-    expect(videoPanelSource).toContain('爆款视频生成')
-    expect(videoPanelSource).not.toContain('爆款视频复刻')
-    expect(videoPanelSource).toContain('class="video-empty-stage"')
-    expect(videoPanelSource).toContain('class="video-empty-copy"')
-    expect(videoPanelSource).toContain('class="video-empty-visual"')
-    expect(videoPanelSource).toContain('class="video-source-card"')
-    expect(videoPanelSource).toContain('class="video-preview-phone"')
-    expect(videoPanelSource).toContain('class="video-result-poster"')
-    expect(videoPanelSource).toContain('class="video-frame-strip"')
-    expect(videoPanelSource).not.toContain('const showcaseCards = [')
-    expect(videoPanelSource).not.toContain('video-showcase-card')
-    expect(videoPanelSource).not.toContain('class="video-source-rail"')
-    expect(videoPanelSource).not.toContain('class="video-output-board"')
-    expect(videoPanelSource).not.toContain('video-storyboard-matrix')
-    expect(videoPanelSource).not.toContain('<span><PlayCircleOutlined /></span>')
-    expect(videoPanelSource).not.toContain('/demo/video-backpack-showcase-')
-    expect(videoPanelSource).not.toContain('/demo/tumbler-')
-  })
-
-  it('keeps the prior video detail visual composition in the light workspace', () => {
-    const stageRule = workspaceVideoCss.match(/\.video-empty-stage\s*\{([^}]*)\}/)?.[1] ?? ''
-    const mobileRule = workspaceVideoCss.match(/@media\(max-width: 760px\)\s*\{([\s\S]*)\}\s*$/)?.[1] ?? ''
-    const normalizedStage = stageRule.replace(/\s+/g, '')
-    const normalizedMobile = mobileRule.replace(/\s+/g, '')
-
-    expect(workspaceVideoCss).toContain('.video-workspace { position: absolute; inset: 54px 0 0 72px; display: grid; grid-template-columns: 398px 1fr; background: #f3f4f6;')
-    expect(normalizedStage).toContain('width:min(1080px,100%)')
-    expect(normalizedStage).toContain('grid-template-columns:minmax(240px,300px)minmax(560px,1fr)')
-    expect(workspaceVideoCss).toContain('.video-empty-copy h2')
-    expect(workspaceVideoCss).toContain('.video-empty-visual')
-    expect(workspaceVideoCss).toContain('.video-source-card')
-    expect(workspaceVideoCss).toContain('.video-result-poster')
-    expect(workspaceVideoCss).toContain('.video-preview-phone')
-    expect(workspaceVideoCss).toContain('.video-frame-strip')
-    expect(workspaceVideoCss).not.toContain('video-source-rail')
-    expect(workspaceVideoCss).not.toContain('video-output-board')
-    expect(workspaceVideoCss).not.toContain('video-showcase-card')
-    expect(workspaceVideoCss).not.toContain('bg-black')
-    expect(normalizedMobile).toContain('.video-empty-stage{min-height:auto;padding:0;grid-template-columns:1fr')
-    expect(normalizedMobile).toContain('.video-source-card{left:0;top:88px')
-    expect(normalizedMobile).toContain('.video-result-poster{left:98px;top:132px')
-    expect(normalizedMobile).toContain('.video-empty-arrow{display:none')
-  })
-
   it('uses five backpack showcase cards for the A+ detail empty state', () => {
     for (let index = 1; index <= 5; index += 1) {
       expect(aplusPanelSource).toContain(`/demo/video-backpack-showcase-${String(index).padStart(2, '0')}.png`)
@@ -1187,103 +1079,4 @@ describe('workspace model', () => {
     expect(workspaceSuiteCss).not.toContain('background: #000')
   })
 
-  it('builds video payloads from the selected templates and platform settings', () => {
-    const form = createDefaultVideoForm()
-    form.videoTypes = ['UGC 种草', '痛点解决']
-    form.sellingPoints = '便携、防漏、适合通勤'
-    const payload = buildVideoPayload(['asset-1'], form)
-
-    expect(payload.asset_ids).toEqual(['asset-1'])
-    expect(payload.platform).toBe('TikTok')
-    expect(payload.aspect_ratio).toBe('9:16')
-    expect(payload.video_types).toEqual(['UGC 种草', '痛点解决'])
-    expect(payload.duration).toBe(15)
-    expect(payload.resolution).toBe('1080p')
-    expect(payload).not.toHaveProperty('generate_audio')
-    expect(payload).not.toHaveProperty('camera_fixed')
-    expect(payload).not.toHaveProperty('watermark')
-  })
-
-  it('exposes the requested video platform and type options', () => {
-    expect(videoPlatformOptions).toEqual(['TikTok', '抖音', '小红书', '淘宝', '亚马逊'])
-    expect(videoTypeOptions.map((item) => item.key)).toEqual([
-      '痛点解决',
-      'UGC 种草',
-      '达人口播',
-      '测评对比',
-      '短剧搞笑带货',
-      '视觉展示',
-      '反转剧情',
-      '清单榜单推荐',
-    ])
-  })
-
-  it('creates optimistic video cards immediately and calls the video APIs', () => {
-    expect(videoPanelSource).toContain('function createOptimisticVideoJob')
-    expect(videoPanelSource).toContain("status: 'running'")
-    expect(videoPanelSource).toContain('job.value = createOptimisticVideoJob(payload)')
-    expect(videoPanelSource).toContain('createVideoJob(payload)')
-    expect(videoPanelSource).toContain('waitForVideoJob(created.id)')
-    expect(apiClientSource).toContain("api.post('/video-jobs', payload, { timeout: GENERATION_REQUEST_TIMEOUT_MS })")
-    expect(apiClientSource).toContain('api.post(`/video-jobs/${jobId}/retry-failed`, undefined, { timeout: GENERATION_REQUEST_TIMEOUT_MS })')
-    expect(apiClientSource).toContain("api.post('/video-copywriting-assist'")
-    expect(apiClientSource).toContain('/api/v1/video-jobs/')
-    expect(apiClientSource).toContain('api.post(`/video-items/${id}/versions`')
-  })
-
-  it('keeps video publish ratio valid when platform changes', () => {
-    expect(videoPanelSource).toContain("import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'")
-    expect(videoPanelSource).toContain('watch(() => form.value.platform')
-    expect(videoPanelSource).toContain('!options.some((item) => item.value === form.value.ratio)')
-    expect(videoPanelSource).toContain('form.value.ratio = options[0].value')
-  })
-
-  it('renders video result actions for edit, script, download and retry', () => {
-    expect(videoPanelSource).toContain('下载选中')
-    expect(videoPanelSource).toContain('重试失败')
-    expect(videoPanelSource).toContain('视频导演脚本')
-    expect(videoPanelSource).toContain('视频二次编辑')
-    expect(videoPanelSource).toContain('title="二次编辑" aria-label="二次编辑"')
-    expect(videoPanelSource).toContain('title="脚本" aria-label="脚本"')
-    expect(videoPanelSource).toContain('<EditOutlined /></button>')
-    expect(videoPanelSource).toContain('<PlayCircleOutlined /></button>')
-    expect(videoPanelSource).not.toContain('<EditOutlined />编辑')
-    expect(videoPanelSource).not.toContain('<PlayCircleOutlined />脚本')
-    expect(videoPanelSource).not.toContain('远程任务号 {{ item.provider_task_id }}')
-    expect(videoPanelSource).not.toContain('<FileTextOutlined />文字')
-    expect(workspaceVideoCss).toContain('.video-card footer .video-card-actions { flex: 0 0 auto; min-width: auto; display: flex; flex-direction: row;')
-    expect(workspaceVideoCss).toContain('justify-content: flex-end; gap: 0;')
-    expect(workspaceVideoCss).toContain('.video-card footer .video-card-actions button { width: 28px; height: 28px; color: #6d7480;')
-    expect(videoPanelSource).toContain('AI 转写')
-    expect(videoPanelSource).toContain('安全演示模式')
-  })
-
-  it('keeps failed-video retry single-shot and suppresses accidental cancellation', () => {
-    expect(videoPanelSource).toContain('const retryCooldownUntil = ref(0)')
-    expect(videoPanelSource).toContain('retryCooldownUntil.value = Date.now() + 2000')
-    expect(videoPanelSource).toContain("if (!job.value || job.value.id.startsWith('optimistic-video-') || generating.value || retryCooldownActive.value) return")
-    expect(videoPanelSource).toContain("const failedItems = job.value.items.filter((item) => item.status === 'failed')")
-    expect(videoPanelSource).toContain('startRetryCooldown()')
-    expect(videoPanelSource).toContain("item.status === 'failed' ? { ...item, status: 'running', error: null } : item")
-    expect(videoPanelSource).toContain('v-if="videoJobActive && job?.status === \'queued\'"')
-    expect(videoPanelSource).toContain('v-if="retryCooldownActive || job.items.some((item) => item.status === \'failed\')"')
-    expect(videoPanelSource).toContain(':disabled="generating || retryCooldownActive" @click="retryFailed"')
-    expect(videoPanelSource).toContain('onBeforeUnmount(clearRetryCooldown)')
-    expect(videoPanelSource).toContain('function openHistoryJob(entry: VideoJob) {\n  clearRetryCooldown()')
-    expect(videoPanelSource).toContain('function startNewTask() {\n  clearRetryCooldown()')
-  })
-
-  it('keeps video fullscreen playback contained instead of cropped', () => {
-    const videoRule = workspaceVideoCss.match(/\.video-frame video\s*\{([^}]*)\}/)?.[1] ?? ''
-    const fullscreenRule = workspaceVideoCss.match(/\.video-frame video:fullscreen,[^{]+\{([^}]*)\}/)?.[1] ?? ''
-    const normalizedVideo = videoRule.replace(/\s+/g, '')
-    const normalizedFullscreen = fullscreenRule.replace(/\s+/g, '')
-
-    expect(normalizedVideo).toContain('object-fit:contain')
-    expect(normalizedVideo).toContain('background:#000')
-    expect(workspaceVideoCss).toContain('.video-frame video:-webkit-full-screen')
-    expect(workspaceVideoCss).toContain('.video-frame video:-moz-full-screen')
-    expect(workspaceVideoCss).toContain('.video-frame video:-ms-fullscreen')
-    expect(normalizedFullscreen).toContain('object-fit:contain')
-  })
 })

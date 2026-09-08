@@ -42,7 +42,7 @@ from backend.app.services.job_creation import (
     create_aplus_plan_job_record,
     create_generation_job_record,
 )
-from backend.app.services.subscriptions import confirm_quota, release_quota
+from backend.app.services.subscriptions import BEANS_PER_IMAGE, BeanLedger, confirm_beans
 from backend.app.services.watermarking import apply_ai_watermark
 
 
@@ -216,6 +216,25 @@ def create_batch_job_record(
     return batch
 
 
+def estimate_batch_image_count(payload: BatchJobCreate) -> int:
+    """Charge beans by expected high-resolution images, not product count.
+
+    dryrun 不再豁免计费：dryrun 仅跳过外部调用，豆子仍按预期出图数量预留/扣减，
+    因此此处计数不再依据 dry_run 跳过任何条目。
+    """
+    count = 0
+    for item in payload.items:
+        if payload.business_type == "suite":
+            params = _suite_params(payload.global_params, item)
+            count += int(params.get("count", 7))
+            continue
+        params = _aplus_params(payload.global_params, item)
+        modules = params.get("module_selections") or [{"name": "商品主视觉", "count": 1}]
+        module_count = sum(int(selection.get("count", 1)) for selection in modules)
+        count += module_count * max(1, len(params.get("output_targets") or [{}]))
+    return count
+
+
 def load_batch_job(session: Session, batch_id: str) -> BatchJob | None:
     return session.scalar(
         select(BatchJob)
@@ -385,10 +404,87 @@ def aggregate_batch_job(session: Session, batch: BatchJob) -> BatchJob:
 
 
 def sync_batch_quota(session: Session, batch: BatchJob) -> None:
-    if batch.status in {"succeeded", "partial_failed"}:
-        confirm_quota(session, ref_type="batch_job", ref_id=batch.id)
-    elif batch.status in {"failed", "cancelled", "partial_cancelled"}:
-        release_quota(session, ref_type="batch_job", ref_id=batch.id)
+    if batch.status not in {"succeeded", "partial_failed", "failed", "cancelled", "partial_cancelled"}:
+        return
+    ledgers = session.scalars(
+        select(BeanLedger).where(
+            BeanLedger.ref_type == "batch_job",
+            BeanLedger.ref_id == batch.id,
+            BeanLedger.status.in_(["reserved", "partially_confirmed"]),
+        )
+    ).all()
+    if not ledgers:
+        return
+    all_refs = [f"{'generation' if model == 'generation_item' else 'aplus'}:{item_id}" for model, item_id in _batch_billing_items(session, batch)]
+    for ledger in ledgers:
+        try:
+            parsed_refs = json.loads(ledger.refs_json or "[]")
+        except json.JSONDecodeError:
+            parsed_refs = []
+        tracked_refs = [str(ref_id) for ref_id in parsed_refs if isinstance(ref_id, str)]
+        success_count = _batch_billing_ref_status(session, tracked_refs or all_refs)
+        confirm_beans(
+            session,
+            ref_type="batch_job",
+            ref_id=batch.id,
+            confirm_amount=min(ledger.amount, success_count * BEANS_PER_IMAGE),
+            ledger_id=ledger.id,
+        )
+
+
+def _batch_billing_items(session: Session, batch: BatchJob) -> list[tuple[str, str]]:
+    refs: list[tuple[str, str]] = []
+    for batch_item in batch.items:
+        if batch_item.generation_job_id:
+            job = session.get(GenerationJob, batch_item.generation_job_id)
+            if job and not job.is_admin_test:
+                refs.extend(("generation_item", item.id) for item in job.items)
+        elif batch_item.aplus_generation_job_id:
+            job = session.get(AplusJob, batch_item.aplus_generation_job_id)
+            if job and job.job_type == "generation" and not job.is_admin_test:
+                refs.extend(("aplus_item", item.id) for item in job.items)
+    return refs
+
+
+def _batch_billing_ref_status(session: Session, refs: list[str]) -> int:
+    generation_ids = [ref_id.removeprefix("generation:") for ref_id in refs if ref_id.startswith("generation:")]
+    aplus_ids = [ref_id.removeprefix("aplus:") for ref_id in refs if ref_id.startswith("aplus:")]
+    success = 0
+    if generation_ids:
+        rows = session.scalars(select(GenerationItem.status).where(GenerationItem.id.in_(generation_ids))).all()
+        success += rows.count("succeeded")
+    if aplus_ids:
+        rows = session.scalars(select(AplusItem.status).where(AplusItem.id.in_(aplus_ids))).all()
+        success += rows.count("succeeded")
+    return success
+
+
+def batch_retry_billing(session: Session, batch: BatchJob) -> tuple[int, list[str]]:
+    amount = 0
+    refs: list[str] = []
+    for item in batch.items:
+        if item.status not in FAILED_STATUSES:
+            continue
+        if item.generation_job_id:
+            job = session.get(GenerationJob, item.generation_job_id)
+            if job and not job.is_admin_test:
+                failed = [child for child in job.items if child.status == "failed"]
+                amount += len(failed) * BEANS_PER_IMAGE
+                refs.extend(f"generation:{child.id}" for child in failed)
+        elif item.aplus_generation_job_id:
+            job = session.get(AplusJob, item.aplus_generation_job_id)
+            if job and job.job_type == "generation" and not job.is_admin_test:
+                failed = [child for child in job.items if child.status == "failed"]
+                amount += len(failed) * BEANS_PER_IMAGE
+                refs.extend(f"aplus:{child.id}" for child in failed)
+        elif item.aplus_plan_job_id:
+            job = session.get(AplusJob, item.aplus_plan_job_id)
+            params = _json_loads(item.params_json, {})
+            if job and job.status == "failed" and not job.dry_run and not job.is_admin_test:
+                modules = params.get("module_selections") or [{"name": "商品主视觉", "count": 1}]
+                module_count = sum(int(selection.get("count", 1)) for selection in modules)
+                amount += module_count * max(1, len(params.get("output_targets") or [{}])) * BEANS_PER_IMAGE
+    return amount, refs
 
 
 def sync_batch_item_from_children(session: Session, item: BatchItem) -> BatchItem:

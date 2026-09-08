@@ -160,8 +160,13 @@ class SubscriptionPlan(Base, TimestampMixin):
     visible: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     is_internal: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     is_enterprise: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    billing_cycle: Mapped[str] = mapped_column(String(20), default="legacy", index=True)
+    beans: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    recommended: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    contact_sales: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     features_json: Mapped[str] = mapped_column(Text, default="[]")
+    entitlements_json: Mapped[str] = mapped_column(Text, default="{}")
     contact_text: Mapped[str] = mapped_column(Text, default="")
     contact_phone: Mapped[str] = mapped_column(String(32), default="")
 
@@ -193,6 +198,32 @@ class PlanQuotaRule(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class BeanPack(Base, TimestampMixin):
+    __tablename__ = "bean_pack"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text, default="")
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(12), default="CNY")
+    beans: Mapped[int] = mapped_column(Integer)
+    recommended: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    visible: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class CommercialBillingConfig(Base, TimestampMixin):
+    __tablename__ = "commercial_billing_config"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    beans_per_image: Mapped[int] = mapped_column(Integer, default=12)
+    refund_on_system_failure: Mapped[bool] = mapped_column(Boolean, default=True)
+    video_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, index=True)
+
+
 class UserSubscription(Base, TimestampMixin):
     __tablename__ = "user_subscription"
 
@@ -213,14 +244,48 @@ class PaymentOrder(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     order_no: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("app_user.id", ondelete="CASCADE"), index=True)
-    plan_id: Mapped[str] = mapped_column(ForeignKey("subscription_plan.id"), index=True)
+    plan_id: Mapped[str | None] = mapped_column(ForeignKey("subscription_plan.id"), nullable=True, index=True)
     billing_cycle: Mapped[str] = mapped_column(String(20), default="monthly")
+    product_type: Mapped[str] = mapped_column(String(20), default="subscription", index=True)
+    bean_pack_id: Mapped[str | None] = mapped_column(ForeignKey("bean_pack.id"), nullable=True, index=True)
     amount_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     currency: Mapped[str] = mapped_column(String(12), default="CNY")
     status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class BeanGrant(Base, TimestampMixin):
+    __tablename__ = "bean_grant"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_user.id", ondelete="CASCADE"), index=True)
+    amount: Mapped[int] = mapped_column(Integer)
+    remaining_beans: Mapped[int] = mapped_column(Integer)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    source_type: Mapped[str] = mapped_column(String(40), default="subscription", index=True)
+    source_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    source_key: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+
+
+class BeanLedger(Base, TimestampMixin):
+    __tablename__ = "bean_ledger"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_user.id", ondelete="CASCADE"), index=True)
+    ref_type: Mapped[str] = mapped_column(String(40), index=True)
+    ref_id: Mapped[str] = mapped_column(String(80), index=True)
+    amount: Mapped[int] = mapped_column(Integer)
+    confirmed_amount: Mapped[int] = mapped_column(Integer, default=0)
+    released_amount: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="reserved", index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    refs_json: Mapped[str] = mapped_column(Text, default="[]")
+    allocations_json: Mapped[str] = mapped_column(Text, default="[]")
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class QuotaLedger(Base):
@@ -238,6 +303,23 @@ class QuotaLedger(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class EnterpriseLead(Base, TimestampMixin):
+    __tablename__ = "enterprise_lead"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    contact_name: Mapped[str] = mapped_column(String(80), index=True)
+    phone: Mapped[str] = mapped_column(String(32), index=True)
+    wechat: Mapped[str] = mapped_column(String(80), default="")
+    company_or_shop: Mapped[str] = mapped_column(String(200), index=True)
+    monthly_usage: Mapped[str] = mapped_column(String(30), index=True)
+    requirement: Mapped[str] = mapped_column(Text, default="")
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True, index=True)
+    account_phone: Mapped[str] = mapped_column(String(32), default="", index=True)
+    source: Mapped[str] = mapped_column(String(80), default="enterprise_custom_plan")
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    note: Mapped[str] = mapped_column(Text, default="")
 
 
 class Notification(Base, TimestampMixin):

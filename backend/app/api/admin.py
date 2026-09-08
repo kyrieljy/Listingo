@@ -4,20 +4,25 @@ import difflib
 import hashlib
 import json
 import logging
+import csv
+import io
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.config import Settings
 from backend.app.database import get_session
 from backend.app.models import (
+    BeanPack,
+    EnterpriseLead,
     ExecutionLog,
+    PlanPrice,
     Notification,
     PaymentOrder,
     PlanQuotaRule,
@@ -34,7 +39,13 @@ from backend.app.models import (
     WorkflowVersion,
 )
 from backend.app.schemas import (
+    AdminBeanPackCreate,
+    AdminBeanPackUpdate,
     AdminNotificationBroadcastCreate,
+    CommercialBillingConfigOut,
+    EnterpriseLeadNoteUpdate,
+    EnterpriseLeadOut,
+    EnterpriseLeadStatusUpdate,
     AdminPlanUpdate,
     AdminQuotaRuleUpdate,
     AdminUserUpdate,
@@ -119,6 +130,7 @@ from backend.app.services.runtime_cache import (
 )
 from backend.app.services.sms import load_sms_config, send_sms_code
 from backend.app.services.subscriptions import (
+    billing_settings,
     list_subscription_plans,
     serialize_order,
     serialize_plan,
@@ -1201,20 +1213,230 @@ def admin_subscription_plans(session: Session = Depends(get_session)) -> list[di
     return list_subscription_plans(session, include_internal=True)
 
 
+def _bean_pack_dict(pack: BeanPack) -> dict[str, Any]:
+    return {
+        "id": pack.id,
+        "code": pack.code,
+        "name": pack.name,
+        "description": pack.description,
+        "amount_cents": pack.amount_cents,
+        "currency": pack.currency,
+        "beans": pack.beans,
+        "recommended": pack.recommended,
+        "enabled": pack.enabled,
+        "visible": pack.visible,
+        "sort_order": pack.sort_order,
+    }
+
+
+def _enterprise_lead_dict(lead: EnterpriseLead) -> dict[str, Any]:
+    return {
+        "id": lead.id,
+        "contact_name": lead.contact_name,
+        "phone": lead.phone,
+        "wechat": lead.wechat,
+        "company_or_shop": lead.company_or_shop,
+        "monthly_usage": lead.monthly_usage,
+        "requirement": lead.requirement,
+        "user_id": lead.user_id,
+        "account_phone": lead.account_phone,
+        "source": lead.source,
+        "status": lead.status,
+        "note": lead.note,
+        "created_at": lead.created_at,
+        "updated_at": lead.updated_at,
+    }
+
+
 @router.patch("/subscription-plans/{plan_id}")
 def update_subscription_plan(plan_id: str, payload: AdminPlanUpdate, session: Session = Depends(get_session)) -> dict[str, Any]:
     plan = session.get(SubscriptionPlan, plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="套餐不存在")
     updates = payload.model_dump(exclude_unset=True)
-    for key in ("name", "description", "badge", "cta", "visible", "enabled", "contact_text", "contact_phone"):
+    for key in (
+        "name",
+        "description",
+        "badge",
+        "cta",
+        "visible",
+        "enabled",
+        "billing_cycle",
+        "beans",
+        "recommended",
+        "contact_sales",
+        "contact_text",
+        "contact_phone",
+    ):
         if key in updates and updates[key] is not None:
             setattr(plan, key, updates[key])
     if updates.get("features") is not None:
         plan.features_json = json.dumps(updates["features"], ensure_ascii=False)
+    if updates.get("entitlements") is not None:
+        plan.entitlements_json = json.dumps(updates["entitlements"], ensure_ascii=False)
+    if "amount_cents" in updates:
+        amount = updates["amount_cents"]
+        if plan.contact_sales and amount is not None:
+            raise HTTPException(status_code=422, detail="联系销售套餐不能展示公开价格")
+        if not plan.contact_sales and not plan.is_internal and amount is None:
+            raise HTTPException(status_code=422, detail="可直接购买套餐必须配置价格")
+        price = session.scalar(
+            select(PlanPrice).where(PlanPrice.plan_id == plan.id, PlanPrice.billing_cycle == plan.billing_cycle).limit(1)
+        )
+        if price:
+            price.amount_cents = amount
+        elif amount is not None:
+            session.add(PlanPrice(plan_id=plan.id, billing_cycle=plan.billing_cycle, amount_cents=amount, price_label=f"¥{amount / 100:g}"))
+    if not plan.contact_sales and not plan.is_internal and plan.beans is None:
+        raise HTTPException(status_code=422, detail="可直接购买套餐必须配置豆子数量")
     session.commit()
     invalidate_subscription_cache()
     return serialize_plan(session, plan, include_internal=True)
+
+
+@router.get("/bean-packs")
+def admin_bean_packs(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    packs = session.scalars(select(BeanPack).order_by(BeanPack.sort_order, BeanPack.created_at)).all()
+    return [_bean_pack_dict(pack) for pack in packs]
+
+
+@router.post("/bean-packs", status_code=201)
+def create_bean_pack(payload: AdminBeanPackCreate, session: Session = Depends(get_session)) -> dict[str, Any]:
+    if session.scalar(select(BeanPack).where(BeanPack.code == payload.code).limit(1)):
+        raise HTTPException(status_code=409, detail="补豆包编号已存在")
+    pack = BeanPack(
+        code=payload.code,
+        name=payload.name,
+        description=payload.description or "",
+        amount_cents=payload.amount_cents,
+        beans=payload.beans,
+        recommended=payload.recommended or False,
+        enabled=payload.enabled if payload.enabled is not None else True,
+        visible=payload.visible if payload.visible is not None else True,
+        sort_order=payload.sort_order or 0,
+    )
+    session.add(pack)
+    session.commit()
+    session.refresh(pack)
+    invalidate_subscription_cache()
+    return _bean_pack_dict(pack)
+
+
+@router.patch("/bean-packs/{pack_id}")
+def update_bean_pack(pack_id: str, payload: AdminBeanPackUpdate, session: Session = Depends(get_session)) -> dict[str, Any]:
+    pack = session.get(BeanPack, pack_id)
+    if not pack:
+        raise HTTPException(status_code=404, detail="补豆包不存在")
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        if value is not None:
+            setattr(pack, key, value)
+    session.commit()
+    invalidate_subscription_cache()
+    return _bean_pack_dict(pack)
+
+
+@router.get("/billing-config", response_model=CommercialBillingConfigOut)
+def admin_billing_config(session: Session = Depends(get_session)) -> dict[str, Any]:
+    settings = billing_settings(session)
+    return {
+        "beans_per_image": settings.beans_per_image,
+        "refund_on_system_failure": settings.refund_on_system_failure,
+        "video_enabled": settings.video_enabled,
+    }
+
+
+@router.get("/enterprise-leads", response_model=list[EnterpriseLeadOut])
+def list_enterprise_leads(
+    status: str | None = Query(default=None, pattern="^(pending|following|converted|invalid)$"),
+    q: str | None = Query(default=None, max_length=120),
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    conditions = []
+    if status:
+        conditions.append(EnterpriseLead.status == status)
+    if q:
+        keyword = f"%{q.strip()}%"
+        conditions.append(
+            func.coalesce(EnterpriseLead.phone, "").ilike(keyword)
+            | func.coalesce(EnterpriseLead.company_or_shop, "").ilike(keyword)
+            | func.coalesce(EnterpriseLead.contact_name, "").ilike(keyword)
+        )
+    if created_from:
+        conditions.append(EnterpriseLead.created_at >= created_from)
+    if created_to:
+        conditions.append(EnterpriseLead.created_at <= created_to)
+    query = select(EnterpriseLead).order_by(EnterpriseLead.created_at.desc()).limit(200)
+    if conditions:
+        query = query.where(*conditions)
+    return [_enterprise_lead_dict(lead) for lead in session.scalars(query).all()]
+
+
+@router.get("/enterprise-leads/export")
+def export_enterprise_leads(session: Session = Depends(get_session)) -> Response:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["提交时间", "姓名", "手机号", "微信号", "店铺名 / 公司名", "月生成量", "需求说明", "用户 ID", "注册手机号", "来源页面", "跟进状态", "跟进备注"])
+    status_labels = {"pending": "未跟进", "following": "跟进中", "converted": "已成交", "invalid": "无效线索"}
+    for lead in session.scalars(select(EnterpriseLead).order_by(EnterpriseLead.created_at.desc())):
+        writer.writerow([
+            lead.created_at.isoformat(),
+            lead.contact_name,
+            lead.phone,
+            lead.wechat,
+            lead.company_or_shop,
+            lead.monthly_usage,
+            lead.requirement,
+            lead.user_id or "",
+            lead.account_phone,
+            lead.source,
+            status_labels.get(lead.status, lead.status),
+            lead.note,
+        ])
+    return Response(
+        content="\ufeff" + output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=enterprise-leads.csv"},
+    )
+
+
+@router.get("/enterprise-leads/{lead_id}", response_model=EnterpriseLeadOut)
+def get_enterprise_lead(lead_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    lead = session.get(EnterpriseLead, lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail="企业线索不存在")
+    return _enterprise_lead_dict(lead)
+
+
+@router.patch("/enterprise-leads/{lead_id}/status", response_model=EnterpriseLeadOut)
+def update_enterprise_lead_status(lead_id: str, payload: EnterpriseLeadStatusUpdate, session: Session = Depends(get_session)) -> dict[str, Any]:
+    lead = session.get(EnterpriseLead, lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail="企业线索不存在")
+    lead.status = payload.status
+    session.commit()
+    return _enterprise_lead_dict(lead)
+
+
+@router.patch("/enterprise-leads/{lead_id}/note", response_model=EnterpriseLeadOut)
+def update_enterprise_lead_note(lead_id: str, payload: EnterpriseLeadNoteUpdate, session: Session = Depends(get_session)) -> dict[str, Any]:
+    lead = session.get(EnterpriseLead, lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail="企业线索不存在")
+    lead.note = payload.note
+    session.commit()
+    return _enterprise_lead_dict(lead)
+
+
+@router.get("/commercial-config")
+def admin_commercial_config(session: Session = Depends(get_session)) -> dict[str, Any]:
+    settings = billing_settings(session)
+    return {
+        **admin_billing_config(session),
+        "bean_packs": admin_bean_packs(session),
+        "plans": list_subscription_plans(session, include_internal=True),
+    }
 
 
 @router.patch("/quota-rules/{rule_id}")

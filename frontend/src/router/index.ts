@@ -8,6 +8,7 @@ const router = createRouter({
       path: '/app/:phase?',
       name: 'workspace',
       component: () => import('../features/workspace/WorkspaceView.vue'),
+      beforeEnter: (to) => (to.params.phase === 'video' ? { path: '/app/suite' } : true),
     },
     {
       path: '/admin/:section?',

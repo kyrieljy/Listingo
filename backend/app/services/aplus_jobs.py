@@ -33,7 +33,7 @@ from backend.app.services.providers import ProviderClient, provider_requires_pub
 from backend.app.services.redaction import safe_json
 from backend.app.services.sensitive_words import load_sensitive_word_snapshot
 from backend.app.services.storage import public_file_url
-from backend.app.services.subscriptions import confirm_quota, release_quota
+from backend.app.services.subscriptions import BEANS_PER_IMAGE, BeanLedger, confirm_beans
 
 
 AplusPlanRepairCallback = Callable[[str, str], Awaitable[str]]
@@ -219,10 +219,35 @@ def finalize_aplus_cancellation(session: Session, job: AplusJob) -> None:
 
 
 def sync_aplus_quota(session: Session, job: AplusJob) -> None:
-    if job.status in {"succeeded", "partial_failed"}:
-        confirm_quota(session, ref_type="aplus_job", ref_id=job.id)
-    elif job.status in {"failed", "cancelled", "partial_cancelled"}:
-        release_quota(session, ref_type="aplus_job", ref_id=job.id)
+    # dry_run 不再跳过结算：dryrun 仅跳过外部调用，豆子预留/确认与非 dryrun 一致。
+    if job.is_admin_test or job.job_type != "generation":
+        return
+    if job.status in {"succeeded", "partial_failed", "failed", "cancelled", "partial_cancelled"}:
+        ledgers = session.scalars(
+            select(BeanLedger).where(
+                BeanLedger.ref_type == "aplus_job",
+                BeanLedger.ref_id == job.id,
+                BeanLedger.status.in_(["reserved", "partially_confirmed"]),
+            )
+        ).all()
+        item_rows = session.execute(
+            select(AplusItem.id, AplusItem.status).where(AplusItem.job_id == job.id)
+        ).all()
+        success_count = sum(1 for _, status in item_rows if status == "succeeded")
+        successful_item_ids = {item_id for item_id, status in item_rows if status == "succeeded"}
+        for ledger in ledgers:
+            try:
+                refs = set(json.loads(ledger.refs_json or "[]"))
+            except json.JSONDecodeError:
+                refs = set()
+            ledger_success_count = len(successful_item_ids & refs) if refs else success_count
+            confirm_beans(
+                session,
+                ref_type="aplus_job",
+                ref_id=job.id,
+                confirm_amount=min(ledger.amount, ledger_success_count * BEANS_PER_IMAGE),
+                ledger_id=ledger.id,
+            )
 
 
 def cancel_aplus_job(session: Session, job: AplusJob) -> AplusJob:

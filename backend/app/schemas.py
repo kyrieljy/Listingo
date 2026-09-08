@@ -73,7 +73,7 @@ class GenerationJobCreate(BaseModel):
     count: int = Field(default=7, ge=7, le=12)
     custom_counts: "CustomImageCounts | None" = None
     model_preference: Literal["fidelity", "layout"] = "fidelity"
-    dry_run: bool = True
+    dry_run: bool = False
 
     @field_validator("aspect_ratio")
     @classmethod
@@ -118,7 +118,7 @@ class CopywritingAssistCreate(BaseModel):
     market: str = Field(min_length=1, max_length=80)
     language: str = Field(min_length=1, max_length=80)
     selling_points: str = Field(default="", max_length=4000)
-    dry_run: bool = True
+    dry_run: bool = False
 
 
 class CopywritingAssistOut(BaseModel):
@@ -153,7 +153,7 @@ class VideoJobCreate(BaseModel):
     video_types: list[str] = Field(min_length=1, max_length=8)
     duration: int = Field(default=15, ge=5, le=15)
     resolution: str = Field(default="1080p", max_length=40)
-    dry_run: bool = True
+    dry_run: bool = False
 
     @field_validator("aspect_ratio")
     @classmethod
@@ -197,7 +197,7 @@ class VideoCopywritingAssistCreate(BaseModel):
     language: str = Field(min_length=1, max_length=80)
     selling_points: str = Field(default="", max_length=6000)
     video_types: list[str] = Field(default_factory=lambda: ["UGC 种草"], max_length=8)
-    dry_run: bool = True
+    dry_run: bool = False
 
 
 class VideoCopywritingAssistOut(BaseModel):
@@ -272,7 +272,7 @@ class AplusPlanJobCreate(BaseModel):
     module_selections: list[AplusModuleSelection] | None = Field(default=None, max_length=A_PLUS_MODULE_TOTAL_LIMIT)
     selected_modules: list[str] | None = Field(default=None, max_length=A_PLUS_MODULE_TOTAL_LIMIT)
     output_targets: list[AplusOutputTarget] = Field(min_length=1, max_length=8)
-    dry_run: bool = True
+    dry_run: bool = False
 
     @field_validator("asset_ids")
     @classmethod
@@ -326,7 +326,7 @@ class AplusGenerationJobCreate(BaseModel):
     plan_job_id: str
     module_item_ids: list[str] = Field(default_factory=list, max_length=A_PLUS_MODULE_TOTAL_LIMIT)
     output_targets: list[AplusOutputTarget] = Field(min_length=1, max_length=8)
-    dry_run: bool = True
+    dry_run: bool = False
 
     @model_validator(mode="after")
     def validate_output_targets(self) -> "AplusGenerationJobCreate":
@@ -675,7 +675,7 @@ class WorkflowVersionCreate(BaseModel):
 
 
 class SmsSendCreate(BaseModel):
-    phone: str = Field(min_length=5, max_length=32)
+    phone: str = Field(min_length=5, max_length=32, pattern=r"^\+?\d{5,32}$")
     purpose: Literal["login", "register", "reset_password", "change_phone", "admin"] = "login"
 
 
@@ -786,6 +786,20 @@ class PlanPriceOut(BaseModel):
     period_label: str
 
 
+class BeanPackOut(BaseModel):
+    id: str
+    code: str
+    name: str
+    description: str
+    amount_cents: int
+    currency: str
+    beans: int
+    recommended: bool
+    enabled: bool
+    visible: bool
+    sort_order: int
+
+
 class PlanQuotaRuleOut(BaseModel):
     id: str
     action_key: str
@@ -808,7 +822,12 @@ class SubscriptionPlanOut(BaseModel):
     visible: bool
     is_internal: bool
     is_enterprise: bool
+    billing_cycle: str
+    beans: int | None
+    recommended: bool
+    contact_sales: bool
     features: list[str]
+    entitlements: dict[str, Any]
     contact_text: str
     contact_phone: str
     prices: list[PlanPriceOut]
@@ -824,18 +843,69 @@ class QuotaRowOut(PlanQuotaRuleOut):
 
 class QuotaSummaryOut(BaseModel):
     plan: SubscriptionPlanOut
-    period: str
-    rows: list[QuotaRowOut]
+    subscription_ends_at: datetime | None
+    beans_per_image: int
+    available_beans: int | None
+    reserved_beans: int | None
+    unlimited: bool
+    expiring_batches: list[dict[str, Any]]
+
+
+class EnterpriseLeadCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    phone: str = Field(min_length=5, max_length=32)
+    wechat: str = Field(default="", max_length=80)
+    company_or_shop: str = Field(min_length=1, max_length=200)
+    monthly_usage: Literal["under_1000", "1000_5000", "5000_20000", "over_20000", "unsure"]
+    requirement: str = Field(default="", max_length=4000)
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value: str) -> str:
+        digits = value.removeprefix("+").replace("-", "").replace(" ", "")
+        if not digits.isdigit() or len(digits) < 5:
+            raise ValueError("请输入有效手机号")
+        return value.strip()
+
+
+class EnterpriseLeadOut(BaseModel):
+    id: str
+    contact_name: str
+    phone: str
+    wechat: str
+    company_or_shop: str
+    monthly_usage: str
+    requirement: str
+    user_id: str | None
+    account_phone: str
+    source: str
+    status: str
+    note: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class EnterpriseLeadStatusUpdate(BaseModel):
+    status: Literal["pending", "following", "converted", "invalid"]
+
+
+class EnterpriseLeadNoteUpdate(BaseModel):
+    note: str = Field(min_length=0, max_length=4000)
 
 
 class PaymentOrderCreate(BaseModel):
-    plan_code: str = Field(min_length=1, max_length=40)
+    plan_code: str | None = Field(default=None, max_length=40)
     billing_cycle: Literal["monthly", "yearly"] = "monthly"
+    bean_pack_code: str | None = Field(default=None, max_length=40)
 
 
 class PaymentOrderOut(BaseModel):
     id: str
     order_no: str
+    product_type: str
+    bean_pack_code: str
+    bean_pack_name: str
+    beans: int | None
     plan_code: str
     plan_name: str
     billing_cycle: str
@@ -845,6 +915,35 @@ class PaymentOrderOut(BaseModel):
     paid_at: datetime | None
     expires_at: datetime | None
     created_at: datetime
+
+
+class AdminBeanPackBase(BaseModel):
+    code: str | None = Field(default=None, min_length=3, max_length=40)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+    amount_cents: int | None = Field(default=None, ge=0)
+    beans: int | None = Field(default=None, ge=1)
+    recommended: bool | None = None
+    enabled: bool | None = None
+    visible: bool | None = None
+    sort_order: int | None = Field(default=None, ge=0)
+
+
+class AdminBeanPackCreate(AdminBeanPackBase):
+    code: str = Field(min_length=3, max_length=40)
+    name: str = Field(min_length=1, max_length=120)
+    amount_cents: int = Field(ge=0)
+    beans: int = Field(ge=1)
+
+
+class AdminBeanPackUpdate(AdminBeanPackBase):
+    pass
+
+
+class CommercialBillingConfigOut(BaseModel):
+    beans_per_image: int
+    refund_on_system_failure: bool
+    video_enabled: bool
 
 
 class NotificationOut(BaseModel):
@@ -871,7 +970,13 @@ class AdminPlanUpdate(BaseModel):
     cta: str | None = Field(default=None, max_length=80)
     visible: bool | None = None
     enabled: bool | None = None
+    billing_cycle: Literal["none", "monthly", "yearly", "custom", "internal"] | None = None
+    beans: int | None = Field(default=None, ge=0)
+    amount_cents: int | None = Field(default=None, ge=0)
+    recommended: bool | None = None
+    contact_sales: bool | None = None
     features: list[str] | None = None
+    entitlements: dict[str, Any] | None = None
     contact_text: str | None = None
     contact_phone: str | None = Field(default=None, max_length=32)
 

@@ -4,13 +4,12 @@ import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import {
   AppstoreOutlined, BgColorsOutlined, CheckOutlined, ClockCircleOutlined, CloudUploadOutlined,
-  CloseOutlined, DownOutlined, HistoryOutlined, MenuFoldOutlined, PlayCircleOutlined, PlusOutlined, RocketOutlined,
-  ThunderboltOutlined, VideoCameraOutlined,
+  CloseOutlined, DownOutlined, HistoryOutlined, MenuFoldOutlined, PlusOutlined, RocketOutlined, ThunderboltOutlined,
 } from '@ant-design/icons-vue'
 import BrandLogo from '../../components/BrandLogo.vue'
 import {
-  assistCopywriting, batchSelectionDownloadUrl, cancelJob, createJob, editItem, editItemText, generationDownloadUrl, getJob, listAplusGenerationJobs, listAplusPlanJobs, listJobs, listVideoJobs, ocrItemText, retryFailedItems, retryItem, uploadAsset, userFacingApiErrorMessage,
-  type AplusJob, type Asset, type DownloadFormat, type ImageTextEditLine, type Job, type JobItem, type VideoJob,
+  assistCopywriting, batchSelectionDownloadUrl, cancelJob, createJob, editItem, editItemText, generationDownloadUrl, getJob, listAplusGenerationJobs, listAplusPlanJobs, listJobs, ocrItemText, retryFailedItems, retryItem, uploadAsset, userFacingApiErrorMessage,
+  type AplusJob, type Asset, type DownloadFormat, type ImageTextEditLine, type Job, type JobItem,
 } from '../../api/client'
 import APlusPhasePanel from './APlusPhasePanel.vue'
 import AccountModal from '../auth/AccountModal.vue'
@@ -19,10 +18,10 @@ import BatchHostingModal from './BatchHostingModal.vue'
 import ImageTextEditPanel from './ImageTextEditPanel.vue'
 import { useAuthStore } from '../auth/auth-store'
 import DemoPhasePanel from './DemoPhasePanel.vue'
+import InsufficientBeansModal from './InsufficientBeansModal.vue'
 import PricingModal from '../auth/PricingModal.vue'
 import ResultGrid from './ResultGrid.vue'
 import UserMenu from '../auth/UserMenu.vue'
-import VideoPhasePanel from './VideoPhasePanel.vue'
 import WatermarkDownloadMenu from './WatermarkDownloadMenu.vue'
 import { trackWorkspaceEvent } from './analytics'
 import { batchItemResultJob, type BatchSelectionPayload, type BatchSelectionTask } from './batch-model'
@@ -39,7 +38,7 @@ const disabledPhaseKeys = new Set<PhaseKey>(['agent'])
 function isPhaseDisabled(key: PhaseKey): boolean { return disabledPhaseKeys.has(key) }
 const phase = computed<PhaseKey>(() => phaseDefinitions.some((item) => item.key === route.params.phase && !isPhaseDisabled(item.key)) ? route.params.phase as PhaseKey : 'suite')
 const mobileOpen = ref(false); const uploading = ref(false); const generating = ref(false); const submittingGeneration = ref(false); const helping = ref(false); const cancelling = ref(false); const cancelRequested = ref(false)
-type HistoryEntry = Job | AplusJob | VideoJob
+type HistoryEntry = Job | AplusJob
 type AccountInitialTab = 'profile' | 'quota' | 'settings' | 'history' | 'messages' | 'privacy'
 type HistoryPanelRef<T> = { openHistoryJob: (entry: T, options?: { continuePlan?: boolean }) => Promise<void>; openBatchSelection?: (payload: BatchSelectionPayload) => Promise<void>; startNewTask: () => void; dryRun?: boolean }
 type BatchSuiteResultGroup = BatchSelectionTask & { job: Job }
@@ -47,8 +46,8 @@ const assets = ref<Asset[]>([]); const job = ref<Job | null>(null); const histor
 const batchSuiteResults = ref<BatchSuiteResultGroup[]>([])
 const historyOpen = ref(false); const previewOpen = ref(false); const scriptOpen = ref(false); const editOpen = ref(false); const textEditOpen = ref(false); const confirmOpen = ref(false); const activeItem = ref<JobItem | null>(null)
 const suiteBatchOpen = ref(false)
-const authOpen = ref(false); const accountOpen = ref(false); const accountInitialTab = ref<AccountInitialTab>('profile'); const pricingOpen = ref(false)
-const aplusPanel = ref<HistoryPanelRef<AplusJob> | null>(null); const videoPanel = ref<HistoryPanelRef<VideoJob> | null>(null)
+const authOpen = ref(false); const accountOpen = ref(false); const accountInitialTab = ref<AccountInitialTab>('profile'); const pricingOpen = ref(false); const pricingInitialView = ref<'plans' | 'packs'>('plans')
+const aplusPanel = ref<HistoryPanelRef<AplusJob> | null>(null)
 const selected = ref<string[]>([]); const editInstruction = ref(''); const editSubmitting = ref(false)
 const suiteEditPlaceholder = '写下这次想调整的画面；不填则按当前版本重新生成。比如：让背景更清爽、主体位置微调、保留商品外观。'
 const textEditLines = ref<ImageTextEditLine[]>([]); const textEditLoading = ref(false); const textEditSubmitting = ref(false)
@@ -88,13 +87,12 @@ const layoutPreferred = computed(() => form.value.modelPreference === 'layout')
 const selectedModelPreference = computed(() => modelPreferenceOptions.find((option) => option.key === form.value.modelPreference) ?? modelPreferenceOptions[0])
 const suiteJobActive = computed(() => Boolean(job.value && !FINAL_JOB_STATUSES.has(job.value.status)))
 const activeItemScript = computed(() => activeItem.value ? scriptMarkdown(activeItem.value) : '')
-const currentDryRun = computed(() => phase.value === 'aplus' ? (aplusPanel.value?.dryRun ?? form.value.dryRun) : phase.value === 'video' ? (videoPanel.value?.dryRun ?? form.value.dryRun) : form.value.dryRun)
+const currentDryRun = computed(() => phase.value === 'aplus' ? (aplusPanel.value?.dryRun ?? form.value.dryRun) : form.value.dryRun)
 const textEditDirty = computed(() => textEditLines.value.some((line) => (line.original_text || '') !== (line.text || '')))
-const historyTitle = computed(() => phase.value === 'video' ? '视频历史' : phase.value === 'aplus' ? 'A+ 详情历史' : '套图历史')
-const historyEmptyText = computed(() => phase.value === 'video' ? '暂无视频历史任务' : phase.value === 'aplus' ? '暂无 A+ 详情历史任务' : '暂无套图历史任务')
+const historyTitle = computed(() => phase.value === 'aplus' ? 'A+ 详情历史' : '套图历史')
+const historyEmptyText = computed(() => phase.value === 'aplus' ? '暂无 A+ 详情历史任务' : '暂无套图历史任务')
 
 function phaseBusinessType(key: PhaseKey = phase.value): string {
-  if (key === 'video') return 'video'
   if (key === 'aplus') return 'aplus'
   if (key === 'suite') return 'suite'
   return key
@@ -202,7 +200,7 @@ function downloadSuiteBatchGroup(group: BatchSuiteResultGroup, format: DownloadF
   window.open(batchSelectionDownloadUrl('suite', [group.item.id], itemIds, format, suiteGroupIncludeWatermark(group)), '_blank')
 }
 
-type ActiveJobCandidate = { phase: Extract<PhaseKey, 'suite' | 'aplus' | 'video'>; entry: HistoryEntry }
+type ActiveJobCandidate = { phase: 'suite' | 'aplus'; entry: HistoryEntry }
 
 function copyPhaseSet(source: Set<PhaseKey>, key: PhaseKey): Set<PhaseKey> {
   const next = new Set(source)
@@ -239,7 +237,6 @@ async function loadAplusActiveEntries(): Promise<AplusJob[]> {
 
 async function latestActiveForPhase(phaseKey: ActiveJobCandidate['phase']): Promise<ActiveJobCandidate | null> {
   if (phaseKey === 'suite') return latestActiveCandidate('suite', await listJobs())
-  if (phaseKey === 'video') return latestActiveCandidate('video', await listVideoJobs())
   return latestActiveCandidate('aplus', await loadAplusActiveEntries())
 }
 
@@ -255,8 +252,7 @@ async function restoreActiveCandidate(candidate: ActiveJobCandidate) {
     return
   }
   await nextTick()
-  if (candidate.phase === 'aplus') await aplusPanel.value?.openHistoryJob(candidate.entry as AplusJob, { continuePlan: true })
-  else await videoPanel.value?.openHistoryJob(candidate.entry as VideoJob)
+  await aplusPanel.value?.openHistoryJob(candidate.entry as AplusJob, { continuePlan: true })
 }
 
 async function restoreActiveJobForCurrentRoute() {
@@ -265,20 +261,19 @@ async function restoreActiveJobForCurrentRoute() {
   const explicitPhase = explicitEnabledRoutePhase()
   try {
     if (explicitPhase) {
-      if (!['suite', 'aplus', 'video'].includes(explicitPhase) || checkedAutoRestorePhases.value.has(explicitPhase) || suppressedAutoRestorePhases.value.has(explicitPhase)) return
+      if (!['suite', 'aplus'].includes(explicitPhase) || checkedAutoRestorePhases.value.has(explicitPhase) || suppressedAutoRestorePhases.value.has(explicitPhase)) return
       const candidate = await latestActiveForPhase(explicitPhase as ActiveJobCandidate['phase'])
       if (candidate) await restoreActiveCandidate(candidate)
       else checkedAutoRestorePhases.value = copyPhaseSet(checkedAutoRestorePhases.value, explicitPhase)
       return
     }
-    const [suiteCandidate, aplusCandidate, videoCandidate] = await Promise.all([
+    const [suiteCandidate, aplusCandidate] = await Promise.all([
       latestActiveForPhase('suite'),
       latestActiveForPhase('aplus'),
-      latestActiveForPhase('video'),
     ])
-    const candidate = latestCandidate([suiteCandidate, aplusCandidate, videoCandidate])
+    const candidate = latestCandidate([suiteCandidate, aplusCandidate])
     if (!candidate) {
-      checkedAutoRestorePhases.value = new Set<PhaseKey>(['suite', 'aplus', 'video'])
+      checkedAutoRestorePhases.value = new Set<PhaseKey>(['suite', 'aplus'])
       return
     }
     if (phase.value !== candidate.phase) {
@@ -358,9 +353,11 @@ function requestDetail(error: unknown): string {
   return userFacingApiErrorMessage(error)
 }
 function notifySuiteGenerationFailure(source: unknown) {
+  if (authStore.showInsufficientBeans(source)) return
   message.error(generationFailureMessageFor('image', source))
 }
 function handleRequestError(error: unknown, fallback: string) {
+  if (authStore.showInsufficientBeans(error)) return
   message.error(requestDetail(error) || fallback)
 }
 function createOptimisticJob(payload: Record<string, unknown>): Job {
@@ -539,12 +536,17 @@ function openAccount(tab: AccountInitialTab = 'profile') {
   accountInitialTab.value = tab
   accountOpen.value = true
 }
-function openPricing() {
+function openPricing(view: 'plans' | 'packs' = 'plans') {
+  pricingInitialView.value = view
   pricingOpen.value = true
 }
 function requireAuthFromPricing() {
   pricingOpen.value = false
   openAuth()
+}
+function openPricingFromInsufficientBeans(view: 'plans' | 'packs') {
+  authStore.insufficientBeansOpen = false
+  openPricing(view)
 }
 function updateIncludeWatermark(value: boolean) {
   includeWatermark.value = allowedIncludeWatermark(value)
@@ -552,8 +554,7 @@ function updateIncludeWatermark(value: boolean) {
 }
 async function loadPhaseHistory() {
   try {
-    if (phase.value === 'video') history.value = await listVideoJobs()
-    else if (phase.value === 'aplus') history.value = await listAplusGenerationJobs()
+    if (phase.value === 'aplus') history.value = await listAplusGenerationJobs()
     else if (phase.value === 'suite') history.value = await listJobs()
     else history.value = []
   } catch {
@@ -575,6 +576,13 @@ function openSuiteBatch() {
   trackSuiteEvent('suite_batch_click', 'click', 'batch_suite')
   if (requireAuthForModelAction()) return
   suiteBatchOpen.value = true
+}
+
+// 订阅无批量生成权益时入口按钮保持可见但禁用，点击引导升级订阅而非直接打开批量托管
+const BATCH_LOCK_HINT = '需要升级订阅解锁批量生成功能'
+function onBatchHostingEntryClick() {
+  if (authStore.canUseBatchGeneration) openSuiteBatch()
+  else openPricing()
 }
 async function showSellingPointsEditor() { sellingPointsEditing.value = true; await nextTick(); sellingPointsInput.value?.focus() }
 async function editAiSuggestion() { aiSuggestionEditing.value = true; await nextTick(); aiSuggestionInput.value?.focus() }
@@ -603,11 +611,6 @@ function startNewTask() {
   if (phase.value === 'aplus') {
     aplusPanel.value?.startNewTask()
     message.success('已新建 A+ 空白任务')
-    return
-  }
-  if (phase.value === 'video') {
-    videoPanel.value?.startNewTask()
-    message.success('已新建视频空白任务')
     return
   }
   resetSuiteTask()
@@ -945,20 +948,17 @@ function download(format: DownloadFormat = 'zip') {
 }
 function historyThumbnail(entry: HistoryEntry): string {
   const url = entry.items[0]?.versions.at(-1)?.url || entry.items[0]?.versions[0]?.url || ''
-  if (phase.value === 'video') return '/demo/video-skincare-result.png'
   if (url) return url
   return phase.value === 'aplus' ? '/demo/video-backpack-showcase-01.png' : '/demo/tumbler-source.png'
 }
 function historySummary(entry: HistoryEntry): string {
-  if (phase.value === 'video') return `${String(entry.params.platform || '视频')} · ${entry.count} 条`
   if (phase.value === 'aplus') return `${String(entry.params.platform || 'A+ 详情')} · ${entry.items.length || entry.count} 张`
   return `${String(entry.params.platform || '商品套图')} · ${entry.count} 张`
 }
 async function openHistoryJob(entry: HistoryEntry) {
   closeTextEdit()
   clearBatchSuiteResults()
-  if (phase.value === 'video') await videoPanel.value?.openHistoryJob(entry as VideoJob)
-  else if (phase.value === 'aplus') await aplusPanel.value?.openHistoryJob(entry as AplusJob)
+  if (phase.value === 'aplus') await aplusPanel.value?.openHistoryJob(entry as AplusJob)
   else {
     job.value = preservePendingJobItems(await getJob(entry.id))
     selected.value = job.value.items.filter((item) => item.status === 'succeeded' && currentItemUrl(item)).map((item) => item.id)
@@ -986,10 +986,15 @@ async function openHistoryJob(entry: HistoryEntry) {
     </header>
     <AuthModal v-model:open="authOpen" />
     <AccountModal v-model:open="accountOpen" :initial-tab="accountInitialTab" @open-pricing="openPricing" />
-    <PricingModal v-model:open="pricingOpen" @require-auth="requireAuthFromPricing" />
+    <PricingModal v-model:open="pricingOpen" :initial-view="pricingInitialView" @require-auth="requireAuthFromPricing" />
+    <InsufficientBeansModal
+      v-model:open="authStore.insufficientBeansOpen"
+      @open-plans="openPricingFromInsufficientBeans('plans')"
+      @open-packs="openPricingFromInsufficientBeans('packs')"
+    />
     <nav class="phase-rail">
       <button v-for="(item,index) in phaseDefinitions" :key="item.key" :class="{ active: phase === item.key, disabled: isPhaseDisabled(item.key) }" :disabled="isPhaseDisabled(item.key)" :aria-disabled="isPhaseDisabled(item.key)" @click="navigate(item.key)">
-        <AppstoreOutlined v-if="index===0"/><BgColorsOutlined v-else-if="index===1"/><VideoCameraOutlined v-else-if="index===2"/><ThunderboltOutlined v-else/>
+        <AppstoreOutlined v-if="index===0"/><BgColorsOutlined v-else-if="index===1"/><ThunderboltOutlined v-else/>
         <span>{{ item.short }}</span>
         <small v-if="isPhaseDisabled(item.key)" class="phase-soon-badge">即将上线</small>
       </button>
@@ -1006,7 +1011,14 @@ async function openHistoryJob(entry: HistoryEntry) {
           <label class="upload-zone" :class="{ disabled: uploadLimitReached || uploading }" :aria-disabled="uploadLimitReached || uploading"><input type="file" accept="image/png,image/jpeg,image/webp" multiple :disabled="uploadLimitReached || uploading" @change="filesSelected"/><CloudUploadOutlined/><b>{{ uploading ? '上传中…' : uploadLimitReached ? `最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张` : '点击或拖拽上传' }}</b><small>{{ uploadLimitReached ? '删除已有图片后可继续上传' : 'JPG / PNG / WebP · 单张不超过 15MB' }}</small></label>
           <div v-if="assets.length" class="uploaded-row"><div v-for="asset in assets" :key="asset.id"><img :src="asset.url" :alt="asset.original_name"/><button class="remove-uploaded-asset" type="button" aria-label="删除已上传商品图" @click="removeAsset(asset.id)"><CloseOutlined/></button></div></div>
           <button v-if="!assets.length" class="sample-button" @click="useSample">使用 Listingo 演示商品</button>
-          <button class="sample-button batch-hosting-entry" type="button" @click="openSuiteBatch">批量生成托管</button>
+          <a-tooltip :title="BATCH_LOCK_HINT" :disabled="authStore.canUseBatchGeneration">
+            <button
+              class="sample-button batch-hosting-entry"
+              type="button"
+              :class="{ 'batch-hosting-locked': !authStore.canUseBatchGeneration }"
+              @click="onBatchHostingEntryClick"
+            >批量生成托管</button>
+          </a-tooltip>
         </section>
         <section class="form-section">
           <div class="section-title"><span>2</span><strong>生成设置</strong></div>
@@ -1154,9 +1166,6 @@ async function openHistoryJob(entry: HistoryEntry) {
       </template>
     </main>
     <main v-else-if="phase==='agent'" class="preview-canvas"><DemoPhasePanel :phase="phase"/></main>
-    <KeepAlive>
-      <VideoPhasePanel v-if="phase==='video'" ref="videoPanel" @require-auth="requireAuthForModelAction" />
-    </KeepAlive>
     <BatchHostingModal v-model:open="suiteBatchOpen" business-type="suite" :suite-form="form" @select-history="openSuiteBatchSelection" @require-auth="requireAuthForModelAction" />
     <a-drawer v-model:open="historyOpen" :title="historyTitle" width="420"><div class="history-list"><button v-for="entry in history" :key="entry.id" @click="openHistoryJob(entry)"><img :src="historyThumbnail(entry)" alt="历史缩略图"/><span><b>{{ historySummary(entry) }}</b><small><ClockCircleOutlined/>{{ new Date(entry.created_at).toLocaleString() }}</small><em>{{ entry.status }} · {{ entry.dry_run ? 'Dryrun' : 'Live' }}</em></span></button><p v-if="!history.length">{{ historyEmptyText }}</p></div></a-drawer>
     <a-modal v-model:open="previewOpen" title="结果预览" :footer="null" width="720">

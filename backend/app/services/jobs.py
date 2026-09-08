@@ -56,7 +56,7 @@ from backend.app.services.provider_limiter import provider_slot
 from backend.app.services.providers import ProviderClient, provider_requires_public_urls, requested_image_size
 from backend.app.services.redaction import safe_json
 from backend.app.services.storage import public_file_url
-from backend.app.services.subscriptions import confirm_quota, release_quota
+from backend.app.services.subscriptions import BEANS_PER_IMAGE, BeanLedger, confirm_beans
 
 
 DEMO_ASSET_DIR = Path(__file__).resolve().parents[1] / "static" / "demo"
@@ -195,10 +195,35 @@ def finalize_generation_cancellation(session: Session, job: GenerationJob) -> No
 
 
 def sync_generation_quota(session: Session, job: GenerationJob) -> None:
-    if job.status in {"succeeded", "partial_failed"}:
-        confirm_quota(session, ref_type="generation_job", ref_id=job.id)
-    elif job.status in {"failed", "cancelled", "partial_cancelled"}:
-        release_quota(session, ref_type="generation_job", ref_id=job.id)
+    # dry_run 不再跳过结算：dryrun 仅跳过外部调用，豆子预留/确认与非 dryrun 一致。
+    if job.is_admin_test:
+        return
+    if job.status in {"succeeded", "partial_failed", "failed", "cancelled", "partial_cancelled"}:
+        ledgers = session.scalars(
+            select(BeanLedger).where(
+                BeanLedger.ref_type == "generation_job",
+                BeanLedger.ref_id == job.id,
+                BeanLedger.status.in_(["reserved", "partially_confirmed"]),
+            )
+        ).all()
+        item_rows = session.execute(
+            select(GenerationItem.id, GenerationItem.status).where(GenerationItem.job_id == job.id)
+        ).all()
+        success_count = sum(1 for _, status in item_rows if status == "succeeded")
+        successful_item_ids = {item_id for item_id, status in item_rows if status == "succeeded"}
+        for ledger in ledgers:
+            try:
+                refs = set(json.loads(ledger.refs_json or "[]"))
+            except json.JSONDecodeError:
+                refs = set()
+            ledger_success_count = len(successful_item_ids & refs) if refs else success_count
+            confirm_beans(
+                session,
+                ref_type="generation_job",
+                ref_id=job.id,
+                confirm_amount=min(ledger.amount, ledger_success_count * BEANS_PER_IMAGE),
+                ledger_id=ledger.id,
+            )
 
 
 def cancel_generation_job(session: Session, job: GenerationJob) -> GenerationJob:

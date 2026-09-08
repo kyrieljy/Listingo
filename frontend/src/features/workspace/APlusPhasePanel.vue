@@ -127,6 +127,13 @@ function openBatchHosting() {
   batchOpen.value = true
 }
 
+// 订阅无批量生成权益时入口按钮保持可见但禁用，点击引导升级订阅而非直接打开批量托管
+const BATCH_LOCK_HINT = '需要升级订阅解锁批量生成功能'
+function onBatchHostingEntryClick() {
+  if (authStore.canUseBatchGeneration) openBatchHosting()
+  else emit('open-pricing')
+}
+
 const productInfoPlaceholder = `可选：填写商品事实、参数、卖点。
 建议包含商品名称、核心卖点、适用人群、场景和必须遵循的事实。`
 
@@ -358,6 +365,7 @@ function requestDetail(error: unknown): string {
 }
 
 function notifyAplusGenerationFailure(source: unknown) {
+  if (authStore.showInsufficientBeans(source)) return
   message.error(generationFailureMessageFor('image', source))
 }
 
@@ -1150,6 +1158,7 @@ async function submitEdit() {
     }
     message.success('A+ 已重新生成新版本')
   } catch (error: unknown) {
+    if (authStore.showInsufficientBeans(error)) return
     message.error(requestDetail(error) || 'A+ 二次编辑失败')
   } finally {
     editSubmitting.value = false
@@ -1176,6 +1185,7 @@ async function submitTextEdit() {
       message.success('A+ 文字已生成新版本')
       closeTextEdit()
     } catch (error: unknown) {
+      if (authStore.showInsufficientBeans(error)) return
       message.error(requestDetail(error) || 'A+ 文字编辑失败')
     } finally {
       textEditSubmitting.value = false
@@ -1191,6 +1201,7 @@ async function submitTextEdit() {
     message.success('A+ 文字已生成新版本')
     closeTextEdit()
   } catch (error: unknown) {
+    if (authStore.showInsufficientBeans(error)) return
     message.error(requestDetail(error) || 'A+ 文字编辑失败')
   } finally {
     textEditSubmitting.value = false
@@ -1280,7 +1291,14 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
         </div>
       </div>
       <button v-if="!assets.length" class="sample-button" type="button" @click="useSample">使用 Listingo 演示商品</button>
-      <button class="sample-button batch-hosting-entry" type="button" @click="openBatchHosting">批量生成托管</button>
+          <a-tooltip :title="BATCH_LOCK_HINT" :disabled="authStore.canUseBatchGeneration">
+            <button
+              class="sample-button batch-hosting-entry"
+              type="button"
+              :class="{ 'batch-hosting-locked': !authStore.canUseBatchGeneration }"
+              @click="onBatchHostingEntryClick"
+            >批量生成托管</button>
+          </a-tooltip>
     </section>
 
     <section class="form-section">

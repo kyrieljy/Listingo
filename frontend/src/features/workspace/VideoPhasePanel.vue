@@ -87,7 +87,8 @@ const uploadLimitReached = computed(() => assets.value.length >= PRODUCT_IMAGE_U
 const canGenerate = computed(() => assets.value.length > 0 && form.value.videoTypes.length > 0)
 const videoJobActive = computed(() => Boolean(job.value && !FINAL_VIDEO_JOB_STATUSES.has(job.value.status)))
 const retryCooldownActive = computed(() => Date.now() < retryCooldownUntil.value)
-const dryRun = computed(() => form.value.dryRun)
+// 非 admin 强制 live，前台无开关、无法选择 dryrun；admin 以开关为准（021）
+const dryRun = computed(() => (authStore.isAdmin ? form.value.dryRun : false))
 const editPreviewUrl = computed(() => editItemState.value ? currentVideoUrl(editItemState.value) : '')
 
 function clearRetryCooldown() {
@@ -121,7 +122,7 @@ function videoAnalyticsPayload(metadata: Record<string, unknown> = {}) {
       duration: form.value.duration,
       resolution: form.value.resolution,
       video_types: form.value.videoTypes,
-      dry_run: form.value.dryRun,
+      dry_run: dryRun.value,
       ...metadata,
     },
   }
@@ -299,7 +300,7 @@ async function aiWrite() {
       language: form.value.language,
       selling_points: form.value.sellingPoints,
       video_types: form.value.videoTypes,
-      dry_run: form.value.dryRun,
+      dry_run: dryRun.value,
     })
     aiSuggestion.value = result.selling_points
     aiSuggestionEditing.value = false
@@ -505,7 +506,7 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
             <button class="remove-uploaded-asset" type="button" aria-label="删除已上传商品图" @click="removeAsset(asset.id)"><CloseOutlined /></button>
           </div>
         </div>
-        <button v-else class="sample-button" @click="useSample">使用 Listingo 演示商品</button>
+        <button v-if="authStore.isAdmin && !assets.length" class="sample-button" @click="useSample">使用 Listingo 演示商品</button>
       </section>
 
       <section class="video-section">
@@ -556,7 +557,7 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
           <label>时长<select v-model.number="form.duration"><option :value="5">5 秒</option><option :value="10">10 秒</option><option :value="15">15 秒</option></select></label>
           <label>清晰度<select v-model="form.resolution"><option>1080p</option><option>720p</option></select></label>
         </div>
-        <label class="video-switch"><span><b>安全演示模式</b><small>本地模拟，不调用视频模型</small></span><input v-model="form.dryRun" type="checkbox" /></label>
+        <label v-if="authStore.isAdmin" class="video-switch"><span><b>安全演示模式</b><small>本地模拟，不调用视频模型</small></span><input v-model="form.dryRun" type="checkbox" /></label>
       </section>
 
       <footer class="video-footer">

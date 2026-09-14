@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from backend.app.services.provider_catalog import ROUTE_SLOT_ORDER
+
 
 ALLOWED_RATIOS = {"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9", "970:600", "1464:600", "600:450"}
 VIDEO_ALLOWED_SIZES = {"1:1", "3:4", "4:3", "9:16", "16:9", "21:9", "landscape", "portrait"}
@@ -518,7 +520,7 @@ class ProviderUpdate(BaseModel):
 
 
 class ProviderRouteChainUpdate(BaseModel):
-    provider_codes: list[str] = Field(default_factory=list, max_length=5)
+    provider_codes: list[str] = Field(default_factory=list, max_length=len(ROUTE_SLOT_ORDER))
 
 
 class WorkspaceConfigOut(BaseModel):

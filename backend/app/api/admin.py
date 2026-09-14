@@ -492,7 +492,7 @@ def provider_matches_route_definition(provider: Provider, route_key: str, defini
     operation = str(config.get("operation") or "")
     family = str(config.get("model_family") or provider.model_name or provider.code)
     if route_key == "suite_fidelity":
-        return operation == "generate" and "nano-banana" in family
+        return operation == "generate" and ("nano-banana" in family or family == "gpt-image-2")
     if route_key in {"suite_layout", "aplus_detail"}:
         return operation == "generate" and family == "gpt-image-2"
     if route_key in {"aplus_mobile", "image_edit"}:

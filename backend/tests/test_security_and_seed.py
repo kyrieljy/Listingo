@@ -48,6 +48,49 @@ def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(clien
         assert provider_route_roles(doubao) == {"llm": "primary"}
         assert provider_route_roles(qwen) == {"llm": "backup1"}
         by_code = {provider.code: provider for provider in providers}
+        molink_generate = by_code["molink-image-2-generate"]
+        molink_edit = by_code["molink-image-2-edit"]
+        molink_nano = by_code["molink-nano-pro-generate"]
+        assert [provider.label for provider in (molink_generate, molink_edit, molink_nano)] == [
+            "MoLink Image 2",
+            "MoLink Image 2 edit",
+            "MoLink Nano Banana Pro",
+        ]
+        assert [provider.enabled for provider in (molink_generate, molink_edit, molink_nano)] == [False, False, False]
+        assert provider_route_roles(molink_generate) == {
+            "suite_fidelity": "backup5",
+            "suite_layout": "backup5",
+            "aplus_detail": "backup5",
+        }
+        assert provider_route_roles(molink_edit) == {"aplus_mobile": "backup5", "image_edit": "backup5"}
+        assert provider_route_roles(molink_nano) == {"suite_fidelity": "backup6"}
+        assert molink_generate.base_url == "https://getmolinkapi.com/v1/images/generations"
+        assert molink_edit.base_url == "https://getmolinkapi.com/v1/images/edits"
+        assert molink_nano.base_url == "https://getmolinkapi.com/v1beta/models/gemini-3-pro-image:generateContent"
+        assert [provider.model_name for provider in (molink_generate, molink_edit, molink_nano)] == [
+            "gpt-image-2",
+            "gpt-image-2",
+            "gemini-3-pro-image",
+        ]
+        for provider in (molink_generate, molink_edit, molink_nano):
+            config = provider_config(provider)
+            assert config["provider_group"] == "molink"
+            assert config["requires_public_urls"] is False
+            assert config["health_check"]["url"] == "https://getmolinkapi.com/v1/models"
+        molink_generate_config = provider_config(molink_generate)
+        assert molink_generate_config["size_param_mode"] == "size_string"
+        assert molink_generate_config["size_alignment"] == 16
+        assert molink_generate_config["output_format"] == "png"
+        assert {item["key"] for item in molink_generate_config["parameter_schema"]} >= {
+            "size",
+            "quality",
+            "output_format",
+            "n",
+        }
+        molink_nano_config = provider_config(molink_nano)
+        assert molink_nano_config["resolution"] == "1K"
+        assert molink_nano_config["allowed_resolutions"] == ["1K", "2K", "4K"]
+        assert {item["key"] for item in molink_nano_config["parameter_schema"]} >= {"aspect_ratio", "resolution"}
         for route_key, chain in DEFAULT_ROUTE_CHAINS.items():
             for index, provider_code in enumerate(chain[: len(ROUTE_SLOT_ORDER)]):
                 assert provider_route_roles(by_code[provider_code])[route_key] == ROUTE_SLOT_ORDER[index]
@@ -195,6 +238,22 @@ def test_route_provider_codes_skips_unkeyed_primary_and_uses_backup(client) -> N
         assert route_provider_codes(session, "suite_layout") == ["cometapi-gpt-image-2-generate"]
 
 
+def test_route_provider_codes_preserves_existing_order_and_uses_appended_molink_backups(client) -> None:
+    with client.app.state.session_factory() as session:
+        chain = DEFAULT_ROUTE_CHAINS["suite_fidelity"]
+        by_code = {
+            provider.code: provider
+            for provider in session.scalars(select(Provider).where(Provider.code.in_(chain))).all()
+        }
+        assert set(by_code) == set(chain)
+        for provider in by_code.values():
+            provider.enabled = True
+            provider.encrypted_api_key = client.app.state.cipher.encrypt(f"{provider.code}-key")
+        session.commit()
+
+        assert route_provider_codes(session, "suite_fidelity") == chain
+
+
 def test_seed_updates_provider_contract_but_preserves_admin_parameters(client) -> None:
     session_factory = client.app.state.session_factory
     with session_factory() as session:
@@ -225,6 +284,59 @@ def test_seed_updates_provider_contract_but_preserves_admin_parameters(client) -
         for index, provider_code in enumerate(DEFAULT_ROUTE_CHAINS["suite_layout"]):
             provider = session.scalar(select(Provider).where(Provider.code == provider_code))
             assert provider_route_roles(provider)["suite_layout"] == ROUTE_SLOT_ORDER[index]
+
+
+def test_reseed_adds_molink_without_modifying_existing_providers(client) -> None:
+    session_factory = client.app.state.session_factory
+    with session_factory() as session:
+        # Isolate legacy one-time config cleanup from the append-only assertion.
+        seed_database(session)
+        session.commit()
+        molink_codes = {"molink-image-2-generate", "molink-image-2-edit", "molink-nano-pro-generate"}
+        for provider in session.scalars(select(Provider).where(Provider.code.in_(molink_codes))).all():
+            session.delete(provider)
+        session.commit()
+
+        def protected_snapshot(provider: Provider) -> tuple:
+            config = json.loads(provider.config_json or "{}")
+            parameter_keys = {
+                str(item.get("key"))
+                for item in provider_config(provider).get("parameter_schema", [])
+                if isinstance(item, dict) and isinstance(item.get("key"), str)
+            }
+            return (
+                provider.label,
+                provider.capability,
+                provider.adapter,
+                provider.base_url,
+                provider.model_name,
+                provider.enabled,
+                provider.is_default,
+                provider.is_fallback,
+                provider.encrypted_api_key,
+                config.get("route_roles"),
+                {key: config.get(key) for key in parameter_keys},
+            )
+
+        before = {
+            provider.code: protected_snapshot(provider)
+            for provider in session.scalars(select(Provider)).all()
+            if provider.code not in molink_codes
+        }
+
+        seed_database(session)
+        session.commit()
+
+        after = {
+            provider.code: protected_snapshot(provider)
+            for provider in session.scalars(select(Provider)).all()
+            if provider.code not in molink_codes
+        }
+        assert after == before
+        assert set(after) == set(before)
+        added = session.scalars(select(Provider).where(Provider.code.in_(molink_codes))).all()
+        assert {provider.code for provider in added} == molink_codes
+        assert all(not provider.enabled and not provider.encrypted_api_key for provider in added)
 
 
 def test_seed_upgrades_an_existing_legacy_workflow_once(client) -> None:

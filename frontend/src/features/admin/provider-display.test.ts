@@ -6,6 +6,7 @@ import {
   groupProviderCategoriesByBusinessRoute,
   groupProvidersByBusinessRoute,
   providerRouteChainConfigValue,
+  providerRouteRoleOrder,
   providerRuntimeState,
   type ProviderDisplayRecord,
 } from './provider-display'
@@ -30,6 +31,7 @@ const providerGroupLabels: Record<string, string> = {
   kie: 'Kie.ai',
   cometapi: 'CometAPI',
   apimodels: 'API Models',
+  molink: 'MoLink',
 }
 
 function providerGroupKey(code: string): string | null {
@@ -39,12 +41,15 @@ function providerGroupKey(code: string): string | null {
 function providerOperation(code: string): string | null {
   if (code.includes('seedance')) return 'video'
   if (code.endsWith('-edit') || code.includes('gpt-image-2-edit')) return 'edit'
+  if (code.startsWith('molink-image-2')) return 'generate'
   if (code.includes('gpt-image-2') || code.includes('nano-')) return 'generate'
   return null
 }
 
 function providerModelFamily(code: string): string | null {
   if (code.includes('seedance')) return 'seedance-2.0'
+  if (code.startsWith('molink-image-2')) return 'gpt-image-2'
+  if (code === 'molink-nano-pro-generate') return 'nano-banana-pro'
   if (code.includes('gpt-image-2')) return 'gpt-image-2'
   if (code.includes('nano-pro')) return 'nano-banana-pro'
   if (code.includes('nano-2')) return 'nano-banana-2'
@@ -83,6 +88,9 @@ function provider(
       ...(code === 'kie-nano-2-generate' ? { suite_fidelity: 'backup1' as const } : {}),
       ...(code === 'atlas-gpt-image-2-generate' ? { suite_layout: 'primary' as const, aplus_detail: 'primary' as const } : {}),
       ...(code === 'atlas-gpt-image-2-edit' ? { aplus_mobile: 'primary' as const, image_edit: 'primary' as const } : {}),
+      ...(code === 'molink-image-2-generate' ? { suite_fidelity: 'backup5' as const, suite_layout: 'backup5' as const, aplus_detail: 'backup5' as const } : {}),
+      ...(code === 'molink-image-2-edit' ? { aplus_mobile: 'backup5' as const, image_edit: 'backup5' as const } : {}),
+      ...(code === 'molink-nano-pro-generate' ? { suite_fidelity: 'backup6' as const } : {}),
       ...(code === 'cometapi-seedance-2-0-video' ? { video: 'primary' as const } : {}),
     },
     provider_group: group,
@@ -122,6 +130,10 @@ const baseProviders = () => [
 ]
 
 describe('provider business display', () => {
+  it('supports appended backup slots after the existing five-slot chain', () => {
+    expect(providerRouteRoleOrder).toEqual(['primary', 'backup1', 'backup2', 'backup3', 'backup4', 'backup5', 'backup6'])
+  })
+
   it('requires both enablement and an API key before a provider is effective', () => {
     expect(providerRuntimeState(provider('yunwu-nano-pro', false, true)).tone).toBe('off')
     expect(providerRuntimeState(provider('yunwu-nano-pro', true, false)).tone).toBe('warning')
@@ -134,7 +146,7 @@ describe('provider business display', () => {
     expect(groups.map((group) => group.key)).toEqual(['suite_fidelity', 'suite_layout', 'aplus_detail', 'aplus_mobile', 'image_edit', 'video', 'llm'])
     expect(groups[0].defaultProviderGroup).toBe('apimodels')
     expect(groups[0].selectedProviderGroup).toBe('apimodels')
-    expect(groups[0].providerGroups.map((item) => item.key)).toEqual(['apimodels', 'kie'])
+    expect(groups[0].providerGroups.map((item) => item.key)).toEqual(['apimodels', 'kie', 'atlas'])
     expect(groups[0].providers.map((item) => item.code)).toEqual(['apimodels-nano-pro-generate'])
     expect(groups[0].route).toContain('kie-nano-2-generate')
     expect(groups[1].providers.map((item) => item.code)).toEqual(['atlas-gpt-image-2-generate'])
@@ -160,6 +172,7 @@ describe('provider business display', () => {
       provider('atlas-nano-2-generate'),
       provider('runware-nano-2-generate'),
       provider('atlas-gpt-image-2-generate'),
+      provider('molink-image-2-generate'),
     ], { suite_fidelity: providerRouteChainConfigValue })
 
     const fidelity = groups.find((group) => group.key === 'suite_fidelity')
@@ -167,13 +180,33 @@ describe('provider business display', () => {
     expect(fidelity?.providers.map((item) => item.code)).toEqual([
       'apimodels-nano-pro-generate',
       'kie-nano-2-generate',
+      'molink-image-2-generate',
     ])
     expect(fidelity?.chainCandidates.map((item) => item.code)).toEqual([
       'apimodels-nano-pro-generate',
       'kie-nano-2-generate',
+      'molink-image-2-generate',
+      'atlas-gpt-image-2-generate',
       'atlas-nano-2-generate',
       'runware-nano-2-generate',
     ])
+  })
+
+  it('groups MoLink models into the confirmed route matrix', () => {
+    const groups = groupProvidersByBusinessRoute([
+      provider('molink-image-2-generate'),
+      provider('molink-image-2-edit'),
+      provider('molink-nano-pro-generate'),
+    ])
+
+    expect(groups.find((group) => group.key === 'suite_fidelity')?.chainCandidates.map((item) => item.code)).toEqual([
+      'molink-image-2-generate',
+      'molink-nano-pro-generate',
+    ])
+    expect(groups.find((group) => group.key === 'suite_layout')?.chainCandidates.map((item) => item.code)).toEqual(['molink-image-2-generate'])
+    expect(groups.find((group) => group.key === 'aplus_detail')?.chainCandidates.map((item) => item.code)).toEqual(['molink-image-2-generate'])
+    expect(groups.find((group) => group.key === 'aplus_mobile')?.chainCandidates.map((item) => item.code)).toEqual(['molink-image-2-edit'])
+    expect(groups.find((group) => group.key === 'image_edit')?.chainCandidates.map((item) => item.code)).toEqual(['molink-image-2-edit'])
   })
 
   it('groups routes into the requested major model categories', () => {
@@ -206,7 +239,7 @@ describe('provider business display', () => {
     expect(groups.find((group) => group.key === 'video')?.ready).toBe(true)
   })
 
-  it('renders business groups, transit filters, and editable five-slot chains', () => {
+  it('renders business groups, transit filters, and editable dynamic-slot chains', () => {
     const filterBlock = adminSource.slice(
       adminSource.indexOf('provider-group-filter'),
       adminSource.indexOf('provider-chain-editor'),
@@ -221,6 +254,8 @@ describe('provider business display', () => {
     expect(filterBlock).not.toContain('<option value="">')
     expect(adminSource).toContain('/admin/provider-routes/${group.key}/chain')
     expect(adminSource).toContain('providerRouteRoleOrder')
+    expect(adminSource).toContain('配置主备链路')
+    expect(adminSource).toContain('<b>主备链路</b>')
     expect(adminSource).toContain('group.chainCandidates')
     expect(adminSource).toContain('routeChainDraft(group)[index]')
   })

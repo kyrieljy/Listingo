@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import {
   AppstoreOutlined, BgColorsOutlined, CheckOutlined, ClockCircleOutlined, CloudUploadOutlined,
-  CloseOutlined, DownOutlined, HistoryOutlined, MenuFoldOutlined, PlusOutlined, RocketOutlined, ThunderboltOutlined,
+  CloseOutlined, DownOutlined, HistoryOutlined, MenuFoldOutlined, PlusOutlined, RocketOutlined, ThunderboltOutlined, VideoCameraOutlined,
 } from '@ant-design/icons-vue'
 import BrandLogo from '../../components/BrandLogo.vue'
 import {
@@ -34,7 +34,7 @@ import {
 import { generationFailureMessageFor } from './generation-errors'
 
 const route = useRoute(); const router = useRouter(); const authStore = useAuthStore()
-const disabledPhaseKeys = new Set<PhaseKey>(['agent'])
+const disabledPhaseKeys = new Set<PhaseKey>(['agent', 'video'])
 function isPhaseDisabled(key: PhaseKey): boolean { return disabledPhaseKeys.has(key) }
 const phase = computed<PhaseKey>(() => phaseDefinitions.some((item) => item.key === route.params.phase && !isPhaseDisabled(item.key)) ? route.params.phase as PhaseKey : 'suite')
 const mobileOpen = ref(false); const uploading = ref(false); const generating = ref(false); const submittingGeneration = ref(false); const helping = ref(false); const cancelling = ref(false); const cancelRequested = ref(false)
@@ -87,7 +87,11 @@ const layoutPreferred = computed(() => form.value.modelPreference === 'layout')
 const selectedModelPreference = computed(() => modelPreferenceOptions.find((option) => option.key === form.value.modelPreference) ?? modelPreferenceOptions[0])
 const suiteJobActive = computed(() => Boolean(job.value && !FINAL_JOB_STATUSES.has(job.value.status)))
 const activeItemScript = computed(() => activeItem.value ? scriptMarkdown(activeItem.value) : '')
-const currentDryRun = computed(() => phase.value === 'aplus' ? (aplusPanel.value?.dryRun ?? form.value.dryRun) : form.value.dryRun)
+// 非 admin 恒显 Live（前台无法选择 dryrun）；admin 以开关为准（021）
+const currentDryRun = computed(() => {
+  if (!authStore.isAdmin) return false
+  return phase.value === 'aplus' ? (aplusPanel.value?.dryRun ?? form.value.dryRun) : form.value.dryRun
+})
 const textEditDirty = computed(() => textEditLines.value.some((line) => (line.original_text || '') !== (line.text || '')))
 const historyTitle = computed(() => phase.value === 'aplus' ? 'A+ 详情历史' : '套图历史')
 const historyEmptyText = computed(() => phase.value === 'aplus' ? '暂无 A+ 详情历史任务' : '暂无套图历史任务')
@@ -112,7 +116,8 @@ function suiteAnalyticsPayload(metadata: Record<string, unknown> = {}) {
       ratio: form.value.ratio,
       mode: form.value.mode,
       count: count.value,
-      dry_run: form.value.dryRun,
+      // 非 admin 强制 live，前台无开关、无法选择 dryrun（021）
+      dry_run: authStore.isAdmin ? form.value.dryRun : false,
       ...metadata,
     },
   }
@@ -645,7 +650,7 @@ async function aiWrite() {
   trackSuiteEvent('suite_ai_copywriting_click', 'click', 'ai_copywriting', { asset_count: assets.value.length })
   helping.value = true
   try {
-    const result = await assistCopywriting({ asset_ids: assets.value.map((asset) => asset.id), platform: form.value.platform, market: form.value.market, language: form.value.language, selling_points: form.value.sellingPoints, dry_run: form.value.dryRun })
+    const result = await assistCopywriting({ asset_ids: assets.value.map((asset) => asset.id), platform: form.value.platform, market: form.value.market, language: form.value.language, selling_points: form.value.sellingPoints, dry_run: authStore.isAdmin ? form.value.dryRun : false })
     aiSuggestion.value = result.selling_points; aiSuggestionEditing.value = false; aiWriteOpen.value = true
   } catch (error: unknown) { handleRequestError(error, 'AI 帮写失败，请检查语言模型配置') }
   finally { helping.value = false }
@@ -994,7 +999,7 @@ async function openHistoryJob(entry: HistoryEntry) {
     />
     <nav class="phase-rail">
       <button v-for="(item,index) in phaseDefinitions" :key="item.key" :class="{ active: phase === item.key, disabled: isPhaseDisabled(item.key) }" :disabled="isPhaseDisabled(item.key)" :aria-disabled="isPhaseDisabled(item.key)" @click="navigate(item.key)">
-        <AppstoreOutlined v-if="index===0"/><BgColorsOutlined v-else-if="index===1"/><ThunderboltOutlined v-else/>
+        <AppstoreOutlined v-if="item.key==='suite'" /><BgColorsOutlined v-else-if="item.key==='aplus'" /><VideoCameraOutlined v-else-if="item.key==='video'" /><ThunderboltOutlined v-else/>
         <span>{{ item.short }}</span>
         <small v-if="isPhaseDisabled(item.key)" class="phase-soon-badge">即将上线</small>
       </button>
@@ -1010,7 +1015,7 @@ async function openHistoryJob(entry: HistoryEntry) {
         <section class="form-section"><div class="section-title"><span>1</span><strong>上传商品图</strong><em>最多 {{ PRODUCT_IMAGE_UPLOAD_LIMIT }} 张</em></div>
           <label class="upload-zone" :class="{ disabled: uploadLimitReached || uploading }" :aria-disabled="uploadLimitReached || uploading"><input type="file" accept="image/png,image/jpeg,image/webp" multiple :disabled="uploadLimitReached || uploading" @change="filesSelected"/><CloudUploadOutlined/><b>{{ uploading ? '上传中…' : uploadLimitReached ? `最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张` : '点击或拖拽上传' }}</b><small>{{ uploadLimitReached ? '删除已有图片后可继续上传' : 'JPG / PNG / WebP · 单张不超过 15MB' }}</small></label>
           <div v-if="assets.length" class="uploaded-row"><div v-for="asset in assets" :key="asset.id"><img :src="asset.url" :alt="asset.original_name"/><button class="remove-uploaded-asset" type="button" aria-label="删除已上传商品图" @click="removeAsset(asset.id)"><CloseOutlined/></button></div></div>
-          <button v-if="!assets.length" class="sample-button" @click="useSample">使用 Listingo 演示商品</button>
+          <button v-if="authStore.isAdmin && !assets.length" class="sample-button" @click="useSample">使用 Listingo 演示商品</button>
           <a-tooltip :title="BATCH_LOCK_HINT" :disabled="authStore.canUseBatchGeneration">
             <button
               class="sample-button batch-hosting-entry"
@@ -1074,7 +1079,7 @@ async function openHistoryJob(entry: HistoryEntry) {
               <div><button :disabled="form.customCounts[item.key]===0 || count<=7" @click="adjustCustomCount(item.key,-1)">−</button><b>{{ form.customCounts[item.key] }}</b><button :disabled="form.customCounts[item.key]===4 || count>=12" @click="adjustCustomCount(item.key,1)">＋</button></div>
             </article>
           </div>
-          <label class="switch-row"><span><b>安全演示模式</b><small>本地模拟资产，不调用语言或图片模型</small></span><input v-model="form.dryRun" type="checkbox"/></label>
+          <label v-if="authStore.isAdmin" class="switch-row"><span><b>安全演示模式</b><small>本地模拟资产，不调用语言或图片模型</small></span><input v-model="form.dryRun" type="checkbox"/></label>
         </section>
         <div class="panel-footer">
           <button v-if="suiteJobActive && job?.status === 'queued'" class="secondary-action cancel-action" :disabled="cancelling" @click="cancelGeneration"><CloseOutlined/>{{ cancelling ? '取消中' : '取消任务' }}</button>

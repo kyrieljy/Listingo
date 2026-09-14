@@ -55,24 +55,26 @@ const workspaceSuiteCss = readFileSync(new URL('./workspace-suite.css', import.m
 const frontendNginxConf = readFileSync(new URL('../../../nginx.conf', import.meta.url), 'utf8')
 
 describe('workspace model', () => {
-  it('keeps the three user-facing phase entries in order', () => {
+  it('keeps the user-facing phase entries in order, with video and agent as disabled coming-soon nav items', () => {
     expect(phaseDefinitions.map((item) => item.label)).toEqual([
       '商品套图',
       'A+详情',
+      '视频',
       'Agent与画布',
     ])
-    expect(phaseDefinitions.map((item) => item.key)).not.toContain('video')
+    expect(phaseDefinitions.map((item) => item.key)).toContain('video')
+    expect(phaseDefinitions.map((item) => item.key)).toContain('agent')
     expect(workspaceSource).not.toContain('VideoPhasePanel')
     expect(workspaceSource).not.toContain('listVideoJobs')
   })
 
-  it('closes the Agent phase entry as a disabled coming soon nav item', () => {
+  it('closes the Agent and video phase entries as disabled coming soon nav items', () => {
     const disabledRule = workspaceSuiteCss.match(/\.phase-rail button\.disabled\s*\{([^}]*)\}/)?.[1] ?? ''
     const badgeRule = workspaceSuiteCss.match(/\.phase-rail \.phase-soon-badge\s*\{([^}]*)\}/)?.[1] ?? ''
     const normalizedDisabledRule = disabledRule.replace(/\s+/g, '')
     const normalizedBadgeRule = badgeRule.replace(/\s+/g, '')
 
-    expect(workspaceSource).toContain("const disabledPhaseKeys = new Set<PhaseKey>(['agent'])")
+    expect(workspaceSource).toContain("const disabledPhaseKeys = new Set<PhaseKey>(['agent', 'video'])")
     expect(workspaceSource).toContain('!isPhaseDisabled(item.key)')
     expect(workspaceSource).toContain('if (isPhaseDisabled(key)) return')
     expect(workspaceSource).toContain(':class="{ active: phase === item.key, disabled: isPhaseDisabled(item.key) }"')
@@ -840,6 +842,29 @@ describe('workspace model', () => {
     expect(workspaceSource).toContain('function resetSuiteTask')
     expect(workspaceSource).toContain('currentDryRun')
     expect(aplusPanelSource).toContain('defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })')
+  })
+
+  it('change 021: dryrun 开关仅 admin 可见，非 admin 前台无开关且强制 live', () => {
+    // 四处「安全演示模式」开关均按角色渲染
+    expect(workspaceSource).toContain('<label v-if="authStore.isAdmin" class="switch-row">')
+    expect(aplusPanelSource).toContain('<label v-if="authStore.isAdmin" class="switch-row">')
+    expect(batchModalSource).toContain('<label v-if="authStore.isAdmin" class="batch-dryrun-toggle">')
+    // 非 admin 提交时 dry_run 强制 false（前台无法选择 dryrun）
+    expect(workspaceSource).toContain('dry_run: authStore.isAdmin ? form.value.dryRun : false')
+    // 非 admin 的 mode-status 徽标恒显 Live（currentDryRun 对非 admin 返回 false）
+    expect(workspaceSource).toContain('if (!authStore.isAdmin) return false')
+  })
+
+  it('change 022: 演示商品按钮仅 admin 可见，三处统一门控', () => {
+    // 套图
+    expect(workspaceSource).toContain('使用 Listingo 演示商品')
+    expect(workspaceSource).toContain('v-if="authStore.isAdmin && !assets.length" class="sample-button"')
+    // A+
+    expect(aplusPanelSource).toContain('使用 Listingo 演示商品')
+    expect(aplusPanelSource).toContain('v-if="authStore.isAdmin && !assets.length" class="sample-button"')
+    // 不应再存在无门控的演示商品按钮
+    expect(workspaceSource).not.toContain('v-if="!assets.length" class="sample-button"')
+    expect(aplusPanelSource).not.toContain('v-if="!assets.length" class="sample-button"')
   })
 
   it('clears AI copywriting and main inputs when product images change', () => {

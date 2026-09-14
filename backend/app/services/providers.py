@@ -864,6 +864,7 @@ class ProviderClient:
         aspect_ratio: str,
         input_urls: list[str],
         *,
+        input_paths: list[str] | None = None,
         force_edit: bool = False,
         idempotency_key: str | None = None,
     ) -> dict[str, Any] | list[dict[str, Any]]:
@@ -937,6 +938,34 @@ class ProviderClient:
             payload = {"model": model_name, "input": input_payload}
             _apply_optional_scalar(payload, config, "callBackUrl")
             return payload
+        if group == "molink" and config.get("model_family") == "gpt-image-2":
+            image2_payload: dict[str, Any] = {
+                "model": provider.model_name,
+                "prompt": prompt,
+                "size": requested["size"],
+                "output_format": _configured_output_format(config),
+                "n": _configured_optional_int(config, "n", minimum=1, maximum=10) or 1,
+            }
+            if config.get("quality"):
+                image2_payload["quality"] = str(config["quality"])
+            return image2_payload
+        if group == "molink" and config.get("api_shape") == "gemini_generate_content":
+            reference_limit = int(config.get("max_reference_images", 14))
+            parts: list[dict[str, Any]] = [{"text": prompt}]
+            for path in (input_paths or [])[:reference_limit]:
+                parts.append(file_to_inline_part(path))
+            for url in input_urls[: max(0, reference_limit - len(input_paths or []))]:
+                parts.append({"file_data": {"file_uri": url, "mime_type": "image/png"}})
+            image_config: dict[str, Any] = {"aspectRatio": effective_aspect_ratio}
+            if config.get("resolution"):
+                image_config["imageSize"] = str(config["resolution"]).upper()
+            return {
+                "contents": [{"role": "user", "parts": parts}],
+                "generationConfig": {
+                    "responseModalities": ["IMAGE"],
+                    "imageConfig": image_config,
+                },
+            }
         payload: dict[str, Any] = {"prompt": prompt}
         if group not in {"fal", "wavespeed"}:
             payload["model"] = provider.model_name
@@ -1036,7 +1065,12 @@ class ProviderClient:
         max_reference_images = int(config.get("max_reference_images", len(input_paths) or 0) or 0)
         if max_reference_images and len(input_paths) > max_reference_images:
             raise RuntimeError(f"{provider.label or provider.code} supports at most {max_reference_images} reference images; got {len(input_paths)}")
-        if input_paths and not input_urls and not self._uses_multipart_image_edit(config, input_paths):
+        if (
+            input_paths
+            and not input_urls
+            and not self._uses_multipart_image_edit(config, input_paths)
+            and not self._uses_inline_image_references(config, input_paths)
+        ):
             raise RuntimeError("Live 图片模型需要配置 LISTINGO_PUBLIC_ASSET_BASE_URL，使中转站可读取参考图 URL")
         await self._preflight_if_needed(provider, api_key, config)
         if existing_task_id:
@@ -1071,6 +1105,7 @@ class ProviderClient:
             prompt,
             aspect_ratio,
             input_urls or [],
+            input_paths=input_paths,
             force_edit=force_edit,
             idempotency_key=idempotency_key,
         )
@@ -1089,8 +1124,15 @@ class ProviderClient:
     def _uses_multipart_image_edit(self, config: dict[str, Any], input_paths: list[str]) -> bool:
         return (
             bool(input_paths)
-            and config.get("provider_group") == "cometapi"
+            and config.get("provider_group") in {"cometapi", "molink"}
             and config.get("model_family") == "gpt-image-2"
+        )
+
+    def _uses_inline_image_references(self, config: dict[str, Any], input_paths: list[str]) -> bool:
+        return (
+            bool(input_paths)
+            and config.get("provider_group") == "molink"
+            and config.get("api_shape") == "gemini_generate_content"
         )
 
     async def _post_media_multipart_image_edit(
@@ -1111,11 +1153,14 @@ class ProviderClient:
         form: dict[str, str] = {
             "model": provider.model_name,
             "prompt": prompt,
-            "n": str(_configured_optional_int(config, "n", minimum=1, maximum=10) or 1),
             "size": requested["size"],
         }
+        if config.get("provider_group") != "molink":
+            form["n"] = str(_configured_optional_int(config, "n", minimum=1, maximum=10) or 1)
         if config.get("quality"):
             form["quality"] = str(config["quality"])
+        if config.get("provider_group") == "molink":
+            form["output_format"] = _configured_output_format(config)
         _apply_idempotency_key(form, config, idempotency_key)
         files = []
         for path in input_paths:

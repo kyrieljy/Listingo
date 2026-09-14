@@ -180,7 +180,8 @@ const canPlan = computed(() => assets.value.length > 0 && selectedModuleTotal.va
 const aplusTaskActive = computed(() => Boolean((planJob.value && !FINAL_APLUS_JOB_STATUSES.has(planJob.value.status)) || (generationJob.value && !FINAL_APLUS_JOB_STATUSES.has(generationJob.value.status))))
 const previewUrl = computed(() => previewItem.value ? currentUrl(previewItem.value) : '')
 const editPreviewUrl = computed(() => editItemState.value ? currentUrl(editItemState.value) : '')
-const dryRun = computed(() => form.value.dryRun)
+// 非 admin 强制 live，前台无开关、无法选择 dryrun；admin 以开关为准（021）
+const dryRun = computed(() => (authStore.isAdmin ? form.value.dryRun : false))
 const textEditDirty = computed(() => textEditLines.value.some((line) => (line.original_text || '') !== (line.text || '')))
 const generationOutputSummary = computed(() => {
   const job = generationJob.value
@@ -218,7 +219,7 @@ function aplusAnalyticsPayload(metadata: Record<string, unknown> = {}) {
       output_spec: form.value.outputSpec,
       output_targets: outputTargets.value.map((target) => target.aspect_ratio),
       selected_module_total: selectedModuleTotal.value,
-      dry_run: form.value.dryRun,
+      dry_run: dryRun.value,
       ...metadata,
     },
   }
@@ -507,7 +508,7 @@ async function aiWrite() {
       market: form.value.market,
       language: form.value.language,
       selling_points: form.value.productInfo,
-      dry_run: form.value.dryRun,
+      dry_run: dryRun.value,
     })
     aiSuggestion.value = result.selling_points
     aiSuggestionEditing.value = false
@@ -882,7 +883,7 @@ async function generateImages() {
   selectedPlanItemIds.value = optimisticPlan.items.map((item) => item.id)
   generationJob.value = createOptimisticGenerationJob(optimisticPlan.items, {
     output_targets: outputTargets.value,
-    dry_run: form.value.dryRun,
+    dry_run: dryRun.value,
   })
   selectedResultIds.value = []
   planning.value = true
@@ -1290,7 +1291,7 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
           <button class="remove-uploaded-asset" type="button" @click="removeAsset(asset.id)"><CloseOutlined /></button>
         </div>
       </div>
-      <button v-if="!assets.length" class="sample-button" type="button" @click="useSample">使用 Listingo 演示商品</button>
+      <button v-if="authStore.isAdmin && !assets.length" class="sample-button" type="button" @click="useSample">使用 Listingo 演示商品</button>
           <a-tooltip :title="BATCH_LOCK_HINT" :disabled="authStore.canUseBatchGeneration">
             <button
               class="sample-button batch-hosting-entry"
@@ -1359,7 +1360,7 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
           </div>
         </article>
       </div>
-      <label class="switch-row"><span><b>安全演示模式</b><small>本地模拟资产，不调用语言或图片模型</small></span><input v-model="form.dryRun" type="checkbox" /></label>
+      <label v-if="authStore.isAdmin" class="switch-row"><span><b>安全演示模式</b><small>本地模拟资产，不调用语言或图片模型</small></span><input v-model="form.dryRun" type="checkbox" /></label>
     </section>
 
     <div class="panel-footer aplus-actions">

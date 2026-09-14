@@ -108,6 +108,8 @@ def test_frontend_model_preference_routes_to_expected_hidden_providers() -> None
         "atlas-nano-2-generate",
         "apimodels-nano-2-generate",
         "runware-nano-2-generate",
+        "molink-image-2-generate",
+        "molink-nano-pro-generate",
     ]
     assert image_provider_route("layout") == [
         "atlas-gpt-image-2-generate",
@@ -115,6 +117,7 @@ def test_frontend_model_preference_routes_to_expected_hidden_providers() -> None
         "runware-gpt-image-2-generate",
         "fal-gpt-image-2-generate",
         "openrouter-gpt-image-2-generate",
+        "molink-image-2-generate",
     ]
 
 
@@ -326,9 +329,12 @@ def test_paddleocr_primary_success_does_not_initialize_fallback(tmp_path, monkey
     assert created_models == ["PP-OCRv6"]
 
 
-def test_ocr_enhanced_variants_are_opt_in(tmp_path) -> None:
+def test_ocr_enhanced_variants_are_opt_in(tmp_path, monkeypatch) -> None:
     image_path = tmp_path / "source.png"
     Image.new("RGB", (300, 220), "#ffffff").save(image_path)
+    for temp_variable in ("TMPDIR", "TEMP", "TMP"):
+        monkeypatch.setenv(temp_variable, str(tmp_path))
+    monkeypatch.setattr(image_text_edit.tempfile, "tempdir", str(tmp_path))
 
     assert image_text_edit._prepare_ocr_variants(image_path, Settings(testing=True)) == [(str(image_path), 1.0, False)]
 
@@ -1793,6 +1799,217 @@ def test_cometapi_gemini_image_uses_generate_content_shape() -> None:
     parts = seen["body"]["contents"][0]["parts"]
     assert parts[0]["text"].startswith("prompt")
     assert parts[1]["file_data"]["file_uri"] == "https://assets.example.test/source.png"
+
+
+@pytest.mark.parametrize(
+    "result_item",
+    [
+        {"b64_json": base64.b64encode(b"molink-image").decode("ascii")},
+        {"url": "https://cdn.example.test/molink-image.png"},
+    ],
+)
+def test_molink_image2_generation_uses_official_fields_and_both_response_forms(result_item: dict[str, str]) -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            seen["url"] = str(request.url)
+            seen["authorization"] = request.headers.get("Authorization")
+            seen["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"data": [result_item]})
+        return httpx.Response(200, content=b"molink-image")
+
+    provider = media_image_provider(
+        "molink-image-2-generate",
+        "molink",
+        "gpt-image-2",
+        {
+            "model_name": "gpt-image-2",
+            "size_param_mode": "size_string",
+            "quality": "high",
+            "output_format": "webp",
+            "n": 2,
+        },
+    )
+    provider.base_url = "https://getmolinkapi.com/v1/images/generations"
+
+    async def run() -> bytes:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            return await ProviderClient(http_client).generate_image(
+                provider,
+                "molink-secret",
+                "prompt",
+                [],
+                "970:600",
+            )
+
+    assert asyncio.run(run()) == b"molink-image"
+    assert seen["url"] == "https://getmolinkapi.com/v1/images/generations"
+    assert seen["authorization"] == "Bearer molink-secret"
+    assert seen["body"]["prompt"].startswith("prompt\n\nTarget canvas size: 1040x640 px")
+    seen["body"].pop("prompt")
+    assert seen["body"] == {
+        "model": "gpt-image-2",
+        "size": "1040x640",
+        "output_format": "webp",
+        "n": 2,
+        "quality": "high",
+    }
+
+
+def test_molink_image2_reference_and_edit_use_multipart_output_format(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"fake-png")
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            seen["url"] = str(request.url)
+            seen["content_type"] = request.headers.get("content-type")
+            seen["authorization"] = request.headers.get("Authorization")
+            seen["body_text"] = request.content.decode("utf-8", errors="ignore")
+            return httpx.Response(200, json={"data": [{"url": "https://cdn.example.test/molink-edit.png"}]})
+        return httpx.Response(200, content=b"molink-edit")
+
+    provider = media_image_provider(
+        "molink-image-2-generate",
+        "molink",
+        "gpt-image-2",
+        {
+            "model_name": "gpt-image-2",
+            "size_param_mode": "size_string",
+            "supports_edit": True,
+            "requires_public_urls": False,
+            "edit_base_url": "https://getmolinkapi.com/v1/images/edits",
+            "quality": "high",
+            "output_format": "webp",
+        },
+    )
+    provider.base_url = "https://getmolinkapi.com/v1/images/generations"
+
+    async def run() -> bytes:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            return await ProviderClient(http_client).generate_image(
+                provider,
+                "molink-secret",
+                "edit prompt",
+                [str(source)],
+                "970:600",
+            )
+
+    assert asyncio.run(run()) == b"molink-edit"
+    assert seen["url"] == "https://getmolinkapi.com/v1/images/edits"
+    assert seen["authorization"] == "Bearer molink-secret"
+    assert seen["content_type"].startswith("multipart/form-data")
+    assert 'name="model"' in seen["body_text"]
+    assert "gpt-image-2" in seen["body_text"]
+    assert 'name="prompt"' in seen["body_text"]
+    assert "edit prompt" in seen["body_text"]
+    assert 'name="size"' in seen["body_text"]
+    assert "1040x640" in seen["body_text"]
+    assert 'name="quality"' in seen["body_text"]
+    assert "high" in seen["body_text"]
+    assert 'name="output_format"' in seen["body_text"]
+    assert "webp" in seen["body_text"]
+    assert 'name="image"; filename="source.png"' in seen["body_text"]
+    assert 'name="format"' not in seen["body_text"]
+    assert 'name="n"' not in seen["body_text"]
+
+
+def test_molink_nano_pro_uses_native_image_config_and_inline_references(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"nano-source")
+    encoded_input = base64.b64encode(b"nano-source").decode("ascii")
+    encoded_output = base64.b64encode(b"molink-nano").decode("ascii")
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["body"] = json.loads(request.content.decode())
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"inlineData": {"mimeType": "image/png", "data": encoded_output}}
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    provider = media_image_provider(
+        "molink-nano-pro-generate",
+        "molink",
+        "nano-banana-pro",
+        {
+            "model_name": "gemini-3-pro-image",
+            "size_param_mode": "aspect_ratio_resolution",
+            "requires_public_urls": False,
+            "resolution": "2K",
+            "api_shape": "gemini_generate_content",
+        },
+    )
+    provider.base_url = "https://getmolinkapi.com/v1beta/models/gemini-3-pro-image:generateContent"
+
+    async def run() -> bytes:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            return await ProviderClient(http_client).generate_image(
+                provider,
+                "molink-secret",
+                "prompt",
+                [str(source)],
+                "16:9",
+            )
+
+    assert asyncio.run(run()) == b"molink-nano"
+    assert seen["url"] == "https://getmolinkapi.com/v1beta/models/gemini-3-pro-image:generateContent"
+    assert seen["authorization"] == "Bearer molink-secret"
+    parts = seen["body"]["contents"][0]["parts"]
+    assert parts[0]["text"].startswith("prompt\n\nTarget canvas size: 1536x864 px")
+    assert seen["body"]["generationConfig"] == {
+        "responseModalities": ["IMAGE"],
+        "imageConfig": {"aspectRatio": "16:9", "imageSize": "2K"},
+    }
+    assert parts[1] == {"inlineData": {"mimeType": "image/png", "data": encoded_input}}
+
+
+def test_molink_health_check_uses_models_endpoint_without_leaking_key() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["authorization"] = request.headers.get("Authorization")
+        return httpx.Response(200, json={"data": []})
+
+    provider = media_image_provider(
+        "molink-nano-pro-generate",
+        "molink",
+        "nano-banana-pro",
+        {
+            "model_name": "gemini-3-pro-image",
+            "size_param_mode": "aspect_ratio_resolution",
+            "api_shape": "gemini_generate_content",
+            "health_check": {
+                "mode": "models_or_metadata",
+                "url": "https://getmolinkapi.com/v1/models",
+            },
+        },
+    )
+    provider.base_url = "https://getmolinkapi.com/v1beta/models/gemini-3-pro-image:generateContent"
+
+    async def run() -> dict[str, Any]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            return await ProviderClient(http_client).health_check(provider, "molink-secret")
+
+    result = asyncio.run(run())
+    assert result["ok"] is True
+    assert seen["url"] == "https://getmolinkapi.com/v1/models"
+    assert seen["authorization"] == "Bearer molink-secret"
 
 
 def test_cometapi_gpt_image2_reference_uses_multipart_edits(tmp_path) -> None:

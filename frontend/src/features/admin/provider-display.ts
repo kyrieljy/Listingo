@@ -1,6 +1,6 @@
-export type ProviderRouteRole = 'primary' | 'backup1' | 'backup2' | 'backup3' | 'backup4'
+export type ProviderRouteRole = 'primary' | 'backup1' | 'backup2' | 'backup3' | 'backup4' | 'backup5' | 'backup6'
 
-export const providerRouteRoleOrder: ProviderRouteRole[] = ['primary', 'backup1', 'backup2', 'backup3', 'backup4']
+export const providerRouteRoleOrder: ProviderRouteRole[] = ['primary', 'backup1', 'backup2', 'backup3', 'backup4', 'backup5', 'backup6']
 export const providerRouteChainConfigValue = '__chain_config__'
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
@@ -179,7 +179,7 @@ export function providerMatchesRoute(provider: ProviderDisplayRecord, route: Pro
   const requiresExactSize = route.key === 'suite_layout' || route.key === 'aplus_detail' || route.key === 'aplus_mobile' || route.key === 'image_edit'
   if (requiresExactSize && !provider.supports_exact_custom_size) return false
   if (route.key === 'suite_fidelity') {
-    return operation === 'generate' && family.includes('nano-banana')
+    return operation === 'generate' && (family.includes('nano-banana') || family === 'gpt-image-2')
   }
   if (route.key === 'suite_layout' || route.key === 'aplus_detail') {
     return operation === 'generate' && family === 'gpt-image-2'

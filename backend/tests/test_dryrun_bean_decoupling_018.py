@@ -4,17 +4,20 @@
 - 计费入口（普通生图）：dryrun 下余额不足仍返回 402，充足则预留 BeanLedger；
 - 非计费入口（文案辅助 / A+ plan）：余额不足返回 402，但成功后不产生 BeanLedger；
 - admin / internal 仍豁免（不预留、不扣豆）；
-- `global_dry_run=True`（测试环境默认）硬性覆盖请求 dry_run，任务落库为 dryrun。
+- `global_dry_run=True`（测试环境默认）硬性覆盖非 admin 请求 dry_run，任务落库为 dryrun；
+  admin 以请求体为准，可显式选 live 覆盖全局（021 角色优先级）。
 """
 
 from __future__ import annotations
 
+import types
 from io import BytesIO
 from uuid import uuid4
 
 from PIL import Image
 from sqlalchemy import select
 
+from backend.app.api.public import _resolve_effective_dry_run
 from backend.app.models import BeanLedger, GenerationJob, User
 from backend.app.services.subscriptions import BEANS_PER_IMAGE, grant_beans
 
@@ -193,19 +196,62 @@ def test_non_billing_aplus_plan_checks_beans(client) -> None:
 
 
 def test_global_dry_run_forces_dryrun_on_request(client) -> None:
-    """方案 A：`global_dry_run=True` 时硬性覆盖请求 dry_run，任务落库仍为 dryrun。"""
-    client.cookies.clear()  # admin
-    asset_id = _upload_asset(client)
-
+    """021 角色优先级（集成）：`global_dry_run=True` 下，非 admin 被硬性覆盖为 dryrun；
+    admin 以请求体为准取 dryrun。admin 选 live 的覆盖逻辑见 test_resolve_effective_dry_run_role_priority。"""
     # 测试环境 Settings(testing=True) 未覆盖 global_dry_run，配置默认为 True
     assert client.app.state.settings.global_dry_run is True
 
-    response = client.post("/api/v1/generation-jobs", json=_generation_payload(asset_id, dry_run=False))
-    assert response.status_code == 201, response.text
-    job_id = response.json()["id"]
-
+    # 非 admin：请求 dry_run=False，仍被 global 强制为 dryrun（前台无法选择）
+    free_user_id = _login_free_user(client)
+    asset_id = _upload_asset(client)  # 资产归当前 free 用户所有
+    _grant(client, free_user_id, 500)
+    resp_non_admin = client.post("/api/v1/generation-jobs", json=_generation_payload(asset_id, dry_run=False))
+    assert resp_non_admin.status_code == 201, resp_non_admin.text
+    non_admin_job_id = resp_non_admin.json()["id"]
     with client.app.state.session_factory() as session:
-        job = session.get(GenerationJob, job_id)
-        assert job is not None
-        # 请求要求 live，但 global_dry_run 硬性覆盖为 dryrun
-        assert job.dry_run is True
+        # global_dry_run=True 覆盖非 admin 的 live 请求 → 落库 dryrun
+        assert session.get(GenerationJob, non_admin_job_id).dry_run is True
+
+    # admin：请求 dry_run=True，按选择生效为 dryrun
+    client.cookies.clear()  # 回退到测试态 admin 用户
+    admin_asset_id = _upload_asset(client)
+    resp_admin_dry = client.post("/api/v1/generation-jobs", json=_generation_payload(admin_asset_id, dry_run=True))
+    assert resp_admin_dry.status_code == 201, resp_admin_dry.text
+    admin_dry_job_id = resp_admin_dry.json()["id"]
+    with client.app.state.session_factory() as session:
+        assert session.get(GenerationJob, admin_dry_job_id).dry_run is True
+
+
+def _fake_request(global_dry_run: bool):
+    settings = types.SimpleNamespace(global_dry_run=global_dry_run)
+    return types.SimpleNamespace(app=types.SimpleNamespace(state=types.SimpleNamespace(settings=settings)))
+
+
+def _fake_user(role: str):
+    return types.SimpleNamespace(role=role)
+
+
+def test_resolve_effective_dry_run_role_priority() -> None:
+    """021 角色优先级（单测）：直接验证 _resolve_effective_dry_run 的组合矩阵。
+
+    - admin：以请求体为准，可覆盖 global_dry_run（含 global=True 调试部署下选 live）。
+    - 非 admin：忽略请求体，由 global_dry_run 决定（生产 False→live；调试 True→dryrun）。
+    """
+    cases = [
+        # (role, requested, global_dry_run, expected)
+        ("admin", True, True, True),
+        ("admin", False, True, False),    # admin 显式选 live 覆盖 global
+        ("admin", True, False, True),
+        ("admin", False, False, False),
+        ("user", True, True, True),        # global 强制
+        ("user", False, True, True),       # global 强制
+        ("user", True, False, False),      # 非 admin 请求被忽略 → live
+        ("user", False, False, False),
+    ]
+    for role, requested, g, expected in cases:
+        request = _fake_request(g)
+        result = _resolve_effective_dry_run(request, requested, _fake_user(role))
+        assert result is expected, f"(role={role}, requested={requested}, global={g}) -> {result}, expected {expected}"
+
+    # 缺省 role 视为非 admin（防御性）
+    assert _resolve_effective_dry_run(_fake_request(False), True, types.SimpleNamespace()) is False

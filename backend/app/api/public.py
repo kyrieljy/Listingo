@@ -817,15 +817,20 @@ def download_batch_results(
     return FileResponse(destination, media_type="application/zip", filename=f"batch-{batch.id}.zip")
 
 
-def _resolve_effective_dry_run(request: Request, payload_dry_run: bool) -> bool:
-    """计算生效的 dry_run：`global_dry_run` 为 True 时硬性覆盖为 dryrun。
+def _resolve_effective_dry_run(request: Request, payload_dry_run: bool, current_user) -> bool:
+    """计算生效的 dry_run，按角色 + 部署开关组合判定（021）。
 
-    这是部署级安全开关（spec「未配置有效 Provider 与密钥不得外调」）：
-    只要部署配置 global_dry_run=True，无论请求是否要求 live，一律按 dryrun 执行。
+    - admin：以请求体为准（显式选择优先），可覆盖 global_dry_run
+      （含在 global=True 调试部署下选 live 验证真实链路）。
+    - 非 admin：忽略请求体，由部署级开关 global_dry_run 决定；
+      生产 global=False → live，调试部署 global=True → dryrun（安全网）。
     结果在创建入口落库为 job.dry_run，worker 之后只读 job.dry_run。
     """
+    role = getattr(current_user, "role", "user")
+    if role == "admin":
+        return bool(payload_dry_run)
     settings = getattr(request.app.state, "settings", None)
-    return bool(payload_dry_run or getattr(settings, "global_dry_run", False))
+    return bool(getattr(settings, "global_dry_run", False))
 
 
 @router.post("/generation-jobs", response_model=GenerationJobOut, status_code=201)
@@ -848,7 +853,7 @@ async def create_generation_job(
             asset_ids=payload.asset_ids,
             user_id=current_user.id,
         )
-        payload.dry_run = _resolve_effective_dry_run(request, payload.dry_run)
+        payload.dry_run = _resolve_effective_dry_run(request, payload.dry_run, current_user)
         job = create_generation_job_record(session, payload, max_asset_count=6, user_id=current_user.id)
         # 豆子预留与 dry_run 解耦：dryrun 仅跳过外部调用，余额不足仍须拦截（admin 仍豁免）。
         if current_user.role != "admin":
@@ -940,6 +945,7 @@ async def assist_copywriting(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     user_prompt = build_copywriting_user_prompt(payload)
+    payload.dry_run = _resolve_effective_dry_run(request, payload.dry_run, current_user)
     try:
         ensure_content_safe(run_local_text_safety_review(user_prompt), "输入内容安全拦截")
     except ContentSafetyBlocked as exc:
@@ -1084,7 +1090,7 @@ async def create_aplus_plan_job(
             asset_ids=payload.asset_ids,
             user_id=current_user.id,
         )
-        payload.dry_run = _resolve_effective_dry_run(request, payload.dry_run)
+        payload.dry_run = _resolve_effective_dry_run(request, payload.dry_run, current_user)
         # 非计费入口（A+ plan）：本身不预留、不扣豆，但须预检余额能否支撑后续生图
         # （required = 产出模块数 × BEANS_PER_IMAGE）。该预检属本地校验，不随 dry_run 跳过。
         assert_beans_sufficient(
@@ -1201,7 +1207,7 @@ async def create_aplus_generation_job(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     try:
-        payload.dry_run = _resolve_effective_dry_run(request, payload.dry_run)
+        payload.dry_run = _resolve_effective_dry_run(request, payload.dry_run, current_user)
         job = create_aplus_generation_job_record(session, payload, user_id=current_user.id)
         # 豆子预留与 dry_run 解耦：dryrun 仅跳过外部调用，余额不足仍须拦截（admin 仍豁免）。
         if current_user.role != "admin":
@@ -1570,6 +1576,7 @@ async def assist_video_copywriting(
 ) -> dict[str, Any]:
     ensure_video_feature_available(session, current_user)
     user_prompt = build_video_copywriting_user_prompt(payload)
+    payload.dry_run = _resolve_effective_dry_run(request, payload.dry_run, current_user)
     try:
         ensure_content_safe(run_local_text_safety_review(user_prompt), "输入内容安全拦截")
     except ContentSafetyBlocked as exc:
@@ -1697,6 +1704,7 @@ async def create_video_job(
 ) -> dict[str, Any]:
     ensure_video_feature_available(session, current_user)
     _consume_generation_rate_limit(request, response)
+    payload.dry_run = _resolve_effective_dry_run(request, payload.dry_run, current_user)
     assets = session.scalars(asset_query_for_user(payload.asset_ids, current_user)).all()
     if len(assets) != len(payload.asset_ids):
         raise HTTPException(status_code=422, detail="存在无效商品图")

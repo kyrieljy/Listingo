@@ -171,7 +171,7 @@ def test_provider_api_updates_business_route_roles_and_clears_peer_role(client) 
     assert rejected.status_code == 422
 
 
-def test_provider_groups_and_chain_endpoint_save_five_slots(client) -> None:
+def test_provider_groups_and_chain_endpoint_save_dynamic_slots(client) -> None:
     groups = client.get("/api/v1/admin/provider-groups")
     assert groups.status_code == 200, groups.text
     assert [item["key"] for item in groups.json()] == [
@@ -185,7 +185,10 @@ def test_provider_groups_and_chain_endpoint_save_five_slots(client) -> None:
         "kie",
         "cometapi",
         "apimodels",
+        "molink",
     ]
+    groups = client.get("/api/v1/admin/provider-groups").json()
+    assert next(item for item in groups if item["key"] == "molink")["provider_count"] == 3
 
     chain = [
         "fal-gpt-image-2-generate",
@@ -193,6 +196,7 @@ def test_provider_groups_and_chain_endpoint_save_five_slots(client) -> None:
         "cometapi-gpt-image-2-generate",
         "atlas-gpt-image-2-generate",
         "openrouter-gpt-image-2-generate",
+        "molink-image-2-generate",
     ]
     response = client.patch("/api/v1/admin/provider-routes/suite_layout/chain", json={"provider_codes": chain})
     assert response.status_code == 200, response.text
@@ -210,6 +214,7 @@ def test_provider_groups_and_chain_endpoint_save_five_slots(client) -> None:
         "cometapi-gpt-image-2-generate": "backup2",
         "atlas-gpt-image-2-generate": "backup3",
         "openrouter-gpt-image-2-generate": "backup4",
+        "molink-image-2-generate": "backup5",
     }
 
     ratio_only = client.patch(
@@ -229,6 +234,28 @@ def test_provider_groups_and_chain_endpoint_save_five_slots(client) -> None:
         json={"provider_codes": ["atlas-gpt-image-2-generate"]},
     )
     assert edit_rejected.status_code == 422
+
+    allowed_molink_routes = {
+        "suite_fidelity": "molink-image-2-generate",
+        "suite_layout": "molink-image-2-generate",
+        "aplus_detail": "molink-image-2-generate",
+        "aplus_mobile": "molink-image-2-edit",
+        "image_edit": "molink-image-2-edit",
+    }
+    for route_key, provider_code in allowed_molink_routes.items():
+        response = client.patch(f"/api/v1/admin/provider-routes/{route_key}/chain", json={"provider_codes": [provider_code]})
+        assert response.status_code == 200, response.text
+
+    rejected_molink_routes = {
+        "suite_fidelity": "molink-image-2-edit",
+        "suite_layout": "molink-nano-pro-generate",
+        "aplus_detail": "molink-image-2-edit",
+        "aplus_mobile": "molink-image-2-generate",
+        "image_edit": "molink-image-2-generate",
+    }
+    for route_key, provider_code in rejected_molink_routes.items():
+        response = client.patch(f"/api/v1/admin/provider-routes/{route_key}/chain", json={"provider_codes": [provider_code]})
+        assert response.status_code == 422, response.text
 
 
 def test_provider_api_updates_dynamic_parameter_values(client) -> None:
@@ -284,6 +311,45 @@ def test_provider_api_updates_dynamic_parameter_values(client) -> None:
     rejected = client.patch(
         f"/api/v1/admin/providers/{provider['id']}",
         json={"parameter_values": {"not_in_schema": "x"}},
+    )
+    assert rejected.status_code == 422
+
+
+def test_provider_api_updates_molink_dynamic_parameter_values(client) -> None:
+    providers = client.get("/api/v1/admin/providers").json()
+    image2 = next(item for item in providers if item["code"] == "molink-image-2-generate")
+    nano = next(item for item in providers if item["code"] == "molink-nano-pro-generate")
+
+    image2_update = client.patch(
+        f"/api/v1/admin/providers/{image2['id']}",
+        json={
+            "parameter_values": {
+                "size": "1536x1024",
+                "quality": "high",
+                "output_format": "webp",
+                "n": 2,
+            }
+        },
+    )
+    assert image2_update.status_code == 200, image2_update.text
+    image2_config = image2_update.json()["config"]
+    assert image2_config["size"] == "1536x1024"
+    assert image2_config["quality"] == "high"
+    assert image2_config["output_format"] == "webp"
+    assert image2_config["n"] == 2
+
+    nano_update = client.patch(
+        f"/api/v1/admin/providers/{nano['id']}",
+        json={"parameter_values": {"aspect_ratio": "4:3", "resolution": "2K"}},
+    )
+    assert nano_update.status_code == 200, nano_update.text
+    nano_config = nano_update.json()["config"]
+    assert nano_config["aspect_ratio"] == "4:3"
+    assert nano_config["resolution"] == "2K"
+
+    rejected = client.patch(
+        f"/api/v1/admin/providers/{nano['id']}",
+        json={"parameter_values": {"resolution": "0.5K"}},
     )
     assert rejected.status_code == 422
 

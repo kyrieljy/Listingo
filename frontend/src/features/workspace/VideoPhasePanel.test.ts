@@ -11,6 +11,7 @@ import {
   retryFailedVideoItems,
 } from '../../api/client'
 import VideoPhasePanel from './VideoPhasePanel.vue'
+import videoPhaseRawSource from './VideoPhasePanel.vue?raw'
 import type { VideoJob } from '../../api/client'
 
 vi.mock('ant-design-vue', async (importActual) => ({
@@ -256,5 +257,24 @@ describe('VideoPhasePanel retry cooldown', () => {
 
     expect(cancelButtons(wrapper)).toHaveLength(0)
     expect(retryButton(wrapper)).toBeUndefined()
+  })
+})
+
+describe('VideoPhasePanel dryrun switch role gate (change 021)', () => {
+  it('renders the dryrun switch only when authStore.isAdmin is true', () => {
+    const source = videoPhaseRawSource.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    expect(source).toContain('<label v-if="authStore.isAdmin" class="video-switch">')
+    // 非 admin 提交视频任务时 dry_run 强制 false
+    expect(source).toContain('dry_run: dryRun.value')
+  })
+})
+
+describe('VideoPhasePanel demo product button role gate (change 022)', () => {
+  it('renders the demo product button only when authStore.isAdmin is true', () => {
+    const source = videoPhaseRawSource.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    expect(source).toContain('使用 Listingo 演示商品')
+    expect(source).toContain('v-if="authStore.isAdmin && !assets.length" class="sample-button"')
+    // 不应再使用无门控的 v-else 形态
+    expect(source).not.toContain('v-else class="sample-button"')
   })
 })

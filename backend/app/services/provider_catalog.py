@@ -4,7 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 
-ROUTE_SLOT_ORDER = ("primary", "backup1", "backup2", "backup3", "backup4")
+ROUTE_SLOT_ORDER = ("primary", "backup1", "backup2", "backup3", "backup4", "backup5", "backup6")
 LEGACY_ROUTE_ROLE_ALIASES = {"fallback": "backup1"}
 VALID_ROUTE_ROLES = set(ROUTE_SLOT_ORDER) | set(LEGACY_ROUTE_ROLE_ALIASES)
 EXACT_CUSTOM_SIZE_MODES = {"width_height", "image_size_object", "size_string"}
@@ -21,6 +21,7 @@ PROVIDER_GROUPS: tuple[dict[str, str], ...] = (
     {"key": "kie", "label": "Kie.ai", "website": "https://kie.ai/"},
     {"key": "cometapi", "label": "CometAPI", "website": "https://www.cometapi.com/"},
     {"key": "apimodels", "label": "API Models", "website": "https://apimodels.app/"},
+    {"key": "molink", "label": "MoLink", "website": "https://getmolinkapi.com/"},
 )
 
 DEFAULT_ROUTE_CHAINS: dict[str, list[str]] = {
@@ -30,6 +31,8 @@ DEFAULT_ROUTE_CHAINS: dict[str, list[str]] = {
         "atlas-nano-2-generate",
         "apimodels-nano-2-generate",
         "runware-nano-2-generate",
+        "molink-image-2-generate",
+        "molink-nano-pro-generate",
     ],
     "suite_layout": [
         "atlas-gpt-image-2-generate",
@@ -37,6 +40,7 @@ DEFAULT_ROUTE_CHAINS: dict[str, list[str]] = {
         "runware-gpt-image-2-generate",
         "fal-gpt-image-2-generate",
         "openrouter-gpt-image-2-generate",
+        "molink-image-2-generate",
     ],
     "aplus_detail": [
         "atlas-gpt-image-2-generate",
@@ -44,6 +48,7 @@ DEFAULT_ROUTE_CHAINS: dict[str, list[str]] = {
         "runware-gpt-image-2-generate",
         "fal-gpt-image-2-generate",
         "openrouter-gpt-image-2-generate",
+        "molink-image-2-generate",
     ],
     "aplus_mobile": [
         "atlas-gpt-image-2-edit",
@@ -51,6 +56,7 @@ DEFAULT_ROUTE_CHAINS: dict[str, list[str]] = {
         "runware-gpt-image-2-edit",
         "fal-gpt-image-2-edit",
         "openrouter-gpt-image-2-edit",
+        "molink-image-2-edit",
     ],
     "image_edit": [
         "atlas-gpt-image-2-edit",
@@ -58,6 +64,7 @@ DEFAULT_ROUTE_CHAINS: dict[str, list[str]] = {
         "runware-gpt-image-2-edit",
         "fal-gpt-image-2-edit",
         "openrouter-gpt-image-2-edit",
+        "molink-image-2-edit",
     ],
     "video": [
         "hellobabygo-seedance-2-0-video",
@@ -110,6 +117,8 @@ ASPECT_RATIO_OPTIONS = [
 ]
 IMAGE_RESOLUTION_OPTIONS = [_option("0.5K"), _option("1K"), _option("2K"), _option("4K")]
 GPT_IMAGE_QUALITY_OPTIONS = [_option("auto"), _option("low"), _option("medium"), _option("high"), _option("standard")]
+MOLINK_IMAGE_QUALITY_OPTIONS = [_option("auto"), _option("low"), _option("medium"), _option("high")]
+MOLINK_NANO_RESOLUTION_OPTIONS = [_option("1K"), _option("2K"), _option("4K")]
 IMAGE_FORMAT_OPTIONS = [_option("png"), _option("jpeg"), _option("webp")]
 IMAGE_BACKGROUND_OPTIONS = [_option("auto"), _option("opaque"), _option("transparent")]
 IMAGE_MODERATION_OPTIONS = [_option("auto"), _option("low")]
@@ -294,11 +303,15 @@ def _provider_image_parameter_schema(
                 help_text="Default follows frontend input; fixed values override the runtime aspect ratio field.",
             )
         )
+    resolution_options = MOLINK_NANO_RESOLUTION_OPTIONS if group == "molink" and model_family.startswith("nano-banana") else IMAGE_RESOLUTION_OPTIONS
     if size_param_mode == "aspect_ratio_resolution" or model_family.startswith("nano-banana"):
-        schema.append(_select_parameter("resolution", "resolution", IMAGE_RESOLUTION_OPTIONS, default="1K", optional=False, section="core"))
+        schema.append(_select_parameter("resolution", "resolution", resolution_options, default="1K", optional=False, section="core"))
     if quality_enabled:
-        schema.append(_select_parameter("quality", "quality", GPT_IMAGE_QUALITY_OPTIONS, default="medium", optional=False, section="core"))
-    if not (group == "apimodels" and model_family == "gpt-image-2"):
+        quality_options = MOLINK_IMAGE_QUALITY_OPTIONS if group == "molink" else GPT_IMAGE_QUALITY_OPTIONS
+        schema.append(_select_parameter("quality", "quality", quality_options, default="medium", optional=False, section="core"))
+    if group == "molink" and model_family == "gpt-image-2":
+        schema.append(_select_parameter("output_format", "output_format", IMAGE_FORMAT_OPTIONS, default="png", optional=False, section="core"))
+    elif not (group == "apimodels" and model_family == "gpt-image-2"):
         schema.append(_select_parameter("format", "output_format / format", IMAGE_FORMAT_OPTIONS, default="png", optional=False, section="core"))
     if group == "fal":
         schema.extend(
@@ -370,6 +383,8 @@ def _provider_image_parameter_schema(
                 _select_parameter("background", "background", IMAGE_BACKGROUND_OPTIONS),
             ]
         )
+    elif group == "molink" and model_family == "gpt-image-2":
+        schema.append(_number_parameter("n", "n", minimum=1, maximum=10, default=1))
     schema.extend(_runtime_parameter_schema())
     return schema
 
@@ -511,7 +526,7 @@ def _base_image_config(
     }
     if quality is not None:
         config["quality"] = quality
-    if not (group == "apimodels" and model_family == "gpt-image-2"):
+    if not (group == "apimodels" and model_family == "gpt-image-2") and group != "molink":
         config["format"] = format_
     if group == "fal":
         config["auth_header_mode"] = "fal_key"
@@ -1169,6 +1184,78 @@ def media_provider_presets() -> list[dict[str, Any]]:
             source_url="https://apimodels.app/models/nanobanana2",
             route_roles=default_route_roles_for_code("apimodels-nano-2-generate"),
             extra={"resolution": "1K", "max_reference_images": 14},
+        ),
+        _image_preset(
+            "molink-image-2-generate",
+            "MoLink Image 2",
+            "molink",
+            "https://getmolinkapi.com/v1/images/generations",
+            "gpt-image-2",
+            "generate",
+            "gpt-image-2",
+            size_param_mode="size_string",
+            supports_edit=True,
+            cost_usd=None,
+            source_url="https://getmolinkapi.com/",
+            route_roles=default_route_roles_for_code("molink-image-2-generate"),
+            quality="medium",
+            extra={
+                "requires_public_urls": False,
+                "edit_base_url": "https://getmolinkapi.com/v1/images/edits",
+                "output_format": "png",
+                "health_check": {
+                    "mode": "models_or_metadata",
+                    "url": "https://getmolinkapi.com/v1/models",
+                },
+            },
+        ),
+        _image_preset(
+            "molink-image-2-edit",
+            "MoLink Image 2 edit",
+            "molink",
+            "https://getmolinkapi.com/v1/images/edits",
+            "gpt-image-2",
+            "edit",
+            "gpt-image-2",
+            size_param_mode="size_string",
+            supports_edit=True,
+            cost_usd=None,
+            source_url="https://getmolinkapi.com/",
+            route_roles=default_route_roles_for_code("molink-image-2-edit"),
+            quality="medium",
+            extra={
+                "requires_public_urls": False,
+                "output_format": "png",
+                "health_check": {
+                    "mode": "models_or_metadata",
+                    "url": "https://getmolinkapi.com/v1/models",
+                },
+            },
+        ),
+        _image_preset(
+            "molink-nano-pro-generate",
+            "MoLink Nano Banana Pro",
+            "molink",
+            "https://getmolinkapi.com/v1beta/models/gemini-3-pro-image:generateContent",
+            "gemini-3-pro-image",
+            "generate",
+            "nano-banana-pro",
+            size_param_mode="aspect_ratio_resolution",
+            supports_edit=True,
+            cost_usd=None,
+            source_url="https://getmolinkapi.com/",
+            route_roles=default_route_roles_for_code("molink-nano-pro-generate"),
+            extra={
+                "requires_public_urls": False,
+                "resolution": "1K",
+                "allowed_resolutions": ["1K", "2K", "4K"],
+                "max_reference_images": 14,
+                "api_shape": "gemini_generate_content",
+                "health_check": {
+                    "mode": "models_or_metadata",
+                    "url": "https://getmolinkapi.com/v1/models",
+                },
+            },
         ),
     ]
     video_presets = [

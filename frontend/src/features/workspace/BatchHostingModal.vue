@@ -151,7 +151,8 @@ function batchAnalyticsPayload(metadata: Record<string, unknown> = {}) {
       valid_task_count: summary.value.taskCount,
       output_spec: String(globalParams.value.output_spec || ''),
       aspect_ratio: String(globalParams.value.aspect_ratio || globalParams.value.ratio || ''),
-      dry_run: Boolean(globalParams.value.dry_run),
+      // 非 admin 强制 live，前台无开关、无法选择 dryrun（021）
+      dry_run: authStore.isAdmin ? Boolean(globalParams.value.dry_run) : false,
       ...metadata,
     },
   }
@@ -481,7 +482,8 @@ async function aiWriteTask(index: number) {
       market: String(globalParams.value.market),
       language: String(globalParams.value.language),
       selling_points: task.sellingPoints,
-      dry_run: Boolean(globalParams.value.dry_run),
+      // 非 admin 强制 live，前台无开关、无法选择 dryrun（021）
+      dry_run: authStore.isAdmin ? Boolean(globalParams.value.dry_run) : false,
     })
     const latest = tasks.value[index]
     if (!latest || latest.id !== taskId) return
@@ -570,7 +572,7 @@ async function submitBatch() {
           <b>全局批量设置</b>
           <span>应用于下方所有商品任务，单个商品可单独覆盖</span>
         </div>
-        <label class="batch-dryrun-toggle">
+        <label v-if="authStore.isAdmin" class="batch-dryrun-toggle">
           <input type="checkbox" :checked="Boolean(globalParams.dry_run)" @change="setGlobalParam('dry_run', checkedValue($event))" />
           <i />
           <span>安全演示模式</span>

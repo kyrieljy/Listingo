@@ -24,7 +24,7 @@ from backend.app.services.provider_catalog import (
 logger = logging.getLogger(__name__)
 
 
-ProviderRouteRole = Literal["primary", "backup1", "backup2", "backup3", "backup4"]
+ProviderRouteRole = Literal["primary", "backup1", "backup2", "backup3", "backup4", "backup5", "backup6"]
 
 PRIMARY_ROLE: ProviderRouteRole = "primary"
 FALLBACK_ROLE: ProviderRouteRole = "backup1"

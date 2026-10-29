@@ -30,6 +30,8 @@ from backend.app.security import ApiKeyCipher
 from backend.app.api.auth import router as auth_router
 from backend.app.api.public import router as public_router
 from backend.app.api.admin import router as admin_router
+from backend.app.api.payments import router as payments_router
+from backend.app.services.wechat_pay import PaymentError, WechatPayClient, reconcile_loop
 from backend.app.services.generation_queue_service import UnifiedGenerationQueueScheduler
 from backend.app.services.provider_routing import invalidate_provider_cache
 from backend.app.services.runtime_cache import (
@@ -98,6 +100,10 @@ def ensure_database_ready(engine: Engine) -> None:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or Settings()
+    if resolved.production and (resolved.testing or not resolved.cookie_secure or resolved.debug_sms_code):
+        raise RuntimeError("生产环境必须禁用 testing/调试验证码，并启用安全 Cookie")
+    if resolved.production and resolved.bootstrap_admin_phone == "18928268686":
+        raise RuntimeError("生产环境必须设置 LISTINGO_BOOTSTRAP_ADMIN_PHONE 为实际管理员手机号")
     _validate_single_worker(resolved)
     resolved.ensure_directories()
     rate_limiter = create_rate_limiter(resolved)
@@ -128,7 +134,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 rate_limiter.start()
             ensure_database_ready(engine)
             with session_factory() as session:
-                seed_database(session)
+                seed_database(session, admin_phone=resolved.bootstrap_admin_phone, production=resolved.production)
                 repair_monitoring_fixture_history(session)
                 recover_interrupted_workspace_jobs(session)
             try:
@@ -150,8 +156,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if not resolved.testing:
                 await generation_queue_scheduler.start()
             schedule_ocr_prewarm(resolved, application.state.ocr_prewarm)
+            payment_stop = asyncio.Event()
+            payment_task = None
+            if resolved.wechat_pay_enabled:
+                application.state.wechat_pay = WechatPayClient(resolved)
+                if not resolved.testing:
+                    payment_task = asyncio.create_task(reconcile_loop(session_factory, application.state.wechat_pay, payment_stop))
             yield
         finally:
+            if "payment_stop" in locals():
+                payment_stop.set()
+            if "payment_task" in locals() and payment_task:
+                await payment_task
             if not resolved.testing and "generation_queue_scheduler" in locals():
                 await generation_queue_scheduler.stop()
             reset_default_runtime(runtime_state)
@@ -163,6 +179,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(title="Listingo API", version="0.1.0", lifespan=lifespan)
     application.state.settings = resolved
+    application.state.wechat_pay = None
     application.state.engine = engine
     application.state.session_factory = session_factory
     application.state.cipher = ApiKeyCipher(resolved.secret_key_path)
@@ -170,6 +187,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.runtime_state = runtime_state
     application.state.ocr_prewarm = new_ocr_prewarm_state()
     configure_default_runtime(runtime_state)
+    @application.exception_handler(PaymentError)
+    async def payment_error_handler(_: Request, exc: PaymentError) -> JSONResponse:
+        return JSONResponse(status_code=exc.status, content={"detail": exc.message, "code": exc.code})
     @application.exception_handler(StorageUnavailableError)
     async def storage_unavailable_handler(_: Request, __: StorageUnavailableError) -> JSONResponse:
         return JSONResponse(status_code=503, content={"detail": "防护存储暂不可用，请稍后再试"})
@@ -182,10 +202,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    application.mount("/files", StaticFiles(directory=resolved.data_dir), name="files")
+    # Never serve runtime DB files or the credential-encryption key under /files.
+    for folder in ("uploads", "results", "exports"):
+        application.mount(f"/files/{folder}", StaticFiles(directory=resolved.data_dir / folder), name=f"files-{folder}")
     application.include_router(auth_router)
     application.include_router(public_router)
     application.include_router(admin_router)
+    application.include_router(payments_router)
+
+    @application.get("/api/v1/site-info")
+    def site_info():
+        return {"icp_number": resolved.icp_number, "support_contact": resolved.support_contact}
 
     @application.get("/api/v1/health")
     def health() -> dict[str, str]:

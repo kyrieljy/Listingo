@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     database_max_overflow: int = Field(default=10, ge=0)
     database_pool_recycle_seconds: int = Field(default=1800, ge=30)
     testing: bool = False
+    production: bool = False
+    bootstrap_admin_phone: str = "18928268686"
     global_dry_run: bool = True
     public_asset_base_url: str = ""
     cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
@@ -70,6 +72,18 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = Field(default=60 * 60 * 8, ge=60)
     refresh_ttl_seconds: int = Field(default=60 * 60 * 24 * 30, ge=60)
     cookie_secure: bool = False
+    wechat_pay_enabled: bool = False
+    wechat_mchid: str = ""
+    wechat_appid: str = ""
+    wechat_api_v3_key: str = Field(default="", repr=False)
+    wechat_merchant_serial: str = ""
+    wechat_private_key_path: str = ""
+    wechat_public_key_id: str = ""
+    wechat_public_key_path: str = ""
+    wechat_notify_url: str = "https://listingo.net/api/v1/payments/wechat/notify"
+    wechat_reconcile_interval_seconds: int = Field(default=60, ge=10)
+    icp_number: str = ""
+    support_contact: str = ""
     debug_sms_code: str | None = None
     sms_timeout_seconds: float = Field(default=15, ge=0.1)
     max_job_concurrency: int = Field(default=4, ge=1, le=8)

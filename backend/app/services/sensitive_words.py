@@ -384,12 +384,14 @@ class SensitiveWordMatcher:
     def contains(self, text: str) -> bool:
         if not self.payload["enabled"] or not text:
             return False
-        views = [
-            normalize_sensitive_text(text),
-            normalize_sensitive_text(text, compact=True),
-            _pinyin_text(text),
-        ]
-        for view in views:
+        # Build expensive alternate views only if the preceding view did not match.
+        views = (
+            lambda: normalize_sensitive_text(text),
+            lambda: normalize_sensitive_text(text, compact=True),
+            lambda: _pinyin_text(text),
+        )
+        for build_view in views:
+            view = build_view()
             if not view:
                 continue
             for end_index, (variant, use_boundary) in self._automaton.iter(view):

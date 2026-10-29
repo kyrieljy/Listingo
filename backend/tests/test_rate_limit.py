@@ -167,16 +167,17 @@ def test_generation_and_video_share_one_rate_limit_window(client: TestClient) ->
 
 
 def test_five_password_failures_block_subsequent_requests(client: TestClient) -> None:
+    source = TestClient(client.app, client=("198.51.100.7", 50000))
     payload = {"identifier": "rate-limit-user", "password": "wrong-password"}
     headers = {"X-Forwarded-For": "198.51.100.7"}
 
-    statuses = [client.post("/api/v1/auth/password/login", json=payload, headers=headers).status_code for _ in range(5)]
+    statuses = [source.post("/api/v1/auth/password/login", json=payload, headers=headers).status_code for _ in range(5)]
 
     assert statuses == [401, 401, 401, 401, 403]
-    assert client.get("/api/v1/health", headers=headers).status_code == 403
+    assert source.get("/api/v1/health", headers=headers).status_code == 403
     assert client.get("/api/v1/health").status_code == 200
     assert client.app.state.rate_limiter.block_ttl_seconds("198.51.100.7") == 1800
-    blocked = client.get("/api/v1/health", headers={**headers, "Origin": "http://localhost:5173"})
+    blocked = source.get("/api/v1/health", headers={**headers, "Origin": "http://localhost:5173"})
     assert blocked.status_code == 403
     assert blocked.headers["access-control-allow-origin"] == "http://localhost:5173"
 
@@ -215,13 +216,14 @@ def test_redis_backend_preserves_generation_nonce_and_block_behavior(
         assert (accepted.status_code, duplicate.status_code) == (200, 409)
 
         login_headers = {"X-Forwarded-For": "198.51.100.8"}
+        source = TestClient(client.app, client=("198.51.100.8", 50000))
         login = {"identifier": "redis-user", "password": "wrong-password"}
         statuses = [
-            client.post("/api/v1/auth/password/login", json=login, headers=login_headers).status_code
+            source.post("/api/v1/auth/password/login", json=login, headers=login_headers).status_code
             for _ in range(5)
         ]
         assert statuses == [401, 401, 401, 401, 403]
-        assert client.get("/api/v1/health", headers=login_headers).status_code == 403
+        assert source.get("/api/v1/health", headers=login_headers).status_code == 403
         assert client.app.state.rate_limiter.block_ttl_seconds("198.51.100.8") == 1800
 
 

@@ -1,0 +1,17 @@
+.git
+.agents
+.codex
+.trae
+.venv
+.env*
+secrets
+data
+**/__pycache__
+**/.pytest*
+**/node_modules
+frontend/dist
+tmp*
+*.log
+**/*.pem
+**/*.key
+**/.secret_key

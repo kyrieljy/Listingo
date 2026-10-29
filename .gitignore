@@ -22,4 +22,13 @@ data/exports/*
 coverage/
 htmlcov/
 *.log
+backend/.pytest-tmp/
+tmp_test_recovery/
+secrets/
+*.pem
+*.key
+**/.secret_key
+backups/
+data/.release
+data/.schema-version
 

@@ -668,8 +668,14 @@ export async function createSubscriptionOrderApi(payload: { plan_code?: string; 
   return (await api.post('/subscription/orders', payload)).data
 }
 
-export async function mockPayOrderApi(orderId: string): Promise<PaymentOrderDto> {
-  return (await api.post(`/subscription/orders/${orderId}/mock-pay`, undefined, { headers: { 'X-Request-Nonce': createRequestNonce() } })).data
+export type NativePaymentDto = { order_id: string; code_url: string; expires_at: string }
+
+export async function createNativePaymentApi(orderId: string): Promise<NativePaymentDto> {
+  return (await api.post(`/subscription/orders/${orderId}/wechat-native`)).data
+}
+
+export async function getPaymentOrderApi(orderId: string): Promise<PaymentOrderDto> {
+  return (await api.get(`/subscription/orders/${orderId}`)).data
 }
 
 export async function listBeanPacksApi(): Promise<BeanPackDto[]> {

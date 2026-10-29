@@ -400,6 +400,8 @@ async def send_sms_code(
     if not isinstance(settings, Settings):
         settings = Settings()
     _assert_send_allowed(config, normalized_phone, purpose, bypass_rate_limit=bypass_rate_limit)
+    if settings.production and config.debug_mode:
+        raise HTTPException(status_code=503, detail="生产环境禁止调试短信，请管理员配置真实短信服务")
     if not config.enabled and not config.debug_mode:
         raise HTTPException(status_code=503, detail="短信服务未启用，请联系管理员")
     storage = request.app.state.rate_limiter.storage

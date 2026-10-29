@@ -4,7 +4,8 @@ import json
 from typing import Any
 
 
-SECRET_KEYS = {"authorization", "api_key", "apikey", "token", "cookie", "set-cookie", "encrypted_api_key"}
+SECRET_KEYS = {"authorization", "api_key", "apikey", "token", "cookie", "set-cookie", "encrypted_api_key",
+               "wechat_api_v3_key", "apiv3_key", "private_key", "wechat_private_key", "wechatpay-signature"}
 
 
 def redact(value: Any) -> Any:

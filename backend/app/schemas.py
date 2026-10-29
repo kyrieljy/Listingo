@@ -917,6 +917,11 @@ class PaymentOrderOut(BaseModel):
     paid_at: datetime | None
     expires_at: datetime | None
     created_at: datetime
+    payment_channel: str | None = None
+    wechat_transaction_id: str | None = None
+    payment_error: str | None = None
+    refund_reference: str | None = None
+    refund_note: str | None = None
 
 
 class AdminBeanPackBase(BaseModel):

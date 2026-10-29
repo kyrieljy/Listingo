@@ -7,6 +7,7 @@ services:
       - ${LISTINGO_ENV_FILE:-.env.local}
     volumes:
       - ./data:/app/data
+      - ./secrets:/run/secrets/listingo:ro
     environment:
       LISTINGO_DATABASE_URL: ${LISTINGO_DATABASE_URL:?LISTINGO_DATABASE_URL must point to the external PostgreSQL database}
       LISTINGO_DATA_DIR: /app/data
@@ -17,6 +18,11 @@ services:
     ports:
       - "127.0.0.1:${LISTINGO_PORT:-8000}:${LISTINGO_PORT:-8000}"
     restart: unless-stopped
+    stop_grace_period: 16m
+    networks:
+      - app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   frontend:
     build:
@@ -29,6 +35,9 @@ services:
     ports:
       - "127.0.0.1:5173:80"
     restart: unless-stopped
+    networks:
+      app:
+        ipv4_address: 172.30.87.11
 
   redis:
     image: redis:7.4-alpine
@@ -44,7 +53,25 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
+    networks:
+      - app
+
+  db-backup:
+    image: ${LISTINGO_POSTGRES_CLIENT_IMAGE:-postgres:18-alpine}
+    profiles: [tools]
+    environment:
+      PGDATABASE: ${LISTINGO_DATABASE_URL:?database required}
+    entrypoint: [pg_dump, --format=custom, --no-password]
+    networks: [app]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   redis-data:
+
+networks:
+  app:
+    ipam:
+      config:
+        - subnet: 172.30.87.0/24
 

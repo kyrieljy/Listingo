@@ -44,9 +44,5 @@ class IPBlockMiddleware:
 
 def client_ip_from_scope(scope: Scope) -> str:
     """Read the same forwarded-client field used by HTTP request handling."""
-    headers = {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in scope.get("headers", [])}
-    forwarded = headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",", 1)[0].strip()[:80]
     client = scope.get("client")
     return ((client[0] if client else "") or "")[:80]

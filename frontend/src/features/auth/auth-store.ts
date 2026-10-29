@@ -16,7 +16,6 @@ import {
   loginWithPasswordApi,
   loginWithSmsApi,
   logoutApi,
-  mockPayOrderApi,
   readAllNotificationsApi,
   readNotificationApi,
   registerApi,
@@ -252,29 +251,17 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function choosePlan(planKey: PlanKey, billingCycle: 'monthly' | 'yearly'): Promise<PaymentOrderDto> {
     if (!user.value) throw new Error('请先登录后再选择套餐')
-    const order = await createSubscriptionOrderApi({ plan_code: planKey, billing_cycle: billingCycle })
-    if (order.status === 'pending') {
-      const paid = await mockPayOrderApi(order.id)
-      applyAuthResponse(await getAuthMeApi())
-      await loadQuota()
-      await loadNotifications()
-      message.success('支付成功，订阅已生效')
-      return paid
-    }
-    await loadNotifications()
-    message.success('企业定制咨询已提交')
-    return order
+    return createSubscriptionOrderApi({ plan_code: planKey, billing_cycle: billingCycle })
   }
 
   async function purchaseBeanPack(packCode: string): Promise<PaymentOrderDto> {
     if (!user.value) throw new Error('请先登录后再购买补豆包')
-    const order = await createSubscriptionOrderApi({ bean_pack_code: packCode })
-    const paid = order.status === 'pending' ? await mockPayOrderApi(order.id) : order
+    return createSubscriptionOrderApi({ bean_pack_code: packCode })
+  }
+
+  async function refreshAfterPayment(): Promise<void> {
     applyAuthResponse(await getAuthMeApi())
-    await loadQuota()
-    await loadNotifications()
-    message.success('支付成功，补豆包已到账')
-    return paid
+    await Promise.all([loadQuota(), loadNotifications()])
   }
 
   async function submitEnterpriseLead(payload: EnterpriseLeadPayload): Promise<void> {
@@ -348,6 +335,7 @@ export const useAuthStore = defineStore('auth', () => {
     confirmChangePhone,
     choosePlan,
     purchaseBeanPack,
+    refreshAfterPayment,
     submitEnterpriseLead,
     showInsufficientBeans,
     markNotificationRead,

@@ -119,7 +119,20 @@ function moneyLabel(cents:number|null|undefined){return cents===null||cents===un
 function orderProductLabel(order:any){return order.product_type==='bean_pack'?'补豆包':order.product_type==='subscription'?'订阅套餐':order.product_type||'历史订单'}
 function orderProductDetail(order:any){return order.product_type==='bean_pack'?`${order.bean_pack_name || order.bean_pack_code} · ${order.beans ?? 0} 豆`:`${order.plan_name || order.plan_code}`}
 function billingCycleLabel(cycle:string){return cycle==='yearly'?'年付':cycle==='monthly'?'月付':cycle}
-function orderStatusLabel(status:string){return status==='paid'?'已支付':status==='pending'?'待支付':status==='cancelled'?'已取消':status==='expired'?'已过期':status}
+function orderStatusLabel(status:string){if(status==='manual_review')return '需人工核对';if(status==='closed')return '已关闭';if(status==='refunded')return '已退款';return status==='paid'?'已支付':status==='pending'?'待支付':status==='cancelled'?'已取消':status==='expired'?'已过期':status}
+const refundOrder=ref<any|null>(null)
+const refundReference=ref('')
+const refundNote=ref('')
+const refundSubmitting=ref(false)
+function openRefund(order:any){refundOrder.value=order;refundReference.value='';refundNote.value=''}
+async function saveRefund(){
+  if(!refundOrder.value||!refundReference.value.trim()||!refundNote.value.trim())return
+  refundSubmitting.value=true
+  try{
+    await api.post(`/admin/payment-orders/${refundOrder.value.id}/refund-record`,{reference:refundReference.value.trim(),note:refundNote.value.trim()})
+    refundOrder.value=null;await loadSection();message.success('退款已登记，剩余权益已撤销')
+  }catch(error:any){message.error(error?.response?.data?.detail||'退款登记失败')}finally{refundSubmitting.value=false}
+}
 function orderStatusClass(status:string){return ['paid','pending','cancelled','expired'].includes(status)?status:'default'}
 function formatAdminTime(value:any){if(!value)return '-';const date=new Date(value);return Number.isNaN(date.getTime())?String(value):date.toLocaleString('zh-CN',{hour12:false})}
 function providerParameterSchema(provider:Provider|null){const schema=provider?.config?.parameter_schema;return Array.isArray(schema)?schema.filter((item:any)=>item&&item.key):[]}
@@ -219,14 +232,19 @@ function ocrAutoPrewarmSummary(){const status=ocrSettings.value?.prewarm_status;
         <EnterpriseLeadsPanel />
       </section>
       <section v-else-if="section==='payments'" class="admin-module-shell">
+        <a-modal :open="!!refundOrder" title="登记已完成的全额退款" :confirm-loading="refundSubmitting" @cancel="refundOrder=null" @ok="saveRefund">
+          <p>请先在微信商户平台核实全额退款成功。此操作仅登记结果，并撤销本订单剩余豆子与订阅。已使用或预留权益请在备注中记录处理结果。</p>
+          <label>退款单号<a-input v-model:value="refundReference" :maxlength="100" /></label>
+          <label>核对及权益处理说明<a-textarea v-model:value="refundNote" :maxlength="2000" /></label>
+        </a-modal>
         <div class="admin-module-hero">
           <div><span>PAYMENT ORDERS</span><h2>支付订单管理</h2><p>集中查看订阅订单、补豆包订单、商品信息、金额与支付状态。</p></div>
           <div class="admin-hero-metrics"><article v-for="stat in paymentStats" :key="stat.label"><small>{{ stat.label }}</small><b>{{ stat.value }}</b></article></div>
         </div>
         <div class="admin-table-card">
           <table class="admin-data-table">
-            <thead><tr><th>订单号</th><th>商品类型</th><th>商品</th><th>周期</th><th>金额</th><th>状态</th><th>创建时间</th></tr></thead>
-            <tbody><tr v-for="order in adminOrders" :key="order.id"><td><code>{{ order.order_no }}</code></td><td>{{ orderProductLabel(order) }}</td><td><b>{{ orderProductDetail(order) }}</b></td><td>{{ order.product_type === 'bean_pack' ? '--' : billingCycleLabel(order.billing_cycle) }}</td><td>{{ moneyLabel(order.amount_cents) }}</td><td><span :class="['admin-status-pill','order-'+orderStatusClass(order.status)]">{{ orderStatusLabel(order.status) }}</span></td><td>{{ formatAdminTime(order.created_at) }}</td></tr></tbody>
+            <thead><tr><th>订单号</th><th>商品类型</th><th>商品</th><th>周期</th><th>金额</th><th>状态</th><th>交易 / 异常</th><th>创建时间</th><th>操作</th></tr></thead>
+            <tbody><tr v-for="order in adminOrders" :key="order.id"><td><code>{{ order.order_no }}</code></td><td>{{ orderProductLabel(order) }}</td><td><b>{{ orderProductDetail(order) }}</b></td><td>{{ order.product_type === 'bean_pack' ? '--' : billingCycleLabel(order.billing_cycle) }}</td><td>{{ moneyLabel(order.amount_cents) }}</td><td><span :class="['admin-status-pill','order-'+orderStatusClass(order.status)]">{{ orderStatusLabel(order.status) }}</span></td><td><code>{{ order.wechat_transaction_id || '--' }}</code><p>{{ order.payment_error }}</p><p>{{ order.refund_reference }} {{ order.refund_note }}</p></td><td>{{ formatAdminTime(order.created_at) }}</td><td><button v-if="['paid','manual_review'].includes(order.status) && order.wechat_transaction_id" @click="openRefund(order)">登记商户平台退款</button></td></tr></tbody>
           </table>
         </div>
       </section>

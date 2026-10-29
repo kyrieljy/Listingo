@@ -48,9 +48,7 @@ class NonceResult:
 
 
 def client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",", 1)[0].strip()[:80]
+    # Uvicorn resolves forwarded headers only for explicitly trusted proxies.
     return (request.client.host if request.client else "")[:80]
 
 

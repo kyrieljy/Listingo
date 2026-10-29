@@ -1,5 +1,7 @@
 # CONTEXT_SUMMARY — 语义索引
 
+微信 Native 支付与上线配置（019）：后端 `services/wechat_pay.py`、`api/payments.py`；前端 `features/auth/PaymentModal.vue`；部署与验收入口 `docs/WECHAT_DEPLOYMENT.md`、`.env.example`、`scripts/deploy.sh`、`scripts/backup.sh`。真实云端上线与收款须完成商户/SSH 配置及联调。
+
 > 本文件是 Listingo 项目的**文档单一入口（语义索引）**，由 `.coderules` §1 规定为权威文档索引。
 > 职责：把「模块 / 能力 → 职责 → 关键文件路径」映射出来，让任何变更都能快速定位应同步的源码与文档。
 >

@@ -254,6 +254,13 @@ class PaymentOrder(Base, TimestampMixin):
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    payment_channel: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    wechat_transaction_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    code_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payment_error: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    refund_reference: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    refund_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class BeanGrant(Base, TimestampMixin):

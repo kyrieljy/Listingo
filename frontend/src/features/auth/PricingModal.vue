@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { CheckOutlined, CloseOutlined, CrownOutlined, SafetyCertificateOutlined } from '@ant-design/icons-vue'
-import type { EnterpriseLeadMonthlyUsage } from '../../api/client'
+import type { EnterpriseLeadMonthlyUsage, PaymentOrderDto } from '../../api/client'
+import PaymentModal from './PaymentModal.vue'
+import { message } from 'ant-design-vue'
 import type { PlanKey } from './auth-model'
 import { useAuthStore } from './auth-store'
 
@@ -33,6 +35,18 @@ const leadForm = reactive({
   requirement: '',
 })
 const packSection = ref<HTMLElement | null>(null)
+const paymentOrder = ref<PaymentOrderDto | null>(null)
+let retryPurchase: (() => Promise<void>) | undefined
+
+function purchaseError(error: unknown) {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  message.error(typeof detail === 'string' ? detail : '订单创建失败，请稍后重试')
+}
+
+async function retryPayment() {
+  paymentOrder.value = null
+  await retryPurchase?.()
+}
 
 const monthlyUsageOptions: Array<{ value: EnterpriseLeadMonthlyUsage; label: string }> = [
   { value: 'under_1000', label: '1000 张以内 / 月' },
@@ -101,8 +115,11 @@ async function choosePlan(planKey: PlanKey, contactSales: boolean): Promise<void
   }
   submittingPlan.value = planKey
   try {
-    await authStore.choosePlan(planKey, billing.value)
-    visible.value = false
+    const cycle = billing.value
+    paymentOrder.value = await authStore.choosePlan(planKey, cycle)
+    retryPurchase = async () => { billing.value = cycle; await choosePlan(planKey, false) }
+  } catch (error) {
+    purchaseError(error)
   } finally {
     submittingPlan.value = ''
   }
@@ -115,7 +132,10 @@ async function purchasePack(packCode: string): Promise<void> {
   }
   submittingPack.value = packCode
   try {
-    await authStore.purchaseBeanPack(packCode)
+    paymentOrder.value = await authStore.purchaseBeanPack(packCode)
+    retryPurchase = () => purchasePack(packCode)
+  } catch (error) {
+    purchaseError(error)
   } finally {
     submittingPack.value = ''
   }
@@ -152,6 +172,7 @@ async function submitLead() {
 </script>
 
 <template>
+  <PaymentModal :order="paymentOrder" @close="paymentOrder = null" @paid="message.success('支付成功，权益已到账')" @retry="retryPayment" />
   <a-modal
     v-model:open="visible"
     :footer="null"

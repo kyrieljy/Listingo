@@ -20,13 +20,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_env_files_document_every_configured_variable() -> None:
-    for filename in (".env.local", ".env.production"):
-        lines = (PROJECT_ROOT / filename).read_text(encoding="utf-8").splitlines()
-        assignments = [index for index, line in enumerate(lines) if line and not line.startswith("#")]
-        assert assignments
-        for index in assignments:
-            assert lines[index - 1].startswith("#"), f"{filename}:{index + 1} lacks a comment"
-            assert "使用位置" in lines[index - 1], f"{filename}:{index + 1} lacks a usage-location comment"
+    # Real environment files are private server configuration, never test fixtures.
+    lines = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    assignments = dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
+    assert assignments["LISTINGO_PRODUCTION"] == "true"
+    assert assignments["LISTINGO_TESTING"] == "false"
+    assert assignments["LISTINGO_WECHAT_PAY_ENABLED"] == "false"
+    assert assignments["LISTINGO_WECHAT_API_V3_KEY"] == ""
 
 
 def test_settings_selects_env_file_from_environment(tmp_path: Path, monkeypatch) -> None:
@@ -55,15 +55,16 @@ def test_default_and_production_env_files_keep_expected_modes(monkeypatch) -> No
     for name in ("LISTINGO_ENV_FILE", "LISTINGO_COOKIE_SECURE", "LISTINGO_DEBUG_SMS_CODE", "LISTINGO_GLOBAL_DRY_RUN"):
         monkeypatch.delenv(name, raising=False)
 
-    local = Settings()
+    local = Settings(_env_file=None)
     assert local.cookie_secure is False
-    assert local.debug_sms_code == "246810"
+    assert local.debug_sms_code is None
 
-    monkeypatch.setenv("LISTINGO_ENV_FILE", ".env.production")
+    monkeypatch.setenv("LISTINGO_ENV_FILE", ".env.example")
     production = Settings()
     assert production.cookie_secure is True
     assert production.debug_sms_code in (None, "")
-    assert production.global_dry_run is False
+    assert production.production is True
+    assert production.global_dry_run is True
 
 
 def test_settings_validate_and_normalize_redis_configuration() -> None:

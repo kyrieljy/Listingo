@@ -307,10 +307,10 @@ def ensure_gpt_image2_exact_size_route_roles(session: Session) -> None:
             assigned_codes.add(provider_code)
 
 
-def seed_database(session: Session) -> None:
+def seed_database(session: Session, *, admin_phone: str = "18928268686", production: bool = False) -> None:
     seed_subscription_defaults(session)
 
-    admin_phone = normalize_phone("18928268686")
+    admin_phone = normalize_phone(admin_phone)
     admin = session.scalar(select(User).where(User.username == "admin").limit(1))
     if not admin:
         admin = User(
@@ -339,7 +339,7 @@ def seed_database(session: Session) -> None:
 
     sms_config = session.scalar(select(SmsConfig).limit(1))
     if not sms_config:
-        session.add(SmsConfig(enabled=True, debug_mode=True, sign_name="Listingo", login_template_code="SMS_DEBUG"))
+        session.add(SmsConfig(enabled=not production, debug_mode=not production, sign_name="Listingo", login_template_code="" if production else "SMS_DEBUG"))
         session.flush()
 
     sensitive_word_config = session.scalar(select(SensitiveWordConfig).limit(1))

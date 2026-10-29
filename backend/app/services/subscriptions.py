@@ -858,7 +858,7 @@ def _price_for_cycle(session: Session, plan: SubscriptionPlan, billing_cycle: st
 
 
 def _order_no(user: User) -> str:
-    return f"MOCK{utcnow().strftime('%Y%m%d%H%M%S')}{user.uid[-4:]}{uuid4().hex[:6].upper()}"
+    return f"LG{utcnow().strftime('%Y%m%d%H%M%S')}{uuid4().hex[:20].upper()}"
 
 
 def create_payment_order(
@@ -869,6 +869,20 @@ def create_payment_order(
     billing_cycle: str = "monthly",
     bean_pack_code: str | None = None,
 ) -> PaymentOrder:
+    # Database locking remains authoritative even when a Redis lease expires.
+    session.scalar(select(User).where(User.id == user.id).with_for_update())
+    if not bean_pack_code and has_active_paid_subscription(session, user):
+        raise HTTPException(status_code=409, detail="当前付费套餐尚未到期，暂不支持提前续费或升级")
+    existing = session.scalar(select(PaymentOrder).where(
+        PaymentOrder.user_id == user.id, PaymentOrder.status == "pending", PaymentOrder.expires_at > utcnow(),
+    ).order_by(PaymentOrder.created_at.desc()))
+    if existing:
+        snapshot = _json_dict(existing.snapshot_json)
+        if (bean_pack_code and existing.product_type == "bean_pack" and snapshot.get("code") == bean_pack_code) or (
+            not bean_pack_code and existing.product_type == "subscription" and snapshot.get("code") == plan_code
+            and existing.billing_cycle == billing_cycle
+        ):
+            return existing
     try:
         _lock_for_session(session, "order-create", user.id)
     except RuntimeLockBusyError as exc:
@@ -878,6 +892,8 @@ def create_payment_order(
         pack = session.scalar(select(BeanPack).where(BeanPack.code == bean_pack_code, BeanPack.enabled.is_(True)).limit(1))
         if not pack:
             raise HTTPException(status_code=404, detail="补豆包不存在")
+        if pack.amount_cents is None or pack.amount_cents <= 0 or pack.currency != "CNY":
+            raise HTTPException(status_code=422, detail="该商品暂不支持在线支付")
         order = PaymentOrder(
             order_no=_order_no(user),
             user_id=user.id,
@@ -906,6 +922,8 @@ def create_payment_order(
     price = _price_for_cycle(session, plan, cycle)
     if not price:
         raise HTTPException(status_code=422, detail="该套餐不支持所选周期")
+    if price.amount_cents is None or price.amount_cents <= 0 or price.currency != "CNY":
+        raise HTTPException(status_code=422, detail="该商品暂不支持在线支付")
     order = PaymentOrder(
         order_no=_order_no(user),
         user_id=user.id,
@@ -916,15 +934,68 @@ def create_payment_order(
         currency=price.currency,
         status="pending",
         expires_at=utcnow() + timedelta(minutes=30),
-        snapshot_json=json.dumps(serialize_plan(session, plan), ensure_ascii=False, default=str),
+        snapshot_json=json.dumps({**serialize_plan(session, plan), "code": plan.code, "name": plan.name,
+                                  "beans": plan.beans}, ensure_ascii=False, default=str),
     )
     session.add(order)
     session.flush()
     return order
 
 
+def has_active_paid_subscription(session: Session, user: User) -> bool:
+    return session.scalar(select(UserSubscription.id).join(SubscriptionPlan).where(
+        UserSubscription.user_id == user.id, UserSubscription.status == "active",
+        UserSubscription.starts_at <= utcnow(),
+        or_(UserSubscription.ends_at.is_(None), UserSubscription.ends_at > utcnow()),
+        SubscriptionPlan.code.notin_(("free", "internal")),
+    ).limit(1)) is not None
+
+
+def fulfill_paid_order(session: Session, order: PaymentOrder, *, paid_at=None) -> PaymentOrder:
+    """Caller holds user/order row locks. Commit with the payment fact in one transaction."""
+    if order.status in {"paid", "refunded"}:
+        return order
+    user = session.get(User, order.user_id)
+    snapshot = _json_dict(order.snapshot_json)
+    if order.product_type == "subscription" and has_active_paid_subscription(session, user):
+        order.status, order.payment_error = "manual_review", "ACTIVE_SUBSCRIPTION_CONFLICT"
+        order.paid_at = paid_at or utcnow()
+        logger.error("payment_manual_review order=%s reason=ACTIVE_SUBSCRIPTION_CONFLICT", order.order_no)
+        return order
+    beans = snapshot.get("beans")
+    if not isinstance(beans, int) or beans < 0 or not snapshot.get("name"):
+        order.status, order.payment_error = "manual_review", "INVALID_PRODUCT_SNAPSHOT"
+        order.paid_at = paid_at or utcnow()
+        logger.error("payment_manual_review order=%s reason=INVALID_PRODUCT_SNAPSHOT", order.order_no)
+        return order
+    now = utcnow()
+    order.status, order.paid_at = "paid", paid_at or now
+    if order.product_type == "bean_pack":
+        subscription = active_subscription(session, user)
+        ends_at = subscription.ends_at if subscription and subscription.ends_at else now + timedelta(days=30)
+        source_type, source_id = "bean_pack", order.id
+    else:
+        ends_at = now + timedelta(days=365 if order.billing_cycle == "yearly" else 31)
+        subscription = UserSubscription(
+            user_id=user.id, plan_id=order.plan_id, billing_cycle=order.billing_cycle,
+            status="active", starts_at=now, ends_at=ends_at, source_order_id=order.id,
+        )
+        session.add(subscription)
+        session.flush()
+        user.current_plan_code = snapshot["code"]
+        source_type, source_id = "subscription", subscription.id
+    grant_beans(session, user.id, amount=beans, expires_at=ends_at, source_type=source_type,
+                source_id=source_id, source_key=f"order:{order.id}", description=snapshot["name"])
+    create_notification(session, user.id, title="支付成功，权益已到账",
+                        body=f"{snapshot['name']} 已到账，添加 {beans} 豆。", category="payment",
+                        metadata={"order_id": order.id, "beans": beans})
+    return order
+
+
 def mock_pay_order(session: Session, user: User, order_id: str) -> PaymentOrder:
-    order = session.get(PaymentOrder, order_id)
+    # Only the explicit testing HTTP route can call this helper.
+    session.scalar(select(User).where(User.id == user.id).with_for_update())
+    order = session.scalar(select(PaymentOrder).where(PaymentOrder.id == order_id).with_for_update())
     if not order or order.user_id != user.id:
         raise HTTPException(status_code=404, detail="订单不存在")
     if order.status == "paid":
@@ -933,88 +1004,24 @@ def mock_pay_order(session: Session, user: User, order_id: str) -> PaymentOrder:
         _lock_for_session(session, "order-pay", order_id)
     except RuntimeLockBusyError as exc:
         raise HTTPException(status_code=409, detail="订单支付正在处理中，请稍后重试") from exc
-    session.refresh(order)
-    if order.status == "paid":
-        return order
-
-    order.status = "paid"
-    order.paid_at = utcnow()
-    if order.product_type == "bean_pack":
-        pack = session.get(BeanPack, order.bean_pack_id)
-        if not pack or not pack.enabled:
-            raise HTTPException(status_code=404, detail="补豆包不存在")
-        subscription = active_subscription(session, user)
-        expires_at = subscription.ends_at if subscription and subscription.ends_at else utcnow() + timedelta(days=30)
-        grant_beans(
-            session,
-            user.id,
-            amount=pack.beans,
-            expires_at=expires_at,
-            source_type="bean_pack",
-            source_id=order.id,
-            source_key=f"order:{order.id}",
-            description=pack.name,
-        )
-        create_notification(
-            session,
-            user.id,
-            title="补豆包已到账",
-            body=f"{pack.name} 已添加 {pack.beans} 豆。",
-            category="payment",
-            metadata={"order_id": order.id, "beans": pack.beans},
-        )
-        return order
-
-    plan = session.get(SubscriptionPlan, order.plan_id)
-    if not plan:
-        raise HTTPException(status_code=404, detail="套餐不存在")
-    duration = timedelta(days=365 if order.billing_cycle == "yearly" else 31)
-    ends_at = utcnow() + duration
-    subscription = UserSubscription(
-        user_id=user.id,
-        plan_id=plan.id,
-        billing_cycle=order.billing_cycle,
-        status="active",
-        starts_at=utcnow(),
-        ends_at=ends_at,
-        source_order_id=order.id,
-    )
-    session.add(subscription)
-    session.flush()
-    user.current_plan_code = plan.code
-    grant_beans(
-        session,
-        user.id,
-        amount=int(plan.beans or 0),
-        expires_at=ends_at,
-        source_type="subscription",
-        source_id=subscription.id,
-        source_key=f"subscription:{subscription.id}",
-        description=f"{plan.name}订阅豆子",
-    )
-    create_notification(
-        session,
-        user.id,
-        title="订阅已生效",
-        body=f"{plan.name} 已开通，{plan.beans or 0} 豆已添加。",
-        category="payment",
-        metadata={"order_id": order.id, "plan_code": plan.code, "beans": plan.beans or 0},
-    )
-    return order
+    if order.status != "pending" or (order.expires_at and order.expires_at <= utcnow()):
+        raise HTTPException(status_code=409, detail="订单已关闭或过期")
+    return fulfill_paid_order(session, order)
 
 
 def serialize_order(session: Session, order: PaymentOrder) -> dict[str, Any]:
     plan = session.get(SubscriptionPlan, order.plan_id) if order.plan_id else None
     pack = session.get(BeanPack, order.bean_pack_id) if order.bean_pack_id else None
+    snapshot = _json_dict(order.snapshot_json)
     return {
         "id": order.id,
         "order_no": order.order_no,
         "product_type": order.product_type,
-        "bean_pack_code": pack.code if pack else "",
-        "bean_pack_name": pack.name if pack else "",
-        "beans": pack.beans if pack else plan.beans if plan else None,
-        "plan_code": plan.code if plan else "",
-        "plan_name": plan.name if plan else "",
+        "bean_pack_code": snapshot.get("code", pack.code if pack else "") if order.product_type == "bean_pack" else "",
+        "bean_pack_name": snapshot.get("name", pack.name if pack else "") if order.product_type == "bean_pack" else "",
+        "beans": snapshot.get("beans"),
+        "plan_code": snapshot.get("code", plan.code if plan else "") if order.product_type == "subscription" else "",
+        "plan_name": snapshot.get("name", plan.name if plan else "") if order.product_type == "subscription" else "",
         "billing_cycle": order.billing_cycle,
         "amount_cents": order.amount_cents,
         "currency": order.currency,
@@ -1022,4 +1029,9 @@ def serialize_order(session: Session, order: PaymentOrder) -> dict[str, Any]:
         "paid_at": order.paid_at,
         "expires_at": order.expires_at,
         "created_at": order.created_at,
+        "payment_channel": order.payment_channel,
+        "wechat_transaction_id": order.wechat_transaction_id,
+        "payment_error": order.payment_error,
+        "refund_reference": order.refund_reference,
+        "refund_note": order.refund_note,
     }

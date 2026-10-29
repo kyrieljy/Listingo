@@ -570,6 +570,8 @@ def mock_pay(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    if not request.app.state.settings.testing or request.app.state.settings.wechat_pay_enabled:
+        raise HTTPException(status_code=404, detail="接口不存在")
     _require_fresh_nonce(request)
     order = mock_pay_order(session, current_user, order_id)
     session.commit()

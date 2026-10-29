@@ -93,7 +93,7 @@ class WechatPayClient:
         snapshot = json.loads(order.snapshot_json)
         data = self.request("POST", "/v3/pay/transactions/native", {
             "appid": self.settings.wechat_appid, "mchid": self.settings.wechat_mchid,
-            "description": ("Listingo " + str(snapshot.get("name", "订单")))[:100],
+            "description": ("Listingo " + str(snapshot.get("name", "订单"))).encode("utf-8")[:120].decode("utf-8", errors="ignore"),
             "out_trade_no": order.order_no, "notify_url": self.settings.wechat_notify_url,
             "time_expire": order.expires_at.isoformat(timespec="seconds"),
             "amount": {"total": order.amount_cents, "currency": order.currency},

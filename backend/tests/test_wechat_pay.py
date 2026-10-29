@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from backend.app.config import Settings
 from backend.app.models import BeanGrant, BeanPack, PaymentOrder, SubscriptionPlan, User, UserSession, UserSubscription, utcnow
 from backend.app.services.auth import SESSION_COOKIE, hash_token, get_current_user, require_admin
-from backend.app.services.subscriptions import create_payment_order
+from backend.app.services.subscriptions import active_subscription, create_payment_order
 from backend.app.services.wechat_pay import PaymentError, WechatPayClient, reconcile_order, settle_transaction
 
 
@@ -62,6 +62,7 @@ def make_order(client, buyer, *, plan=False):
         ))
         order.payment_channel = "wechat_native"
         session.commit()
+        assert len(order.order_no) <= 32 and order.order_no.isascii()
         return order
 
 
@@ -157,6 +158,8 @@ def test_signed_callback_once_and_snapshot(client, gateway, buyer, plan):
         assert len(grants) == 1 and grants[0].amount == expected
         assert session.get(PaymentOrder, order.id).status == "paid"
         assert session.scalar(select(func.count()).select_from(UserSubscription).where(UserSubscription.user_id == buyer.id)) == int(plan)
+        if plan:
+            assert active_subscription(session, session.get(User, buyer.id)) is not None
 
 
 @pytest.mark.parametrize("updates", [{"amount": {"total": 1, "currency": "CNY"}}, {"appid": "other"}, {"mchid": "other"}, {"amount": {"total": 5000, "currency": "USD"}}])

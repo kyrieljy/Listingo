@@ -368,7 +368,6 @@ def active_subscription(session: Session, user: User) -> UserSubscription | None
             UserSubscription.status == "active",
             UserSubscription.starts_at <= now,
             or_(UserSubscription.ends_at.is_(None), UserSubscription.ends_at > now),
-            SubscriptionPlan.enabled.is_(True),
             ~SubscriptionPlan.code.in_(OLD_COMMERCIAL_PLAN_CODES),
         )
         .order_by(UserSubscription.starts_at.desc(), UserSubscription.created_at.desc())
@@ -858,7 +857,7 @@ def _price_for_cycle(session: Session, plan: SubscriptionPlan, billing_cycle: st
 
 
 def _order_no(user: User) -> str:
-    return f"LG{utcnow().strftime('%Y%m%d%H%M%S')}{uuid4().hex[:20].upper()}"
+    return f"LG{utcnow().strftime('%Y%m%d%H%M%S')}{uuid4().hex[:16].upper()}"
 
 
 def create_payment_order(

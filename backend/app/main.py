@@ -31,6 +31,7 @@ from backend.app.api.auth import router as auth_router
 from backend.app.api.public import router as public_router
 from backend.app.api.admin import router as admin_router
 from backend.app.api.payments import router as payments_router
+from backend.app.api.wechat_login import WechatCallbackLogMiddleware, router as wechat_login_router, validate_wechat_login
 from backend.app.services.wechat_pay import PaymentError, WechatPayClient, reconcile_loop
 from backend.app.services.generation_queue_service import UnifiedGenerationQueueScheduler
 from backend.app.services.provider_routing import invalidate_provider_cache
@@ -100,6 +101,7 @@ def ensure_database_ready(engine: Engine) -> None:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or Settings()
+    validate_wechat_login(resolved)
     if resolved.production and (resolved.testing or not resolved.cookie_secure or resolved.debug_sms_code):
         raise RuntimeError("生产环境必须禁用 testing/调试验证码，并启用安全 Cookie")
     if resolved.production and resolved.bootstrap_admin_phone == "18928268686":
@@ -209,6 +211,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(public_router)
     application.include_router(admin_router)
     application.include_router(payments_router)
+    application.include_router(wechat_login_router)
+    application.add_middleware(WechatCallbackLogMiddleware)
 
     @application.get("/api/v1/site-info")
     def site_info():

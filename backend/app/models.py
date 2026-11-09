@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -44,6 +44,19 @@ class User(Base, TimestampMixin):
     current_plan_code: Mapped[str] = mapped_column(String(40), default="free", index=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     feishu_webhook: Mapped[str] = mapped_column(String(512), default="")
+
+
+class WechatIdentity(Base, TimestampMixin):
+    __tablename__ = "wechat_identity"
+    __table_args__ = (
+        UniqueConstraint("app_id", "openid", name="uq_wechat_identity_openid"),
+        UniqueConstraint("app_id", "user_id", name="uq_wechat_identity_user"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    app_id: Mapped[str] = mapped_column(String(64))
+    openid: Mapped[str] = mapped_column(String(128))
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_user.id", ondelete="CASCADE"), index=True)
 
 
 class UserSession(Base, TimestampMixin):

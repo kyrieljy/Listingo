@@ -612,6 +612,18 @@ export async function loginWithSmsApi(payload: { phone: string; code: string; mo
   return (await api.post('/auth/sms/login', payload)).data
 }
 
+export async function getWechatLoginStatusApi(): Promise<{ enabled: boolean; pending_phone: boolean }> {
+  return (await api.get('/auth/wechat/status')).data
+}
+
+export async function sendWechatPhoneCodeApi(phone: string): Promise<SmsSendResponse> {
+  return (await api.post('/auth/wechat/phone/send', { phone })).data
+}
+
+export async function confirmWechatPhoneApi(phone: string, code: string): Promise<AuthMeResponse> {
+  return (await api.post('/auth/wechat/phone/confirm', { phone, code })).data
+}
+
 export async function registerApi(payload: { username: string; password: string; phone: string; code: string }): Promise<AuthMeResponse> {
   return (await api.post('/auth/register', payload)).data
 }

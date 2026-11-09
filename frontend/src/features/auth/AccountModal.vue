@@ -368,7 +368,8 @@ function loginCode(createdAt: string, index: number): string {
 }
 
 function loginTaskName(row: LoginEventDto): string {
-  const method = row.method === 'password' ? '密码登录' : row.method === 'sms' ? '短信登录' : row.method === 'register' ? '注册登录' : '登录'
+  const methodNames: Record<string, string> = { password: '密码登录', sms: '短信登录', register: '注册登录', wechat: '微信扫码登录' }
+  const method = methodNames[row.method] ?? '登录'
   return `${method}${row.status === 'succeeded' ? '成功' : '失败'}`
 }
 

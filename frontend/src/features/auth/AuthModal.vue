@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { apiErrorStatus, getWechatLoginStatusApi, sendWechatPhoneCodeApi } from '../../api/client'
 import { message } from 'ant-design-vue'
 import {
   AlipayCircleOutlined,
@@ -46,6 +48,10 @@ const emit = defineEmits<{
 }>()
 
 const authStore = useAuthStore()
+const route = useRoute()
+const router = useRouter()
+const wechatEnabled = ref(false)
+const wechatPending = ref(false)
 const visible = computed({
   get: () => props.open,
   set: (value: boolean) => emit('update:open', value),
@@ -86,7 +92,40 @@ watch(() => props.open, (open) => {
   smsCountryCode.value = '86'
   countryDropdownOpen.value = ''
   errorText.value = ''
+  void loadWechatStatus()
 })
+
+async function loadWechatStatus(): Promise<void> {
+  try {
+    const status = await getWechatLoginStatusApi()
+    wechatEnabled.value = status.enabled
+    wechatPending.value = status.pending_phone
+    if (wechatPending.value) method.value = 'sms'
+  } catch {
+    wechatEnabled.value = false
+  }
+}
+
+onMounted(async () => {
+  const { wechat, ...query } = route.query
+  if (typeof wechat !== 'string') return
+  await router.replace({ query })
+  if (wechat === 'success') return
+  visible.value = true
+  await loadWechatStatus()
+  const messages: Record<string, string> = {
+    expired: '微信授权已过期，请重新扫码',
+    cancelled: '已取消微信授权',
+    failed: '微信授权失败，请重新扫码',
+    blocked: '此账号请使用原有登录方式，或联系管理员',
+  }
+  if (wechat === 'phone' && !wechatPending.value) errorText.value = messages.expired
+  else if (Object.hasOwn(messages, wechat)) errorText.value = messages[wechat]
+})
+
+function startWechat(): void {
+  window.location.assign('/api/v1/auth/wechat/start')
+}
 
 function phoneDigits(value: string): string {
   return value.replace(/\D/g, '')
@@ -144,13 +183,16 @@ async function requestCode(kind: 'sms' | 'admin'): Promise<void> {
   sendingCode.value = kind
   errorText.value = ''
   try {
-    const code = await authStore.sendSmsCode(phone, purpose)
+    const code = wechatPending.value && kind === 'sms'
+      ? (await sendWechatPhoneCodeApi(phone)).debug_code
+      : await authStore.sendSmsCode(phone, purpose)
     if (code) {
       if (kind === 'sms') smsCode.value = code
       else adminCode.value = code
     }
     startCountdown(kind)
   } catch (error) {
+    if (apiErrorStatus(error) === 410) wechatPending.value = false
     const text = error instanceof Error ? error.message : '验证码发送失败，请稍后再试'
     errorText.value = text
     message.error(text)
@@ -178,7 +220,11 @@ async function submit(): Promise<void> {
   submitting.value = true
   try {
     if (method.value === 'sms') {
-      await authStore.loginWithSms({ phone: buildPhoneNumber(smsCountryCode.value, smsPhone.value), code: smsCode.value })
+      if (wechatPending.value) {
+        await authStore.loginWithWechatPhone(buildPhoneNumber(smsCountryCode.value, smsPhone.value), smsCode.value)
+      } else {
+        await authStore.loginWithSms({ phone: buildPhoneNumber(smsCountryCode.value, smsPhone.value), code: smsCode.value })
+      }
     } else {
       await authStore.loginWithPassword({
         identifier: passwordIdentifier.value,
@@ -194,6 +240,7 @@ async function submit(): Promise<void> {
     emit('authenticated')
     visible.value = false
   } catch (error) {
+    if (apiErrorStatus(error) === 410) wechatPending.value = false
     errorText.value = error instanceof Error ? error.message : '登录失败，请稍后再试'
   } finally {
     submitting.value = false
@@ -256,10 +303,11 @@ onBeforeUnmount(() => {
           <CloseOutlined />
         </button>
         <header class="auth-form-head">
-          <h2>欢迎登录 Listingo</h2>
+          <h2>{{ wechatPending ? '验证手机号' : '欢迎登录 Listingo' }}</h2>
+          <p v-if="wechatPending">验证后将关联已有 Listingo 账号。手机号未注册时会自动创建账号。</p>
         </header>
 
-        <div v-if="!firstPasswordMode" class="auth-method-switch" role="tablist" aria-label="登录方式">
+        <div v-if="!firstPasswordMode && !wechatPending" class="auth-method-switch" role="tablist" aria-label="登录方式">
           <button type="button" :class="{ active: method === 'sms' }" role="tab" @click="method = 'sms'; countryDropdownOpen = ''">
             <MobileOutlined />短信登录 / 注册
           </button>
@@ -356,13 +404,13 @@ onBeforeUnmount(() => {
           </label>
 
           <button class="auth-submit" type="submit" :disabled="!canSubmit || submitting">
-            <span>{{ submitting ? '处理中...' : '登录' }}</span>
+            <span>{{ submitting ? '处理中...' : wechatPending ? '验证并登录' : '登录' }}</span>
             <CheckOutlined v-if="!submitting" />
           </button>
         </form>
         <div class="auth-social-divider"><span />更多登录方式<span /></div>
-        <div class="auth-social-row" aria-label="第三方登录占位">
-          <button type="button" disabled title="后续接入微信登录"><WechatOutlined /></button>
+        <div class="auth-social-row" aria-label="第三方登录">
+          <button type="button" :disabled="!wechatEnabled || firstPasswordMode" :title="wechatEnabled ? '微信扫码登录' : '微信登录未启用'" aria-label="微信扫码登录" @click="startWechat"><WechatOutlined /></button>
           <button type="button" disabled title="后续接入支付宝登录"><AlipayCircleOutlined /></button>
           <button type="button" disabled title="后续接入 QQ 登录"><QqOutlined /></button>
           <button type="button" disabled title="后续接入 Gmail 登录"><GoogleOutlined /></button>

@@ -200,7 +200,15 @@ function ocrAutoPrewarmSummary(){const status=ocrSettings.value?.prewarm_status;
 <template>
   <div class="admin-shell">
     <header class="admin-top"><BrandLogo/><span class="admin-divider"/> <strong>运营后台</strong><div/><button @click="router.push('/app/suite')"><ArrowLeftOutlined/>返回工作台</button></header>
-    <aside class="admin-nav"><p>配置中心</p><button v-for="item in nav" :key="item.key" :class="{active:section===item.key}" @click="go(item.key)"><component :is="item.icon"/>{{ item.label }}</button><div class="admin-safe"><CheckCircleFilled/><span><b>Dryrun 已开启</b><small>外部调用默认关闭</small></span></div></aside>
+    <aside class="admin-nav">
+      <p>配置中心</p>
+      <nav class="admin-nav-menu" aria-label="后台导航">
+        <button v-for="item in nav" :key="item.key" :class="{active:section===item.key}" @click="go(item.key)">
+          <component :is="item.icon"/>{{ item.label }}
+        </button>
+      </nav>
+      <div class="admin-safe"><CheckCircleFilled/><span><b>Dryrun 已开启</b><small>外部调用默认关闭</small></span></div>
+    </aside>
     <main class="admin-main"><div class="admin-title"><div><h1>{{ sectionTitle }}</h1><p>{{ adminSectionDescription }}</p></div><div class="admin-title-actions"><span v-if="loading">加载中…</span></div></div>
       <MonitoringDashboard v-if="section==='ops-monitoring'" kind="ops" />
       <MonitoringDashboard v-else-if="section==='business-metrics'" kind="business" />

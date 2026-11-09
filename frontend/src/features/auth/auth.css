@@ -898,8 +898,12 @@
   display: grid;
   place-items: center;
   color: #fff;
-  cursor: not-allowed;
+  cursor: pointer;
   opacity: .94;
+}
+
+.auth-social-row button:disabled {
+  cursor: not-allowed;
 }
 
 .auth-social-row button:nth-child(1) { background: #36c46c; }

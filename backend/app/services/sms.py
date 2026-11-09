@@ -33,7 +33,7 @@ from backend.app.core.storage.keys import (
 )
 
 
-SMS_PURPOSES = {"login", "register", "reset_password", "change_phone", "admin"}
+SMS_PURPOSES = {"login", "register", "reset_password", "change_phone", "admin", "wechat_bind"}
 PHONE_COUNTRY_RULES = {
     "86": (11, 11),
     "852": (8, 8),
@@ -192,10 +192,11 @@ def _store_verification_code(
     purpose: str,
     code: str,
     ttl: int,
+    challenge: str = "",
 ) -> bool:
     stored = storage.setex(
         sms_code_key(identity),
-        sms_code_hash(phone, purpose, code),
+        sms_code_hash(phone, purpose, f"{code}:{challenge}" if challenge else code),
         ttl,
     )
     if not stored.success:
@@ -392,6 +393,7 @@ async def send_sms_code(
     purpose: str,
     cipher: ApiKeyCipher,
     bypass_rate_limit: bool = False,
+    challenge: str = "",
 ) -> dict[str, object]:
     normalized_phone = normalize_phone(phone)
     country_code, local_phone = split_phone(normalized_phone)
@@ -464,6 +466,7 @@ async def send_sms_code(
             purpose=purpose,
             code=code,
             ttl=config.code_ttl_seconds,
+            challenge=challenge,
         ):
             raise HTTPException(status_code=503, detail="验证码存储暂不可用，请稍后再试")
     except (httpx.HTTPError, RuntimeError, HTTPException, StorageUnavailableError) as exc:
@@ -482,7 +485,7 @@ async def send_sms_code(
     }
 
 
-def verify_sms_code(request: Request, *, phone: str, purpose: str, code: str) -> None:
+def verify_sms_code(request: Request, *, phone: str, purpose: str, code: str, challenge: str = "") -> None:
     normalized_phone = normalize_phone(phone)
     storage = request.app.state.rate_limiter.storage
     settings = request.app.state.settings
@@ -497,7 +500,7 @@ def verify_sms_code(request: Request, *, phone: str, purpose: str, code: str) ->
     status = storage.consume_hash_once(
         code_key,
         sms_attempts_key(identity),
-        sms_code_hash(normalized_phone, purpose, code.strip()),
+        sms_code_hash(normalized_phone, purpose, f"{code.strip()}:{challenge}" if challenge else code.strip()),
         ttl=stored_code.expires_in_seconds or 60,
         max_attempts=max_attempts,
     )

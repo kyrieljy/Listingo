@@ -27,6 +27,10 @@ def nonce_key(nonce_hash: str) -> str:
     return f"nonce:{nonce_hash}"
 
 
+def wechat_login_key(kind: str, token_hash: str) -> str:
+    return f"wechat-login:{kind}:{token_hash}"
+
+
 def login_failure_key(ip: str, window_id: int) -> str:
     return f"login_failure:{ip}:{window_id}"
 

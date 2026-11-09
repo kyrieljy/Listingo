@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = Field(default=60 * 60 * 8, ge=60)
     refresh_ttl_seconds: int = Field(default=60 * 60 * 24 * 30, ge=60)
     cookie_secure: bool = False
+    wechat_login_enabled: bool = False
+    wechat_login_app_id: str = ""
+    wechat_login_app_secret: str = Field(default="", repr=False)
+    wechat_login_callback_url: str = "https://listingo.net/api/v1/auth/wechat/callback"
     wechat_pay_enabled: bool = False
     wechat_mchid: str = ""
     wechat_appid: str = ""

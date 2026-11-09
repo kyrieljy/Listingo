@@ -4,6 +4,7 @@ import { message } from 'ant-design-vue'
 import {
   changePasswordApi,
   confirmChangePhoneApi,
+  confirmWechatPhoneApi,
   createEnterpriseLeadApi,
   createSubscriptionOrderApi,
   getAuthMeApi,
@@ -191,6 +192,12 @@ export const useAuthStore = defineStore('auth', () => {
     message.success('登录成功')
   }
 
+  async function loginWithWechatPhone(phone: string, code: string): Promise<void> {
+    applyAuthResponse(await confirmWechatPhoneApi(phone, code))
+    await Promise.all([loadQuota(), loadNotifications(), loadLoginEvents()])
+    message.success('微信已关联，登录成功')
+  }
+
   async function loginWithPassword(payload: { identifier: string; password: string; adminCode?: string }): Promise<void> {
     applyAuthResponse(await loginWithPasswordApi({ identifier: payload.identifier, password: payload.password, admin_code: payload.adminCode }))
     await Promise.all([loadQuota(), loadNotifications(), loadLoginEvents()])
@@ -326,6 +333,7 @@ export const useAuthStore = defineStore('auth', () => {
     loadLoginEvents,
     sendSmsCode,
     loginWithSms,
+    loginWithWechatPhone,
     loginWithPassword,
     registerWithPassword,
     setFirstPassword,

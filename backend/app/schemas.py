@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -968,6 +969,11 @@ class AdminUserUpdate(BaseModel):
     role: Literal["user", "admin"] | None = None
     status: Literal["active", "disabled"] | None = None
     plan_code: str | None = Field(default=None, max_length=40)
+
+
+class AdminSubscriptionGrantCreate(BaseModel):
+    plan_code: str = Field(min_length=1, max_length=40)
+    request_id: UUID
 
 
 class AdminPlanUpdate(BaseModel):

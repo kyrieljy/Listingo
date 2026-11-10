@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch, type CSSProperties } from 'vue'
 import { message } from 'ant-design-vue'
+import backpackScene from '../../assets/listingo-demo-backpack-01.webp'
+import backpackCopy from '../../assets/listingo-demo-backpack-02.webp'
+import backpackAsset from '../../assets/listingo-demo-backpack-03.webp'
+import backpackLayout from '../../assets/listingo-demo-backpack-04.webp'
+import backpackDetail from '../../assets/listingo-demo-backpack-05.webp'
 import {
   CheckOutlined,
   CloseOutlined,
@@ -144,31 +149,31 @@ const aplusShowcaseCards = [
   {
     title: '户外场景生成',
     eyebrow: 'SCENE',
-    image: '/demo/video-backpack-showcase-01.png',
+    image: backpackScene,
     description: '把商品带入露营、登山、通勤等真实场景，快速生成详情页首屏视觉。',
   },
   {
     title: '卖点脚本策划',
     eyebrow: 'COPY',
-    image: '/demo/video-backpack-showcase-02.png',
+    image: backpackCopy,
     description: '围绕核心卖点组织标题、短句和模块文案，让详情页信息更好扫读。',
   },
   {
     title: '素材智能拆解',
     eyebrow: 'ASSET',
-    image: '/demo/video-backpack-showcase-03.png',
+    image: backpackAsset,
     description: '识别容量、内部分区和配件素材，为不同详情页模块匹配合适画面。',
   },
   {
     title: '多平台详情适配',
     eyebrow: 'LAYOUT',
-    image: '/demo/video-backpack-showcase-04.png',
+    image: backpackLayout,
     description: '按普通详情、标准 A+、高级 A+ 输出比例，生成适合上架的页面模块。',
   },
   {
     title: '防水细节展示',
     eyebrow: 'DETAIL',
-    image: '/demo/video-backpack-showcase-05.png',
+    image: backpackDetail,
     description: '突出面料、防水、拉链和扣具等细节，形成可信的功能证明模块。',
   },
 ]
@@ -1506,7 +1511,7 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
         </header>
         <div class="aplus-showcase-gallery">
           <article v-for="card in aplusShowcaseCards" :key="card.title" class="aplus-showcase-card" tabindex="0">
-            <img :src="card.image" :alt="card.title" />
+            <img :src="card.image" :alt="card.title" decoding="async" :fetchpriority="card.eyebrow === 'ASSET' ? 'high' : 'low'" />
             <span class="aplus-showcase-badge">{{ card.eyebrow }}</span>
             <div class="aplus-showcase-copy">
               <b>{{ card.title }}</b>

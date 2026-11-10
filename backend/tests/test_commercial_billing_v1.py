@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from uuid import uuid4
 
@@ -12,6 +13,8 @@ from backend.app.models import (
     BeanLedger,
     GenerationItem,
     GenerationJob,
+    Notification,
+    PaymentOrder,
     PlanQuotaRule,
     Prompt,
     PromptVersion,
@@ -27,6 +30,7 @@ from backend.app.services.jobs import sync_generation_quota
 from backend.app.services.subscriptions import (
     BEANS_PER_IMAGE,
     available_beans,
+    bean_summary,
     create_payment_order,
     grant_beans,
     migrate_legacy_quotas,
@@ -414,3 +418,71 @@ def test_admin_list_distinguishes_configured_and_effective_plan(client) -> None:
     assert row["plan"] == "monthly_standard"
     assert row["effective_plan"] == "free"
     assert row["phone"] == _user(client, user_id).phone
+
+
+def test_admin_grant_activates_catalog_entitlements_and_is_idempotent(client) -> None:
+    user_id = _user_id(client, plan_code="standard")
+    endpoint = f"/api/v1/admin/users/{user_id}/subscription-grants"
+    plan_code = "yearly_standard"
+    with client.app.state.session_factory() as session:
+        session.add(SubscriptionPlan(code="standard", name="标准会员", enabled=True, visible=True))
+        grant_beans(session, user_id, amount=25, expires_at=None, source_type="legacy",
+                    source_id=None, source_key=f"fixture:{user_id}")
+        session.commit()
+
+    options = client.get("/api/v1/admin/users/subscription-grant-plans").json()
+    assert {plan["code"] for plan in options} == {
+        "monthly_basic", "monthly_standard", "monthly_pro",
+        "yearly_basic", "yearly_standard", "yearly_flagship", "internal",
+    }
+    selected = next(plan for plan in options if plan["code"] == plan_code)
+    assert client.patch(f"/api/v1/admin/users/{user_id}", json={"plan_code": plan_code}).status_code == 422
+    assert client.post(endpoint, json={"plan_code": "standard", "request_id": str(uuid4())}).status_code == 422
+
+    payload = {"plan_code": plan_code, "request_id": str(uuid4())}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, retry = pool.map(lambda _: client.post(endpoint, json=payload), range(2))
+    assert first.status_code == retry.status_code == 200
+    assert first.json() == retry.json()
+    assert client.post(endpoint, json={**payload, "plan_code": "monthly_basic"}).status_code == 409
+    assert client.post(endpoint, json={**payload, "request_id": str(uuid4())}).status_code == 409
+
+    row = next(user for user in client.get("/api/v1/admin/users").json() if user["id"] == user_id)
+    assert (row["plan"], row["effective_plan"], row["effective_plan_name"]) == (plan_code, plan_code, selected["name"])
+    with client.app.state.session_factory() as session:
+        subscription = session.get(UserSubscription, first.json()["id"])
+        assert subscription.ends_at - subscription.starts_at == timedelta(days=365)
+        assert subscription.admin_granted_by == session.scalar(select(User.id).where(User.username == "admin"))
+        assert subscription.source_order_id is None
+        wallet = bean_summary(session, session.get(User, user_id))
+        assert wallet["plan"]["code"] == plan_code
+        assert wallet["available_beans"] == 25 + selected["beans"]
+        assert len(session.scalars(select(Notification).where(Notification.user_id == user_id)).all()) == 1
+        assert not session.scalar(select(PaymentOrder).where(PaymentOrder.user_id == user_id))
+
+
+def test_admin_grant_preserves_unresolved_and_paid_wechat_subscriptions(client) -> None:
+    user_id = _user_id(client)
+    endpoint = f"/api/v1/admin/users/{user_id}/subscription-grants"
+    payload = {"plan_code": "monthly_standard", "request_id": str(uuid4())}
+    with client.app.state.session_factory() as session:
+        user = session.get(User, user_id)
+        order = create_payment_order(session, user, plan_code="monthly_basic")
+        order_id = order.id
+        order.payment_channel = "wechat_native"
+        order.expires_at = utcnow() - timedelta(minutes=1)
+        session.commit()
+    assert client.post(endpoint, json=payload).status_code == 409
+    with client.app.state.session_factory() as session:
+        order = session.get(PaymentOrder, order_id)
+        order.expires_at = utcnow() + timedelta(minutes=1)
+        mock_pay_order(session, session.get(User, user_id), order.id)
+        session.commit()
+
+    assert client.post(endpoint, json=payload).status_code == 409
+    with client.app.state.session_factory() as session:
+        subscriptions = session.scalars(select(UserSubscription).where(UserSubscription.user_id == user_id)).all()
+        assert len(subscriptions) == 1 and subscriptions[0].source_order_id == order_id
+        grants = session.scalars(select(BeanGrant).where(BeanGrant.user_id == user_id)).all()
+        assert len(grants) == 1 and grants[0].source_key == f"order:{order_id}"
+        assert session.get(PaymentOrder, order_id).status == "paid"

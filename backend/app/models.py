@@ -249,6 +249,7 @@ class UserSubscription(Base, TimestampMixin):
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     auto_renew: Mapped[bool] = mapped_column(Boolean, default=False)
     source_order_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    admin_granted_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class PaymentOrder(Base, TimestampMixin):

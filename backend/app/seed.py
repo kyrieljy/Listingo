@@ -329,7 +329,7 @@ def seed_database(session: Session, *, admin_phone: str = "18928268686", product
         )
         session.add(admin)
         session.flush()
-    else:
+    elif not production:
         admin.phone = admin_phone
         admin.role = "admin"
         admin.status = "active"

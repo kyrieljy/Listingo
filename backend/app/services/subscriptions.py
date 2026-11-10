@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import HTTPException
 from sqlalchemy import event, func, or_, select
@@ -954,6 +954,74 @@ def has_active_paid_subscription(session: Session, user: User) -> bool:
     ).limit(1)) is not None
 
 
+def is_admin_grantable_plan(plan: SubscriptionPlan) -> bool:
+    if not plan.enabled or plan.contact_sales or plan.is_enterprise or plan.code in OLD_COMMERCIAL_PLAN_CODES:
+        return False
+    return plan.code == "internal" or (plan.billing_cycle in {"monthly", "yearly"} and plan.beans > 0)
+
+
+def grant_admin_subscription(
+    session: Session, *, user_id: str, actor_id: str, plan_code: str, request_id: str,
+) -> UserSubscription:
+    user = session.scalar(
+        select(User).where(User.id == user_id).with_for_update().execution_options(populate_existing=True)
+    )
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    # The request key identifies a single subscription even after its expiry.
+    subscription_id = str(uuid5(NAMESPACE_URL, f"listingo:admin-subscription:{user_id}:{request_id}"))
+    previous = session.get(UserSubscription, subscription_id)
+    plan = plan_by_code(session, plan_code)
+    if previous:
+        if not previous.admin_granted_by or not plan or previous.plan_id != plan.id:
+            raise HTTPException(status_code=409, detail="该授予请求已用于其他套餐")
+        return previous
+    if not plan or not is_admin_grantable_plan(plan):
+        raise HTTPException(status_code=422, detail="该套餐无法通过用户管理授予")
+    if user.status != "active" or user.role != "user":
+        raise HTTPException(status_code=409, detail="仅正常状态的普通用户可授予套餐")
+    if has_active_paid_subscription(session, user):
+        raise HTTPException(status_code=409, detail="用户已有生效中的订阅，请在到期后授予")
+    if resolve_user_plan(session, user).is_internal:
+        raise HTTPException(status_code=409, detail="用户已有 Internal 权益")
+
+    now = utcnow()
+    unresolved_order = session.scalar(select(PaymentOrder.id).where(
+        PaymentOrder.user_id == user.id,
+        PaymentOrder.product_type == "subscription",
+        or_(
+            PaymentOrder.status == "manual_review",
+            (PaymentOrder.status == "pending") & or_(
+                PaymentOrder.expires_at > now, PaymentOrder.payment_channel == "wechat_native",
+            ),
+        ),
+    ).limit(1))
+    if unresolved_order:
+        raise HTTPException(status_code=409, detail="用户有待处理的订阅订单，请在订单处理完成后授予")
+
+    ends_at = None if plan.is_internal else subscription_period_end(now, plan.billing_cycle)
+    subscription = UserSubscription(
+        id=subscription_id, user_id=user.id, plan_id=plan.id, billing_cycle=plan.billing_cycle,
+        status="active", starts_at=now, ends_at=ends_at, admin_granted_by=actor_id,
+    )
+    session.add(subscription)
+    user.current_plan_code = plan.code
+    beans = 0 if plan.is_internal else plan.beans
+    grant_beans(session, user.id, amount=beans, expires_at=ends_at, source_type="subscription",
+                source_id=subscription.id, source_key=f"admin-subscription:{subscription.id}", description=plan.name)
+    create_notification(
+        session, user.id, title="套餐已生效",
+        body=f"管理员已为你开通 {plan.name}，已到账 {beans} 豆。" if beans else f"管理员已为你开通 {plan.name}。",
+        category="payment", metadata={"plan_code": plan.code, "subscription_id": subscription.id, "beans": beans},
+    )
+    return subscription
+
+
+def subscription_period_end(start: datetime, billing_cycle: str) -> datetime:
+    return start + timedelta(days=365 if billing_cycle == "yearly" else 31)
+
+
 def fulfill_paid_order(session: Session, order: PaymentOrder, *, paid_at=None) -> PaymentOrder:
     """Caller holds user/order row locks. Commit with the payment fact in one transaction."""
     if order.status in {"paid", "refunded"}:
@@ -978,7 +1046,7 @@ def fulfill_paid_order(session: Session, order: PaymentOrder, *, paid_at=None) -
         ends_at = subscription.ends_at if subscription and subscription.ends_at else now + timedelta(days=30)
         source_type, source_id = "bean_pack", order.id
     else:
-        ends_at = now + timedelta(days=365 if order.billing_cycle == "yearly" else 31)
+        ends_at = subscription_period_end(now, order.billing_cycle)
         subscription = UserSubscription(
             user_id=user.id, plan_id=order.plan_id, billing_cycle=order.billing_cycle,
             status="active", starts_at=now, ends_at=ends_at, source_order_id=order.id,

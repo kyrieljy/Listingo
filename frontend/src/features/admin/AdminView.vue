@@ -78,6 +78,24 @@ const clearingOcrCache=ref(false)
 const ocrEngineOptions=[{value:'paddleocr',label:'PaddleOCR（PP-OCRv6 优先）'},{value:'auto',label:'Auto（PaddleOCR + RapidOCR）'},{value:'rapidocr',label:'RapidOCR 兼容模式'}]
 const ocrModelOptions=computed(()=>ocrSettings.value.supported_models?.length?ocrSettings.value.supported_models:defaultOcrSettings.supported_models)
 const adminUsers=ref<any[]>([]); const adminPlans=ref<any[]>([]); const adminOrders=ref<any[]>([]); const smsSettings=ref<any>({}); const smsTest=ref({phone:'18928268686',purpose:'login'}); const smsTesting=ref(false); const smsTestResult=ref<any|null>(null); const broadcast=ref({title:'',body:''})
+type GrantPlan = { code: string; name: string; billing_cycle: string; beans: number }
+const grantPlans = ref<GrantPlan[]>([])
+const grantTarget = ref<{ id: string; display_name: string; uid: string } | null>(null)
+const grantPlanCode = ref('')
+const grantRequestId = ref('')
+const grantSubmitting = ref(false)
+const grantError = ref('')
+const showPlanDiscrepancies = ref(false)
+const hasPlanDiscrepancy = (user: any) => user.role === 'user' && user.plan && user.plan !== user.effective_plan
+const planDiscrepancies = computed(() => adminUsers.value.filter(hasPlanDiscrepancy))
+const displayedAdminUsers = computed(() => showPlanDiscrepancies.value ? planDiscrepancies.value : adminUsers.value)
+const grantPlanGroups = computed(() => [
+  { cycle: 'monthly', label: '月付' },
+  { cycle: 'yearly', label: '年付' },
+  { cycle: 'internal', label: '内部测试' },
+].map(group => ({ ...group, plans: grantPlans.value.filter(plan => plan.billing_cycle === group.cycle) }))
+  .filter(group => group.plans.length))
+const selectedGrantPlan = computed(() => grantPlans.value.find(plan => plan.code === grantPlanCode.value))
 const nav=[{key:'providers',label:'模型配置',icon:ApiOutlined},{key:'ops-monitoring',label:'运维监控',icon:DashboardOutlined},{key:'business-metrics',label:'运营指标监控',icon:BarChartOutlined},{key:'users',label:'用户管理',icon:SettingOutlined},{key:'subscriptions',label:'商业化目录',icon:FileTextOutlined},{key:'enterprise-leads',label:'企业线索',icon:FileTextOutlined},{key:'payments',label:'支付订单管理',icon:FileTextOutlined},{key:'sms',label:'短信服务',icon:SettingOutlined},{key:'notifications',label:'站内信',icon:FileTextOutlined},{key:'provider-health',label:'中转站健康',icon:ThunderboltOutlined},{key:'workflow',label:'Workflow',icon:BranchesOutlined},{key:'prompts',label:'提示词资产',icon:CodeOutlined},{key:'sensitive-words',label:'敏感词',icon:SafetyOutlined},{key:'ocr',label:'OCR配置',icon:FileTextOutlined},{key:'logs',label:'执行日志',icon:FileTextOutlined},{key:'settings',label:'基础配置',icon:SettingOutlined}]
 const sectionTitle=computed(()=>nav.find((item)=>item.key===section.value)?.label||'运营后台')
 const adminSectionDescription=computed(()=>section.value==='ops-monitoring'?'按中转站、节点、业务链路和队列状态监控成功率、失败率与耗时':section.value==='business-metrics'?'观察用户画像、核心功能点击率、平台偏好、尺寸偏好、A+ 模块和视频类型表现':section.value==='providers'?'统一配置 LLM 与图片模型，密钥加密保存':section.value==='workflow'?'低代码节点画布、版本与启用校验':section.value==='prompts'?'唯一来源为用户上传 MD；Artflo 提示词不参与执行':section.value==='sensitive-words'?'运营维护敏感词清单与检测开关，覆盖套图、A+ 与视频文本的敏感信息预检':section.value==='ocr'?'管理 OCR 引擎、模型回退、噪声过滤和模型预热':section.value==='subscriptions'?'维护月付 / 年付套餐、企业联系套餐、补豆包与固定计费规则':section.value==='enterprise-leads'?'跟进匿名或登录提交的企业定制线索，并导出 CSV':section.value==='payments'?'查看订阅和补豆包订单的商品、金额与支付状态':section.value==='settings'?'配置视频 Live 模式所需的公网资源地址':'按任务、节点、模型与状态追踪执行链路')
@@ -108,12 +126,47 @@ onUnmounted(()=>clearPromptTestPoll())
 async function loadLogs(){const params:Record<string,string>={};if(logFilters.value.node)params.node=logFilters.value.node;if(logFilters.value.status)params.status=logFilters.value.status;const data=(await api.get('/admin/logs',{params})).data;logs.value=data.items;logTotal.value=data.total}
 async function loadSection(){ loading.value=true; try{ if(section.value==='providers'||section.value==='provider-health'){providers.value=(await api.get('/admin/providers')).data;providerGroups.value=(await api.get('/admin/provider-groups')).data} if(section.value==='users'){adminUsers.value=(await api.get('/admin/users')).data;adminPlans.value=(await api.get('/admin/subscription-plans')).data} if(section.value==='subscriptions')adminPlans.value=(await api.get('/admin/subscription-plans')).data; if(section.value==='payments')adminOrders.value=(await api.get('/admin/payment-orders')).data; if(section.value==='sms')smsSettings.value=(await api.get('/admin/sms-settings')).data; if(section.value==='prompts'){prompts.value=(await api.get('/admin/prompts')).data;if(prompts.value[0])await loadPrompt(prompts.value[0].id)} if(section.value==='workflow'){workflows.value=(await api.get('/admin/workflows')).data;if(workflows.value[0])await loadWorkflow(workflows.value[0].id)} if(section.value==='ocr')ocrSettings.value={...defaultOcrSettings,...(await api.get('/admin/ocr-settings')).data}; if(section.value==='logs')await loadLogs(); if(section.value==='settings')runtimeSettings.value=(await api.get('/admin/runtime-settings')).data }catch{message.error('后台数据加载失败，请确认 API 已启动')}finally{loading.value=false}}
 function go(key:string){router.push(`/admin/${key}`)}
-async function saveAdminUser(user:any){await api.patch(`/admin/users/${user.id}`,{role:user.role,status:user.status,plan_code:user.plan});await loadSection();message.success('用户已保存')}
+async function saveAdminUser(user:any){
+  try {
+    await api.patch(`/admin/users/${user.id}`, { role: user.role, status: user.status })
+    await loadSection()
+    message.success('用户已保存')
+  } catch (error) {
+    message.error(adminApiErrorMessage(error, '用户保存失败'))
+  }
+}
+async function openSubscriptionGrant(user: { id: string; display_name: string; uid: string }) {
+  try {
+    grantPlans.value = (await api.get('/admin/users/subscription-grant-plans')).data
+    grantTarget.value = user
+    grantPlanCode.value = ''
+    grantError.value = ''
+    grantRequestId.value = crypto.randomUUID()
+  } catch (error) {
+    message.error(adminApiErrorMessage(error, '套餐选项加载失败'))
+  }
+}
+async function submitSubscriptionGrant() {
+  if (!grantTarget.value || !selectedGrantPlan.value || grantSubmitting.value) return
+  grantSubmitting.value = true
+  grantError.value = ''
+  try {
+    await api.post(`/admin/users/${grantTarget.value.id}/subscription-grants`, {
+      plan_code: grantPlanCode.value, request_id: grantRequestId.value,
+    })
+    grantTarget.value = null
+    await loadSection()
+    message.success('套餐已生效，权益已到账')
+  } catch (error) {
+    grantError.value = adminApiErrorMessage(error, '套餐授予失败')
+  } finally {
+    grantSubmitting.value = false
+  }
+}
 async function saveSmsSettings(){smsSettings.value=(await api.patch('/admin/sms-settings',smsSettings.value)).data;message.success('短信配置已保存')}
 function adminApiErrorMessage(error:any,fallback:string){const text=userFacingApiErrorMessage(error);return text==='操作失败，请稍后重试'?fallback:text}
 async function testSmsSettings(){if(!smsTest.value.phone.trim())return message.warning('请输入测试手机号');smsTesting.value=true;smsTestResult.value=null;try{const result=(await api.post('/admin/sms-settings/test-send',smsTest.value)).data;smsTestResult.value=result;message.success(result.debug_code?`测试发送成功，调试验证码 ${result.debug_code}`:result.message)}catch(error:any){const text=adminApiErrorMessage(error,'测试发送失败，请检查短信配置');smsTestResult.value={ok:false,message:text};message.error(text)}finally{smsTesting.value=false}}
 async function sendBroadcast(){if(!broadcast.value.title.trim())return message.warning('请输入通知标题');const result=(await api.post('/admin/notifications/broadcast',{title:broadcast.value.title,body:broadcast.value.body})).data;broadcast.value={title:'',body:''};message.success(`已发送 ${result.count} 条站内信`)}
-function adminPlanOptions(user:any){return adminPlans.value.length?adminPlans.value:[{code:user.plan,name:user.plan}]}
 function userInitial(user:any){return String(user.display_name||user.username||user.uid||'用').slice(0,1).toUpperCase()}
 function moneyLabel(cents:number|null|undefined){return cents===null||cents===undefined?'企业联系':`¥${(cents/100).toFixed(2)}`}
 function orderProductLabel(order:any){return order.product_type==='bean_pack'?'补豆包':order.product_type==='subscription'?'订阅套餐':order.product_type||'历史订单'}
@@ -218,20 +271,50 @@ function ocrAutoPrewarmSummary(){const status=ocrSettings.value?.prewarm_status;
           <div class="admin-hero-metrics"><article v-for="stat in adminUserStats" :key="stat.label"><small>{{ stat.label }}</small><b>{{ stat.value }}</b></article></div>
         </div>
         <div class="admin-table-card">
+          <label class="admin-soft-button">
+            <input v-model="showPlanDiscrepancies" type="checkbox" /> 仅看套餐设置差异（{{ planDiscrepancies.length }}）
+          </label>
           <table class="admin-data-table">
-            <thead><tr><th>用户</th><th>手机号</th><th>角色</th><th>状态</th><th>套餐</th><th></th></tr></thead>
+            <thead><tr><th>用户</th><th>手机号</th><th>角色</th><th>状态</th><th>当前生效套餐</th><th></th></tr></thead>
             <tbody>
-              <tr v-for="user in adminUsers" :key="user.id">
+              <tr v-if="showPlanDiscrepancies && !planDiscrepancies.length">
+                <td colspan="6" class="admin-muted-text">没有套餐设置差异</td>
+              </tr>
+              <tr v-for="user in displayedAdminUsers" :key="user.id">
                 <td><div class="admin-user-cell"><i>{{ userInitial(user) }}</i><span><b>{{ user.display_name }}</b><small>{{ user.uid }} / {{ user.username || '未设置用户名' }}</small></span></div></td>
                 <td><span class="admin-muted-text">{{ user.phone }}</span></td>
                 <td><select v-model="user.role" class="admin-compact-select"><option value="user">普通用户</option><option value="admin">管理员</option></select></td>
                 <td><select v-model="user.status" class="admin-compact-select"><option value="active">正常</option><option value="disabled">停用</option></select></td>
-                <td><span v-if="user.effective_plan && user.effective_plan !== user.plan" class="admin-muted-text">后台设置 </span><select v-model="user.plan" class="admin-compact-select plan"><option v-for="plan in adminPlanOptions(user)" :key="plan.code" :value="plan.code">{{ plan.name }}</option></select><small v-if="user.effective_plan && user.effective_plan !== user.plan" class="admin-muted-text"> 当前生效：{{ adminPlans.find((plan) => plan.code === user.effective_plan)?.name || user.effective_plan }}</small></td>
-                <td><button class="admin-soft-button" @click="saveAdminUser(user)">保存</button></td>
+                <td>
+                  <div>{{ user.effective_plan_name }}</div>
+                  <small v-if="hasPlanDiscrepancy(user)" class="admin-muted-text">原设置：{{ adminPlans.find((plan) => plan.code === user.plan)?.name || user.plan }}</small>
+                </td>
+                <td>
+                  <button class="admin-soft-button" @click="saveAdminUser(user)">保存账号</button>
+                  <button v-if="user.role === 'user' && user.status === 'active'" class="admin-soft-button" @click="openSubscriptionGrant(user)">授予套餐</button>
+                </td>
               </tr>
             </tbody>
           </table>
         </div>
+        <a-modal
+          :open="!!grantTarget" title="授予套餐" ok-text="确认授予" cancel-text="取消"
+          :confirm-loading="grantSubmitting" :ok-button-props="{ disabled: !selectedGrantPlan }"
+          @cancel="!grantSubmitting && (grantTarget = null)" @ok="submitSubscriptionGrant"
+        >
+          <p>{{ grantTarget?.display_name }}（{{ grantTarget?.uid }}）</p>
+          <select v-model="grantPlanCode" aria-label="选择要授予的套餐" class="admin-compact-select plan" :disabled="grantSubmitting" @change="grantError = ''">
+            <option value="" disabled>请选择套餐</option>
+            <optgroup v-for="group in grantPlanGroups" :key="group.cycle" :label="group.label">
+              <option v-for="plan in group.plans" :key="plan.code" :value="plan.code">{{ plan.name }}</option>
+            </optgroup>
+          </select>
+          <p v-if="selectedGrantPlan">
+            {{ selectedGrantPlan.billing_cycle === 'internal' ? '立即开通 Internal 权益，无固定到期日。' : `立即开通 ${selectedGrantPlan.billing_cycle === 'yearly' ? 365 : 31} 天，并发放 ${selectedGrantPlan.beans} 豆。` }}
+          </p>
+          <p class="admin-muted-text">已有生效订阅或待处理订阅订单时，系统会拦截授予。</p>
+          <a-alert v-if="grantError" type="error" :message="grantError" show-icon />
+        </a-modal>
       </section>
       <section v-else-if="section==='subscriptions'" class="admin-module-shell">
         <CommercialCatalogPanel />

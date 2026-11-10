@@ -3,7 +3,7 @@ import json
 
 from sqlalchemy import select
 
-from backend.app.models import Provider, Prompt, PromptVersion, Workflow, WorkflowVersion
+from backend.app.models import Provider, Prompt, PromptVersion, User, Workflow, WorkflowVersion
 from backend.app.security import ApiKeyCipher, mask_api_key
 from backend.app.seed import LEGACY_VIDEO_PROVIDER_CODE, PROMPT_PATH, VIDEO_PROVIDER_CODE, seed_database
 from backend.app.services.provider_catalog import (
@@ -24,6 +24,22 @@ def test_api_key_encrypts_at_rest_and_masks_response(tmp_path) -> None:
     assert "super-secret" not in encrypted
     assert cipher.decrypt(encrypted) == "sk-listingo-super-secret"
     assert mask_api_key("sk-listingo-super-secret") == "sk-l••••••••cret"
+
+
+def test_production_seed_preserves_existing_bootstrap_account_settings(client) -> None:
+    with client.app.state.session_factory() as session:
+        admin = session.scalar(select(User).where(User.username == "admin"))
+        admin.phone = "13900000001"
+        admin.role = "user"
+        admin.status = "disabled"
+        admin.current_plan_code = "free"
+        session.commit()
+
+        seed_database(session, admin_phone="13900000002", production=True)
+        session.refresh(admin)
+        assert (admin.phone, admin.role, admin.status, admin.current_plan_code) == (
+            "13900000001", "user", "disabled", "free",
+        )
 
 
 def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(client) -> None:

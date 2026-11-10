@@ -1070,7 +1070,7 @@ describe('workspace model', () => {
 
   it('uses five backpack showcase cards for the A+ detail empty state', () => {
     for (let index = 1; index <= 5; index += 1) {
-      expect(aplusPanelSource).toContain(`/demo/video-backpack-showcase-${String(index).padStart(2, '0')}.png`)
+      expect(aplusPanelSource).toContain(`/assets/listingo-demo-backpack-${String(index).padStart(2, '0')}.webp`)
     }
     expect(aplusPanelSource).toContain('const aplusShowcaseCards = [')
     expect(aplusPanelSource).toContain('class="aplus-empty-stage aplus-showcase-stage"')

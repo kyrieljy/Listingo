@@ -6,7 +6,7 @@ import json
 import logging
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -48,6 +48,7 @@ from backend.app.schemas import (
     EnterpriseLeadStatusUpdate,
     AdminPlanUpdate,
     AdminQuotaRuleUpdate,
+    AdminSubscriptionGrantCreate,
     AdminUserUpdate,
     PromptTestRunCreate,
     PromptTestRunOut,
@@ -130,6 +131,8 @@ from backend.app.services.runtime_cache import (
 )
 from backend.app.services.sms import load_sms_config, send_sms_code
 from backend.app.services.subscriptions import (
+    grant_admin_subscription,
+    is_admin_grantable_plan,
     resolve_user_plan,
     billing_settings,
     list_subscription_plans,
@@ -1179,32 +1182,49 @@ async def health_check_provider_group(group_key: str, request: Request, session:
 @router.get("/users")
 def list_users(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     users = session.scalars(select(User).order_by(User.created_at.desc())).all()
-    return [{**public_user(user), "effective_plan": resolve_user_plan(session, user).code} for user in users]
+    result = []
+    for user in users:
+        plan = resolve_user_plan(session, user)
+        result.append({**public_user(user), "effective_plan": plan.code, "effective_plan_name": plan.name})
+    return result
+
+
+@router.get("/users/subscription-grant-plans")
+def subscription_grant_plans(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    plans = session.scalars(select(SubscriptionPlan).order_by(SubscriptionPlan.sort_order)).all()
+    return [
+        {"code": plan.code, "name": plan.name, "billing_cycle": plan.billing_cycle, "beans": plan.beans}
+        for plan in plans if is_admin_grantable_plan(plan)
+    ]
+
+
+@router.post("/users/{user_id}/subscription-grants")
+def create_subscription_grant(
+    user_id: str, payload: AdminSubscriptionGrantCreate,
+    session: Session = Depends(get_session), actor: User = Depends(require_admin),
+) -> dict[str, Any]:
+    subscription = grant_admin_subscription(
+        session, user_id=user_id, actor_id=actor.id,
+        plan_code=payload.plan_code, request_id=str(payload.request_id),
+    )
+    ends_at = subscription.ends_at.astimezone(timezone.utc) if subscription.ends_at else None
+    result = {"id": subscription.id, "plan_code": payload.plan_code, "ends_at": ends_at}
+    session.commit()
+    return result
 
 
 @router.patch("/users/{user_id}")
 def update_user(user_id: str, payload: AdminUserUpdate, session: Session = Depends(get_session)) -> dict[str, Any]:
-    user = session.get(User, user_id)
+    user = session.scalar(select(User).where(User.id == user_id).with_for_update())
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
     updates = payload.model_dump(exclude_unset=True)
+    if updates.get("plan_code") and updates["plan_code"] != user.current_plan_code:
+        raise HTTPException(status_code=422, detail="请使用「授予套餐」开通套餐")
     if updates.get("role") is not None:
         user.role = updates["role"]
     if updates.get("status") is not None:
         user.status = updates["status"]
-    if updates.get("plan_code"):
-        plan = session.scalar(select(SubscriptionPlan).where(SubscriptionPlan.code == updates["plan_code"]).limit(1))
-        if not plan:
-            raise HTTPException(status_code=404, detail="套餐不存在")
-        user.current_plan_code = plan.code
-        create_notification(
-            session,
-            user.id,
-            title="订阅套餐已调整",
-            body=f"管理员已将你的订阅套餐调整为 {plan.name}。",
-            category="payment",
-            metadata={"plan_code": plan.code},
-        )
     session.commit()
     return public_user(user)
 

@@ -164,6 +164,15 @@ def status(request: Request, response: Response):
     }
 
 
+@router.post("/phone/cancel", status_code=204)
+def cancel_phone(request: Request, response: Response) -> None:
+    token = _cookie_token(request, BIND_COOKIE)
+    if token:
+        request.app.state.runtime_state.storage.delete(_key("bind", token))
+    response.delete_cookie(BIND_COOKIE, path=COOKIE_PATH)
+    response.headers["Cache-Control"] = "no-store"
+
+
 @router.get("/start")
 def start(request: Request, session: Session = Depends(get_session)):
     settings = _settings(request)

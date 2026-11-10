@@ -616,6 +616,10 @@ export async function getWechatLoginStatusApi(): Promise<{ enabled: boolean; pen
   return (await api.get('/auth/wechat/status')).data
 }
 
+export async function cancelWechatPhoneApi(): Promise<void> {
+  await api.post('/auth/wechat/phone/cancel')
+}
+
 export async function sendWechatPhoneCodeApi(phone: string): Promise<SmsSendResponse> {
   return (await api.post('/auth/wechat/phone/send', { phone })).data
 }

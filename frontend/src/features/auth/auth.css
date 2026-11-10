@@ -86,12 +86,19 @@
 
 .auth-form-panel {
   position: relative;
+  display: flex;
+  flex-direction: column;
   height: 100%;
   min-height: 0;
-  padding: 38px 46px 28px;
+  padding: 38px 46px;
   overflow-y: auto;
   overscroll-behavior: contain;
   background: #fff;
+}
+
+.auth-form-content {
+  flex: 0 0 auto;
+  margin-block: auto;
 }
 
 .auth-close-button {

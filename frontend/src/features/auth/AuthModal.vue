@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { apiErrorStatus, getWechatLoginStatusApi, sendWechatPhoneCodeApi } from '../../api/client'
+import { apiErrorStatus, cancelWechatPhoneApi, getWechatLoginStatusApi, sendWechatPhoneCodeApi } from '../../api/client'
 import { message } from 'ant-design-vue'
 import {
   AlipayCircleOutlined,
@@ -70,6 +70,7 @@ const smsCountdown = ref(0)
 const adminCountdown = ref(0)
 const sendingCode = ref<'sms' | 'admin' | ''>('')
 const countryDropdownOpen = ref<'sms' | ''>('')
+const countryPicker = ref<HTMLElement | null>(null)
 let smsTimer: ReturnType<typeof window.setInterval> | null = null
 let adminTimer: ReturnType<typeof window.setInterval> | null = null
 
@@ -86,39 +87,56 @@ const canSubmit = computed(() => {
 })
 
 watch(() => props.open, (open) => {
-  if (!open) return
+  if (!open) {
+    countryDropdownOpen.value = ''
+    if (wechatPending.value) {
+      wechatPending.value = false
+      smsPhone.value = ''
+      smsCode.value = ''
+      agreed.value = false
+      clearTimer('sms')
+      smsCountdown.value = 0
+      void cancelWechatPhoneApi().catch(() => {})
+    }
+    return
+  }
   method.value = 'sms'
   smsCountryCode.value = '86'
   countryDropdownOpen.value = ''
   errorText.value = ''
-  void loadWechatStatus()
+  if (!wechatPending.value) void loadWechatStatus()
 })
 
-async function loadWechatStatus(): Promise<void> {
+async function loadWechatStatus(): Promise<boolean> {
   try {
     const status = await getWechatLoginStatusApi()
     wechatEnabled.value = status.enabled
-    wechatPending.value = status.pending_phone
-    if (wechatPending.value) method.value = 'sms'
+    return status.pending_phone
   } catch {
     wechatEnabled.value = false
+    return false
   }
 }
 
 onMounted(async () => {
+  document.addEventListener('click', closeCountryDropdownOutside, true)
   const { wechat, ...query } = route.query
   if (typeof wechat !== 'string') return
   await router.replace({ query })
   if (wechat === 'success') return
+  wechatPending.value = wechat === 'phone'
   visible.value = true
-  await loadWechatStatus()
+  const pending = wechat === 'phone' ? await loadWechatStatus() : false
   const messages: Record<string, string> = {
     expired: '微信授权已过期，请重新扫码',
     cancelled: '已取消微信授权',
     failed: '微信授权失败，请重新扫码',
     blocked: '此账号请使用原有登录方式，或联系管理员',
   }
-  if (wechat === 'phone' && !wechatPending.value) errorText.value = messages.expired
+  if (wechat === 'phone' && wechatPending.value && !pending) {
+    wechatPending.value = false
+    errorText.value = messages.expired
+  }
   else if (Object.hasOwn(messages, wechat)) errorText.value = messages[wechat]
 })
 
@@ -148,6 +166,12 @@ function toggleCountryDropdown(kind: 'sms'): void {
 function selectPhoneCountry(countryCode: string): void {
   smsCountryCode.value = countryCode
   countryDropdownOpen.value = ''
+}
+
+function closeCountryDropdownOutside(event: MouseEvent): void {
+  if (countryDropdownOpen.value && countryPicker.value && !event.composedPath().includes(countryPicker.value)) {
+    countryDropdownOpen.value = ''
+  }
 }
 
 function clearTimer(kind: 'sms' | 'admin'): void {
@@ -181,16 +205,19 @@ async function requestCode(kind: 'sms' | 'admin'): Promise<void> {
   const purpose = kind === 'admin' ? 'admin' : 'login'
   sendingCode.value = kind
   errorText.value = ''
+  const binding = wechatPending.value && kind === 'sms'
   try {
-    const code = wechatPending.value && kind === 'sms'
+    const code = binding
       ? (await sendWechatPhoneCodeApi(phone)).debug_code
       : await authStore.sendSmsCode(phone, purpose)
+    if (binding && !wechatPending.value) return
     if (code) {
       if (kind === 'sms') smsCode.value = code
       else adminCode.value = code
     }
     startCountdown(kind)
   } catch (error) {
+    if (binding && !wechatPending.value) return
     if (apiErrorStatus(error) === 410) wechatPending.value = false
     const text = error instanceof Error ? error.message : '验证码发送失败，请稍后再试'
     errorText.value = text
@@ -221,6 +248,7 @@ async function submit(): Promise<void> {
     if (method.value === 'sms') {
       if (wechatPending.value) {
         await authStore.loginWithWechatPhone(buildPhoneNumber(smsCountryCode.value, smsPhone.value), smsCode.value)
+        wechatPending.value = false
       } else {
         await authStore.loginWithSms({ phone: buildPhoneNumber(smsCountryCode.value, smsPhone.value), code: smsCode.value })
       }
@@ -247,6 +275,7 @@ async function submit(): Promise<void> {
 }
 
 onBeforeUnmount(() => {
+  document.removeEventListener('click', closeCountryDropdownOutside, true)
   clearTimer('sms')
   clearTimer('admin')
 })
@@ -257,6 +286,7 @@ onBeforeUnmount(() => {
     v-model:open="visible"
     :footer="null"
     :closable="false"
+    :mask-closable="!countryDropdownOpen"
     :width="1000"
     centered
     class="auth-shell-modal"
@@ -271,117 +301,119 @@ onBeforeUnmount(() => {
         <button class="auth-close-button" type="button" aria-label="关闭登录弹窗" @click="visible = false">
           <CloseOutlined />
         </button>
-        <header class="auth-form-head">
-          <h2>{{ wechatPending ? '绑定手机号' : '欢迎登录 Listingo' }}</h2>
-        </header>
+        <div class="auth-form-content">
+          <header class="auth-form-head">
+            <h2>{{ wechatPending ? '绑定手机号' : '欢迎登录 Listingo' }}</h2>
+          </header>
 
-        <div v-if="!firstPasswordMode && !wechatPending" class="auth-method-switch" role="tablist" aria-label="登录方式">
-          <button type="button" :class="{ active: method === 'sms' }" role="tab" @click="method = 'sms'; countryDropdownOpen = ''">
-            <MobileOutlined />短信登录 / 注册
-          </button>
-          <button type="button" :class="{ active: method === 'password' }" role="tab" @click="method = 'password'; countryDropdownOpen = ''">
-            <LockOutlined />密码登录
-          </button>
-        </div>
+          <div v-if="!firstPasswordMode && !wechatPending" class="auth-method-switch" role="tablist" aria-label="登录方式">
+            <button type="button" :class="{ active: method === 'sms' }" role="tab" @click="method = 'sms'; countryDropdownOpen = ''">
+              <MobileOutlined />短信登录 / 注册
+            </button>
+            <button type="button" :class="{ active: method === 'password' }" role="tab" @click="method = 'password'; countryDropdownOpen = ''">
+              <LockOutlined />密码登录
+            </button>
+          </div>
 
-        <form class="auth-form" @submit.prevent="submit">
-          <template v-if="firstPasswordMode">
-            <label class="auth-input-row">
-              <span>设置登录密码</span>
-              <div class="auth-icon-input">
-                <LockOutlined />
-                <input v-model="firstPassword" autocomplete="new-password" type="password" placeholder="请设置管理员登录密码" />
-              </div>
-            </label>
-          </template>
-
-          <template v-else-if="method === 'sms'">
-            <div class="auth-input-row">
-              <span>手机号</span>
-              <div class="auth-phone-input">
-                <div class="auth-country-picker" :class="{ open: countryDropdownOpen === 'sms' }">
-                  <button
-                    class="auth-country-trigger"
-                    type="button"
-                    aria-haspopup="listbox"
-                    :aria-expanded="countryDropdownOpen === 'sms'"
-                    @click="toggleCountryDropdown('sms')"
-                  >
-                    <span>{{ phoneCountryPrefix(smsCountryCode) }}</span>
-                    <i aria-hidden="true" />
-                  </button>
-                  <div v-if="countryDropdownOpen === 'sms'" class="auth-country-menu" role="listbox">
-                    <button
-                      v-for="country in phoneCountryOptions"
-                      :key="country.code"
-                      type="button"
-                      role="option"
-                      :aria-selected="smsCountryCode === country.code"
-                      :class="{ selected: smsCountryCode === country.code }"
-                      @click="selectPhoneCountry(country.code)"
-                    >
-                      {{ country.label }}
-                    </button>
-                  </div>
+          <form class="auth-form" @submit.prevent="submit">
+            <template v-if="firstPasswordMode">
+              <label class="auth-input-row">
+                <span>设置登录密码</span>
+                <div class="auth-icon-input">
+                  <LockOutlined />
+                  <input v-model="firstPassword" autocomplete="new-password" type="password" placeholder="请设置管理员登录密码" />
                 </div>
-                <input v-model="smsPhone" autocomplete="tel" inputmode="tel" placeholder="请输入手机号" />
-              </div>
-            </div>
-            <label class="auth-input-row">
-              <span>验证码</span>
-              <div class="auth-code-input">
-                <input v-model="smsCode" autocomplete="one-time-code" inputmode="numeric" placeholder="请输入验证码" />
-                <button type="button" :disabled="smsCountdown > 0 || sendingCode === 'sms'" @click="requestCode('sms')">
-                  {{ sendingCode === 'sms' ? '发送中...' : smsCountdown > 0 ? `${smsCountdown}s` : '获取验证码' }}
-                </button>
-              </div>
-            </label>
-          </template>
+              </label>
+            </template>
 
-          <template v-else>
-            <label class="auth-input-row">
-              <span>账号</span>
-              <div class="auth-icon-input">
-                <UserOutlined />
-                <input v-model="passwordIdentifier" autocomplete="username" placeholder="手机号 / 用户名 / 邮箱" />
+            <template v-else-if="method === 'sms'">
+              <div class="auth-input-row">
+                <span>手机号</span>
+                <div class="auth-phone-input">
+                  <div ref="countryPicker" class="auth-country-picker" :class="{ open: countryDropdownOpen === 'sms' }">
+                    <button
+                      class="auth-country-trigger"
+                      type="button"
+                      aria-haspopup="listbox"
+                      :aria-expanded="countryDropdownOpen === 'sms'"
+                      @click="toggleCountryDropdown('sms')"
+                    >
+                      <span>{{ phoneCountryPrefix(smsCountryCode) }}</span>
+                      <i aria-hidden="true" />
+                    </button>
+                    <div v-if="countryDropdownOpen === 'sms'" class="auth-country-menu" role="listbox">
+                      <button
+                        v-for="country in phoneCountryOptions"
+                        :key="country.code"
+                        type="button"
+                        role="option"
+                        :aria-selected="smsCountryCode === country.code"
+                        :class="{ selected: smsCountryCode === country.code }"
+                        @click="selectPhoneCountry(country.code)"
+                      >
+                        {{ country.label }}
+                      </button>
+                    </div>
+                  </div>
+                  <input v-model="smsPhone" autocomplete="tel" inputmode="tel" placeholder="请输入手机号" />
+                </div>
               </div>
-            </label>
-            <label class="auth-input-row">
-              <span>密码</span>
-              <div class="auth-icon-input">
-                <LockOutlined />
-                <input v-model="password" autocomplete="current-password" type="password" placeholder="请输入密码" />
-              </div>
-            </label>
-            <label v-if="passwordIsAdmin" class="auth-input-row">
-              <span>管理员二次验证</span>
-              <div class="auth-code-input">
-                <input v-model="adminCode" autocomplete="one-time-code" inputmode="numeric" placeholder="请输入管理员短信验证码" />
-                <button type="button" :disabled="adminCountdown > 0 || sendingCode === 'admin'" @click="requestCode('admin')">
-                  {{ sendingCode === 'admin' ? '发送中...' : adminCountdown > 0 ? `${adminCountdown}s` : '发送验证码' }}
-                </button>
-              </div>
-            </label>
-          </template>
+              <label class="auth-input-row">
+                <span>验证码</span>
+                <div class="auth-code-input">
+                  <input v-model="smsCode" autocomplete="one-time-code" inputmode="numeric" placeholder="请输入验证码" />
+                  <button type="button" :disabled="smsCountdown > 0 || sendingCode === 'sms'" @click="requestCode('sms')">
+                    {{ sendingCode === 'sms' ? '发送中...' : smsCountdown > 0 ? `${smsCountdown}s` : '获取验证码' }}
+                  </button>
+                </div>
+              </label>
+            </template>
 
-          <p v-if="errorText" class="auth-error">{{ errorText }}</p>
+            <template v-else>
+              <label class="auth-input-row">
+                <span>账号</span>
+                <div class="auth-icon-input">
+                  <UserOutlined />
+                  <input v-model="passwordIdentifier" autocomplete="username" placeholder="手机号 / 用户名 / 邮箱" />
+                </div>
+              </label>
+              <label class="auth-input-row">
+                <span>密码</span>
+                <div class="auth-icon-input">
+                  <LockOutlined />
+                  <input v-model="password" autocomplete="current-password" type="password" placeholder="请输入密码" />
+                </div>
+              </label>
+              <label v-if="passwordIsAdmin" class="auth-input-row">
+                <span>管理员二次验证</span>
+                <div class="auth-code-input">
+                  <input v-model="adminCode" autocomplete="one-time-code" inputmode="numeric" placeholder="请输入管理员短信验证码" />
+                  <button type="button" :disabled="adminCountdown > 0 || sendingCode === 'admin'" @click="requestCode('admin')">
+                    {{ sendingCode === 'admin' ? '发送中...' : adminCountdown > 0 ? `${adminCountdown}s` : '发送验证码' }}
+                  </button>
+                </div>
+              </label>
+            </template>
 
-          <label v-if="!firstPasswordMode" class="auth-agreement">
-            <input v-model="agreed" type="checkbox" />
-            <span>我已阅读并同意<a>用户协议</a>、<a>个人信息保护政策</a>和<a>账号规则</a></span>
-          </label>
+            <p v-if="errorText" class="auth-error">{{ errorText }}</p>
 
-          <button class="auth-submit" type="submit" :disabled="!canSubmit || submitting">
-            <span>{{ submitting ? '处理中...' : wechatPending ? '验证并登录' : '登录' }}</span>
-            <CheckOutlined v-if="!submitting" />
-          </button>
-        </form>
-        <div class="auth-social-divider"><span />更多登录方式<span /></div>
-        <div class="auth-social-row" aria-label="第三方登录">
-          <button type="button" :disabled="!wechatEnabled || firstPasswordMode" :title="wechatEnabled ? '微信扫码登录' : '微信登录未启用'" aria-label="微信扫码登录" @click="startWechat"><WechatOutlined /></button>
-          <button type="button" disabled title="后续接入支付宝登录"><AlipayCircleOutlined /></button>
-          <button type="button" disabled title="后续接入 QQ 登录"><QqOutlined /></button>
-          <button type="button" disabled title="后续接入 Gmail 登录"><GoogleOutlined /></button>
+            <label v-if="!firstPasswordMode" class="auth-agreement">
+              <input v-model="agreed" type="checkbox" />
+              <span>我已阅读并同意<a>用户协议</a>、<a>个人信息保护政策</a>和<a>账号规则</a></span>
+            </label>
+
+            <button class="auth-submit" type="submit" :disabled="!canSubmit || submitting">
+              <span>{{ submitting ? '处理中...' : wechatPending ? '验证并登录' : '登录' }}</span>
+              <CheckOutlined v-if="!submitting" />
+            </button>
+          </form>
+          <div v-if="!wechatPending" class="auth-social-divider"><span />更多登录方式<span /></div>
+          <div v-if="!wechatPending" class="auth-social-row" aria-label="第三方登录">
+            <button type="button" :disabled="!wechatEnabled || firstPasswordMode" :title="wechatEnabled ? '微信扫码登录' : '微信登录未启用'" aria-label="微信扫码登录" @click="startWechat"><WechatOutlined /></button>
+            <button type="button" disabled title="后续接入支付宝登录"><AlipayCircleOutlined /></button>
+            <button type="button" disabled title="后续接入 QQ 登录"><QqOutlined /></button>
+            <button type="button" disabled title="后续接入 Gmail 登录"><GoogleOutlined /></button>
+          </div>
         </div>
       </section>
     </div>

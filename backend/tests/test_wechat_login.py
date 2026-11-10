@@ -107,6 +107,22 @@ def test_expired_state_and_binding_are_rejected(oauth):
     assert oauth.post(f"{BASE}/phone/send", json={"phone": PHONE}).status_code == 410
 
 
+def test_cancel_removes_binding_cookie_and_invalidates_challenge(oauth):
+    finish(oauth, start(oauth), "openid")
+    token = oauth.cookies[wechat_login.BIND_COOKIE]
+    code = send(oauth)
+
+    assert oauth.post(f"{BASE}/phone/cancel").status_code == 204
+    assert wechat_login.BIND_COOKIE not in oauth.cookies
+    assert not oauth.get(f"{BASE}/status").json()["pending_phone"]
+    assert oauth.post(f"{BASE}/phone/cancel").status_code == 204
+
+    oauth.cookies.set(wechat_login.BIND_COOKIE, token, path=wechat_login.COOKIE_PATH)
+    assert confirm(oauth, code).status_code == 410
+    assert SESSION_COOKIE not in oauth.cookies
+    assert finish(oauth, start(oauth), "openid").headers["location"] == "/app?wechat=phone"
+
+
 def test_new_user_then_repeat_scan(oauth):
     assert finish(oauth, start(oauth), "openid-new").headers["location"] == "/app?wechat=phone"
     assert SESSION_COOKIE not in oauth.cookies

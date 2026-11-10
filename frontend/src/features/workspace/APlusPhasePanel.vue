@@ -124,13 +124,15 @@ function requireAuthForModelAction(): boolean {
 
 function openBatchHosting() {
   trackAplusEvent('aplus_batch_click', 'click', 'batch_aplus')
-  if (requireAuthForModelAction()) return
   batchOpen.value = true
 }
 
-// 订阅无批量生成权益时入口按钮保持可见但禁用，点击引导升级订阅而非直接打开批量托管
-const BATCH_LOCK_HINT = '需要升级订阅解锁批量生成功能'
+const batchHostingHint = computed(() => {
+  if (!authStore.isAuthenticated) return '请先登录'
+  return authStore.canUseBatchGeneration ? undefined : '需要升级订阅解锁批量生成功能'
+})
 function onBatchHostingEntryClick() {
+  if (requireAuthForModelAction()) return
   if (authStore.canUseBatchGeneration) openBatchHosting()
   else emit('open-pricing')
 }
@@ -1298,7 +1300,7 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
         </div>
       </div>
       <button v-if="authStore.isAdmin && !assets.length" class="sample-button" type="button" @click="useSample">使用 Listingo 演示商品</button>
-          <a-tooltip :title="authStore.canUseBatchGeneration ? undefined : BATCH_LOCK_HINT">
+          <a-tooltip :title="batchHostingHint">
             <button
               class="sample-button batch-hosting-entry"
               type="button"

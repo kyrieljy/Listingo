@@ -665,7 +665,7 @@ describe('workspace model', () => {
     expect(workspaceSource).toContain('function requireAuthForModelAction(): boolean')
     expect(workspaceSource).not.toContain("message.info('请先登录后再使用 AI 生成功能')")
     expect(workspaceSource).toMatch(
-      /function openSuiteBatch\(\)\s*\{\s*trackSuiteEvent\('suite_batch_click', 'click', 'batch_suite'\)\s*if \(requireAuthForModelAction\(\)\) return/,
+      /function onBatchHostingEntryClick\(\)\s*\{\s*if \(requireAuthForModelAction\(\)\) return\s*if \(authStore.canUseBatchGeneration\) openSuiteBatch\(\)/,
     )
     expect(workspaceSource).toContain('@require-auth="requireAuthForModelAction"')
     expect(workspaceSource).toContain('<APlusPhasePanel v-if="phase===\'aplus\'" ref="aplusPanel" @open-pricing="openPricing" @require-auth="requireAuthForModelAction" />')
@@ -674,8 +674,11 @@ describe('workspace model', () => {
     expect(aplusPanelSource).toContain("'require-auth': []")
     expect(aplusPanelSource).toContain('function openBatchHosting()')
     expect(aplusPanelSource).toContain("trackAplusEvent('aplus_batch_click', 'click', 'batch_aplus')")
-    // 订阅无批量权益时按钮保持可见但禁用，点击引导升级订阅而非直接打开批量托管
-    expect(aplusPanelSource).toContain('function onBatchHostingEntryClick()')
+    expect(aplusPanelSource).toMatch(
+      /function onBatchHostingEntryClick\(\)\s*\{\s*if \(requireAuthForModelAction\(\)\) return\s*if \(authStore.canUseBatchGeneration\) openBatchHosting\(\)/,
+    )
+    expect(aplusPanelSource).toContain("if (!authStore.isAuthenticated) return '请先登录'")
+    expect(workspaceSource).toContain("if (!authStore.isAuthenticated) return '请先登录'")
     expect(aplusPanelSource).toContain('@click="onBatchHostingEntryClick"')
     expect(aplusPanelSource).toContain('需要升级订阅解锁批量生成功能')
     expect(aplusPanelSource).toContain('a-tooltip')

@@ -579,13 +579,15 @@ function selectModelPreference(key: (typeof modelPreferenceOptions)[number]['key
 }
 function openSuiteBatch() {
   trackSuiteEvent('suite_batch_click', 'click', 'batch_suite')
-  if (requireAuthForModelAction()) return
   suiteBatchOpen.value = true
 }
 
-// 订阅无批量生成权益时入口按钮保持可见但禁用，点击引导升级订阅而非直接打开批量托管
-const BATCH_LOCK_HINT = '需要升级订阅解锁批量生成功能'
+const batchHostingHint = computed(() => {
+  if (!authStore.isAuthenticated) return '请先登录'
+  return authStore.canUseBatchGeneration ? undefined : '需要升级订阅解锁批量生成功能'
+})
 function onBatchHostingEntryClick() {
+  if (requireAuthForModelAction()) return
   if (authStore.canUseBatchGeneration) openSuiteBatch()
   else openPricing()
 }
@@ -1021,7 +1023,7 @@ async function openHistoryJob(entry: HistoryEntry) {
           <label class="upload-zone" :class="{ disabled: uploadLimitReached || uploading }" :aria-disabled="uploadLimitReached || uploading"><input type="file" accept="image/png,image/jpeg,image/webp" multiple :disabled="uploadLimitReached || uploading" @change="filesSelected"/><CloudUploadOutlined/><b>{{ uploading ? '上传中…' : uploadLimitReached ? `最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张` : '点击或拖拽上传' }}</b><small>{{ uploadLimitReached ? '删除已有图片后可继续上传' : 'JPG / PNG / WebP · 单张不超过 15MB' }}</small></label>
           <div v-if="assets.length" class="uploaded-row"><div v-for="asset in assets" :key="asset.id"><img :src="asset.url" :alt="asset.original_name"/><button class="remove-uploaded-asset" type="button" aria-label="删除已上传商品图" @click="removeAsset(asset.id)"><CloseOutlined/></button></div></div>
           <button v-if="authStore.isAdmin && !assets.length" class="sample-button" @click="useSample">使用 Listingo 演示商品</button>
-          <a-tooltip :title="authStore.canUseBatchGeneration ? undefined : BATCH_LOCK_HINT">
+          <a-tooltip :title="batchHostingHint">
             <button
               class="sample-button batch-hosting-entry"
               type="button"

@@ -146,7 +146,7 @@ export function planFromDto(source: SubscriptionPlanDto, billing: BillingCycle =
   return {
     key: source.code,
     name: source.name,
-    price: enterprise ? '联系我们' : price?.price_label || '',
+    price: enterprise ? '联系我们' : price?.amount_cents != null ? `¥${price.amount_cents / 100}` : '',
     period: enterprise ? '' : price?.period_label || '',
     badge: source.badge || undefined,
     description: source.description,

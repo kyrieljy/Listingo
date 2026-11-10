@@ -54,6 +54,15 @@ describe('auth model', () => {
       quota_rules: [],
       sort_order: 99,
     })
+    const configuredPlan = {
+      ...internal.source!,
+      billing_cycle: 'monthly' as const,
+      is_internal: false,
+      prices: [{ id: 'price', billing_cycle: 'monthly' as const, currency: 'CNY', period_label: '/月', price_label: '¥49', amount_cents: 4800 }],
+    }
+    expect(planFromDto(configuredPlan).price).toBe('¥48')
+    configuredPlan.prices[0].amount_cents = 4850
+    expect(planFromDto(configuredPlan).price).toBe('¥48.5')
     expect(internal.adminOnly).toBe(true)
     expect(internal.beans).toBeNull()
     expect(hasEntitlement(internal, 'batch_generation')).toBe(true)
@@ -95,10 +104,11 @@ describe('auth model', () => {
     expect(authModalSource).toContain('buildPhoneNumber')
     expect(authModalSource).toContain('phoneCountryPrefix')
     expect(authModalSource).toContain('auth-country-menu')
-    expect(authModalSource).toContain('/auth/water-ripple-landscape-subjects.png')
+    expect(authModalSource).toContain('listingo-login-poster.png')
+    expect(authModalSource).toContain('绑定手机号')
+    expect(authModalSource).not.toContain('验证后将关联已有 Listingo 账号')
     expect(authCssSource).toContain('height: min(680px, calc(100vh - 48px))')
-    expect(authCssSource).toContain('max-width: 460px')
-    expect(authCssSource).toContain('padding: 5px')
+    expect(authCssSource).toContain('object-fit: cover')
     expect(authCssSource).toContain('overflow: visible')
     expect(authCssSource).toContain('.auth-country-trigger')
     expect(authCssSource).toContain('input:-webkit-autofill')

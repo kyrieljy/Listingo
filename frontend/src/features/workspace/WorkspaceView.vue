@@ -8,7 +8,7 @@ import {
 } from '@ant-design/icons-vue'
 import BrandLogo from '../../components/BrandLogo.vue'
 import {
-  assistCopywriting, batchSelectionDownloadUrl, cancelJob, createJob, editItem, editItemText, generationDownloadUrl, getJob, listAplusGenerationJobs, listAplusPlanJobs, listJobs, ocrItemText, retryFailedItems, retryItem, uploadAsset, userFacingApiErrorMessage,
+  apiErrorStatus, assistCopywriting, batchSelectionDownloadUrl, cancelJob, createJob, editItem, editItemText, generationDownloadUrl, getJob, listAplusGenerationJobs, listAplusPlanJobs, listJobs, ocrItemText, retryFailedItems, retryItem, uploadAsset, userFacingApiErrorMessage,
   type AplusJob, type Asset, type DownloadFormat, type ImageTextEditLine, type Job, type JobItem,
 } from '../../api/client'
 import APlusPhasePanel from './APlusPhasePanel.vue'
@@ -634,10 +634,15 @@ async function filesSelected(event: Event) {
   const files = selectedFiles.slice(0, remaining)
   if (selectedFiles.length > remaining) message.warning(`最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张商品图，本次只添加 ${remaining} 张`)
   if (!files.length) return
+  if (!authStore.isAuthenticated) {
+    input.value = ''
+    message.warning('请先登录后再尝试上传')
+    return
+  }
   clearCopywritingState()
   uploading.value = true
   try { for (const file of files) assets.value.push(await uploadAsset(file)); message.success('商品图上传成功') }
-  catch (error) { message.error('上传失败，请确认后端已启动且图片格式合法') }
+  catch (error) { message.error(apiErrorStatus(error) === 401 ? '请先登录后再尝试上传' : userFacingApiErrorMessage(error)) }
   finally { uploading.value = false; input.value = '' }
 }
 async function useSample() {
@@ -646,7 +651,7 @@ async function useSample() {
   catch { message.error('载入演示商品失败，请确认后端已启动') } finally { uploading.value = false }
 }
 async function aiWrite() {
-  if (requireAuthForModelAction()) return
+  if (!assets.value.length || requireAuthForModelAction()) return
   trackSuiteEvent('suite_ai_copywriting_click', 'click', 'ai_copywriting', { asset_count: assets.value.length })
   helping.value = true
   try {
@@ -1016,7 +1021,7 @@ async function openHistoryJob(entry: HistoryEntry) {
           <label class="upload-zone" :class="{ disabled: uploadLimitReached || uploading }" :aria-disabled="uploadLimitReached || uploading"><input type="file" accept="image/png,image/jpeg,image/webp" multiple :disabled="uploadLimitReached || uploading" @change="filesSelected"/><CloudUploadOutlined/><b>{{ uploading ? '上传中…' : uploadLimitReached ? `最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张` : '点击或拖拽上传' }}</b><small>{{ uploadLimitReached ? '删除已有图片后可继续上传' : 'JPG / PNG / WebP · 单张不超过 15MB' }}</small></label>
           <div v-if="assets.length" class="uploaded-row"><div v-for="asset in assets" :key="asset.id"><img :src="asset.url" :alt="asset.original_name"/><button class="remove-uploaded-asset" type="button" aria-label="删除已上传商品图" @click="removeAsset(asset.id)"><CloseOutlined/></button></div></div>
           <button v-if="authStore.isAdmin && !assets.length" class="sample-button" @click="useSample">使用 Listingo 演示商品</button>
-          <a-tooltip :title="BATCH_LOCK_HINT" :disabled="authStore.canUseBatchGeneration">
+          <a-tooltip :title="authStore.canUseBatchGeneration ? undefined : BATCH_LOCK_HINT">
             <button
               class="sample-button batch-hosting-entry"
               type="button"
@@ -1034,7 +1039,7 @@ async function openHistoryJob(entry: HistoryEntry) {
             <label>画面比例<select v-model="form.ratio"><option v-for="value in ratioOptions" :key="value" :value="value">{{ value }}</option></select></label>
           </div>
         </section>
-        <section class="form-section copywriting-section"><div class="section-title"><span>3</span><strong>商品卖点与要求</strong><button :disabled="helping" @click="aiWrite"><ThunderboltOutlined/>{{ helping ? '帮写中…' : 'AI 帮写' }}</button></div>
+        <section class="form-section copywriting-section"><div class="section-title"><span>3</span><strong>商品卖点与要求</strong><button :disabled="helping || !assets.length" @click="aiWrite"><ThunderboltOutlined/>{{ helping ? '帮写中…' : 'AI 帮写' }}</button></div>
           <div class="markdown-input-frame selling-points-markdown-frame">
             <div v-if="form.sellingPoints.trim() && !sellingPointsEditing" class="markdown-preview main-copy-preview" role="button" tabindex="0" aria-label="编辑商品卖点与要求" @click="showSellingPointsEditor" @keydown.enter.prevent="showSellingPointsEditor" @keydown.space.prevent="showSellingPointsEditor" v-html="renderMarkdown(form.sellingPoints)"></div>
             <textarea v-else ref="sellingPointsInput" v-model="form.sellingPoints" class="selling-points-input" rows="8" :placeholder="sellingPointsPlaceholder" @focus="sellingPointsEditing = true" @blur="sellingPointsEditing = false"/>

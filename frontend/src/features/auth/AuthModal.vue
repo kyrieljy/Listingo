@@ -14,8 +14,7 @@ import {
   UserOutlined,
   WechatOutlined,
 } from '@ant-design/icons-vue'
-import logoUrl from '../../assets/listingo-logo.png'
-import WaterRippleImage from './WaterRippleImage.vue'
+import posterUrl from '../../assets/listingo-login-poster.png'
 import { useAuthStore } from './auth-store'
 
 type LoginMethod = 'sms' | 'password'
@@ -264,47 +263,16 @@ onBeforeUnmount(() => {
     wrap-class-name="auth-modal-wrap"
   >
     <div class="auth-modal-card">
-      <section class="auth-visual-panel">
-        <div class="auth-visual-materials" aria-hidden="true">
-          <span class="auth-visual-silk auth-visual-silk-a" />
-          <span class="auth-visual-silk auth-visual-silk-b" />
-          <span class="auth-visual-current" />
-        </div>
-        <div class="auth-visual-content">
-          <img class="auth-side-logo" :src="logoUrl" alt="Listingo" />
-          <div class="auth-logo-accent" aria-hidden="true">
-            <span />
-            <i />
-            <i />
-            <b />
-          </div>
-          <div class="auth-visual-stage" aria-hidden="true">
-            <div class="auth-visual-art">
-              <WaterRippleImage
-                src="/auth/water-ripple-landscape-subjects.png"
-                :blueish="0.22"
-                :scale="7.4"
-                :illumination="0.24"
-                :surface-distortion="0.026"
-                :water-distortion="0.018"
-              />
-            </div>
-          </div>
-          <div class="auth-atmosphere-bar" aria-hidden="true">
-            <span />
-            <b>AI commerce visual studio</b>
-            <i />
-          </div>
-        </div>
-      </section>
+      <div class="auth-visual-panel">
+        <img :src="posterUrl" alt="Listingo，AI 驱动商业内容创作平台" />
+      </div>
 
       <section class="auth-form-panel">
         <button class="auth-close-button" type="button" aria-label="关闭登录弹窗" @click="visible = false">
           <CloseOutlined />
         </button>
         <header class="auth-form-head">
-          <h2>{{ wechatPending ? '验证手机号' : '欢迎登录 Listingo' }}</h2>
-          <p v-if="wechatPending">验证后将关联已有 Listingo 账号。手机号未注册时会自动创建账号。</p>
+          <h2>{{ wechatPending ? '绑定手机号' : '欢迎登录 Listingo' }}</h2>
         </header>
 
         <div v-if="!firstPasswordMode && !wechatPending" class="auth-method-switch" role="tablist" aria-label="登录方式">

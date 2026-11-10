@@ -36,6 +36,7 @@ const leadForm = reactive({
 })
 const packSection = ref<HTMLElement | null>(null)
 const paymentOrder = ref<PaymentOrderDto | null>(null)
+const displayedAmount = ref<number | null>(null)
 let retryPurchase: (() => Promise<void>) | undefined
 
 function purchaseError(error: unknown) {
@@ -116,6 +117,8 @@ async function choosePlan(planKey: PlanKey, contactSales: boolean): Promise<void
   submittingPlan.value = planKey
   try {
     const cycle = billing.value
+    const offer = displayPlans.value.find((plan) => plan.key === planKey)
+    displayedAmount.value = offer?.source?.prices.find((price) => price.billing_cycle === cycle)?.amount_cents ?? null
     paymentOrder.value = await authStore.choosePlan(planKey, cycle)
     retryPurchase = async () => { billing.value = cycle; await choosePlan(planKey, false) }
   } catch (error) {
@@ -132,6 +135,7 @@ async function purchasePack(packCode: string): Promise<void> {
   }
   submittingPack.value = packCode
   try {
+    displayedAmount.value = displayPacks.value.find((pack) => pack.code === packCode)?.amount_cents ?? null
     paymentOrder.value = await authStore.purchaseBeanPack(packCode)
     retryPurchase = () => purchasePack(packCode)
   } catch (error) {
@@ -172,7 +176,7 @@ async function submitLead() {
 </script>
 
 <template>
-  <PaymentModal :order="paymentOrder" @close="paymentOrder = null" @paid="message.success('支付成功，权益已到账')" @retry="retryPayment" />
+  <PaymentModal :order="paymentOrder" :displayed-amount="displayedAmount" @close="paymentOrder = null" @paid="message.success('支付成功，权益已到账')" @retry="retryPayment" />
   <a-modal
     v-model:open="visible"
     :footer="null"

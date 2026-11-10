@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
@@ -375,17 +376,15 @@ def active_subscription(session: Session, user: User) -> UserSubscription | None
     )
 
 
-def user_plan(session: Session, user: User) -> SubscriptionPlan:
+def resolve_user_plan(session: Session, user: User) -> SubscriptionPlan:
     subscription = active_subscription(session, user)
     if subscription:
         plan = session.get(SubscriptionPlan, subscription.plan_id)
         if plan:
-            user.current_plan_code = plan.code
             return plan
     if user.role == "admin":
         internal = plan_by_code(session, "internal")
         if internal:
-            user.current_plan_code = internal.code
             return internal
     if user.current_plan_code == "internal":
         internal = plan_by_code(session, "internal")
@@ -395,8 +394,13 @@ def user_plan(session: Session, user: User) -> SubscriptionPlan:
     if not fallback:
         seed_subscription_defaults(session)
         fallback = plan_by_code(session, "free")
-    user.current_plan_code = fallback.code
     return fallback
+
+
+def user_plan(session: Session, user: User) -> SubscriptionPlan:
+    plan = resolve_user_plan(session, user)
+    user.current_plan_code = plan.code
+    return plan
 
 
 def plan_entitlement(session: Session, user: User, key: str) -> Any:
@@ -435,7 +439,7 @@ def serialize_plan(session: Session, plan: SubscriptionPlan, *, include_internal
                     "billing_cycle": price.billing_cycle,
                     "amount_cents": price.amount_cents,
                     "currency": price.currency,
-                    "price_label": price.price_label,
+                    "price_label": (f"¥{Decimal(price.amount_cents) / 100:f}" if price.amount_cents is not None else price.price_label),
                     "period_label": price.period_label,
                 }
                 for price in prices
@@ -872,10 +876,10 @@ def create_payment_order(
     session.scalar(select(User).where(User.id == user.id).with_for_update())
     if not bean_pack_code and has_active_paid_subscription(session, user):
         raise HTTPException(status_code=409, detail="当前付费套餐尚未到期，暂不支持提前续费或升级")
-    existing = session.scalar(select(PaymentOrder).where(
+    pending_orders = session.scalars(select(PaymentOrder).where(
         PaymentOrder.user_id == user.id, PaymentOrder.status == "pending", PaymentOrder.expires_at > utcnow(),
     ).order_by(PaymentOrder.created_at.desc()))
-    if existing:
+    for existing in pending_orders:
         snapshot = _json_dict(existing.snapshot_json)
         if (bean_pack_code and existing.product_type == "bean_pack" and snapshot.get("code") == bean_pack_code) or (
             not bean_pack_code and existing.product_type == "subscription" and snapshot.get("code") == plan_code

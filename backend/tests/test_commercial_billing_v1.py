@@ -377,3 +377,40 @@ def test_batch_entitlement_matrix_ignores_batch_upload(client) -> None:
                 source_key=f"matrix:{user_id}",
             )
             assert plan_entitlement(session, user, "batch_generation") is allowed
+
+
+def test_catalog_price_and_existing_order_snapshot(client) -> None:
+    buyer_id = _user_id(client)
+    new_buyer_id = _user_id(client)
+    plans = client.get("/api/v1/subscription/plans").json()
+    basic = next(plan for plan in plans if plan["code"] == "monthly_basic")
+    with client.app.state.session_factory() as session:
+        buyer = session.get(User, buyer_id)
+        original = create_payment_order(session, buyer, plan_code="monthly_basic")
+        original_id = original.id
+        assert original.amount_cents == 4900
+        create_payment_order(session, buyer, bean_pack_code="beans_50")
+        session.commit()
+
+    for cents, label in ((4800, "¥48"), (4850, "¥48.5")):
+        updated = client.patch(f"/api/v1/admin/subscription-plans/{basic['id']}", json={"amount_cents": cents})
+        assert updated.status_code == 200, updated.text
+        plans = client.get("/api/v1/subscription/plans").json()
+        price = next(plan["prices"][0] for plan in plans if plan["id"] == basic["id"])
+        assert (price["amount_cents"], price["price_label"]) == (cents, label)
+
+    with client.app.state.session_factory() as session:
+        buyer = session.get(User, buyer_id)
+        repeated = create_payment_order(session, buyer, plan_code="monthly_basic")
+        assert (repeated.id, repeated.amount_cents) == (original_id, 4900)
+        current = create_payment_order(session, session.get(User, new_buyer_id), plan_code="monthly_basic")
+        assert current.amount_cents == 4850
+
+
+def test_admin_list_distinguishes_configured_and_effective_plan(client) -> None:
+    user_id = _user_id(client, plan_code="monthly_standard")
+    users = client.get("/api/v1/admin/users").json()
+    row = next(user for user in users if user["id"] == user_id)
+    assert row["plan"] == "monthly_standard"
+    assert row["effective_plan"] == "free"
+    assert row["phone"] == _user(client, user_id).phone

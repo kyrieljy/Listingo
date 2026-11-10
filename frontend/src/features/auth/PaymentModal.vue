@@ -3,7 +3,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { createNativePaymentApi, getPaymentOrderApi, type PaymentOrderDto } from '../../api/client'
 import { useAuthStore } from './auth-store'
 
-const props = defineProps<{ order: PaymentOrderDto | null }>()
+const props = defineProps<{ order: PaymentOrderDto | null; displayedAmount?: number | null }>()
 const emit = defineEmits<{ close: []; paid: []; retry: [] }>()
 const auth = useAuthStore()
 const codeUrl = ref('')
@@ -88,6 +88,7 @@ onUnmounted(stop)
     <div class="payment-content" aria-live="polite">
       <p>{{ order?.product_type === 'bean_pack' ? order.bean_pack_name : order?.plan_name }}</p>
       <strong class="payment-price">¥{{ ((order?.amount_cents || 0) / 100).toFixed(2) }}</strong>
+      <p v-if="order && displayedAmount != null && order.amount_cents !== displayedAmount">此订单按下单时价格支付</p>
       <a-spin v-if="loading" tip="正在获取支付二维码" />
       <template v-else-if="codeUrl && !expired && !terminal && status !== 'paid'">
         <a-qrcode :value="codeUrl" :size="220" error-level="M" />

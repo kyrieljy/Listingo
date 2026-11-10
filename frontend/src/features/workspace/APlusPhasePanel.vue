@@ -31,6 +31,7 @@ import {
   ocrAplusItemText,
   retryAplusItem,
   retryFailedAplusItems,
+  apiErrorStatus,
   uploadAsset,
   userFacingApiErrorMessage,
   type AplusItem,
@@ -407,13 +408,18 @@ async function filesSelected(event: Event) {
   const files = selectedFiles.slice(0, remaining)
   if (selectedFiles.length > remaining) message.warning(`最多上传 ${PRODUCT_IMAGE_UPLOAD_LIMIT} 张商品图，本次只添加 ${remaining} 张`)
   if (!files.length) return
+  if (!authStore.isAuthenticated) {
+    input.value = ''
+    message.warning('请先登录后再尝试上传')
+    return
+  }
   clearCopywritingState()
   uploading.value = true
   try {
     for (const file of files) assets.value.push(await uploadAsset(file))
     message.success('商品图上传成功')
-  } catch {
-    message.error('上传失败，请确认后端已启动且图片格式合法')
+  } catch (error) {
+    message.error(apiErrorStatus(error) === 401 ? '请先登录后再尝试上传' : userFacingApiErrorMessage(error))
   } finally {
     uploading.value = false
     input.value = ''
@@ -498,7 +504,7 @@ function toggleAdvancedTarget(target: 'web' | 'mobile') {
 }
 
 async function aiWrite() {
-  if (requireAuthForModelAction()) return
+  if (!assets.value.length || requireAuthForModelAction()) return
   trackAplusEvent('aplus_ai_copywriting_click', 'click', 'ai_copywriting', { asset_count: assets.value.length })
   helping.value = true
   try {
@@ -1292,7 +1298,7 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
         </div>
       </div>
       <button v-if="authStore.isAdmin && !assets.length" class="sample-button" type="button" @click="useSample">使用 Listingo 演示商品</button>
-          <a-tooltip :title="BATCH_LOCK_HINT" :disabled="authStore.canUseBatchGeneration">
+          <a-tooltip :title="authStore.canUseBatchGeneration ? undefined : BATCH_LOCK_HINT">
             <button
               class="sample-button batch-hosting-entry"
               type="button"
@@ -1312,7 +1318,7 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
     </section>
 
     <section class="form-section">
-      <div class="section-title"><span>3</span><strong>商品卖点与要求</strong><button :disabled="helping" @click="aiWrite"><ThunderboltOutlined />{{ helping ? '转写中...' : 'AI 转写' }}</button></div>
+      <div class="section-title"><span>3</span><strong>商品卖点与要求</strong><button :disabled="helping || !assets.length" @click="aiWrite"><ThunderboltOutlined />{{ helping ? '转写中...' : 'AI 转写' }}</button></div>
       <div class="markdown-input-frame aplus-product-info-markdown-frame">
         <div v-if="form.productInfo.trim() && !productInfoEditing" class="markdown-preview main-copy-preview" role="button" tabindex="0" aria-label="编辑商品卖点与要求" @click="showProductInfoEditor" @keydown.enter.prevent="showProductInfoEditor" @keydown.space.prevent="showProductInfoEditor" v-html="renderMarkdown(form.productInfo)"></div>
         <textarea v-else ref="productInfoInput" v-model="form.productInfo" class="aplus-product-info selling-points-input" rows="6" :placeholder="productInfoPlaceholder" @focus="productInfoEditing = true" @blur="productInfoEditing = false" />

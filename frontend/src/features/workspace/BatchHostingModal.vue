@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import {
-  BellOutlined,
   CheckOutlined,
   ClockCircleOutlined,
   DeleteOutlined,
@@ -547,7 +546,6 @@ async function submitBatch() {
     </template>
 
     <div class="batch-modal-toolbar">
-      <button type="button" class="ghost-action disabled-action"><BellOutlined />通知设置</button>
       <button type="button" class="ghost-action" :disabled="submitting" @click="clearBatchDraft"><DeleteOutlined />清空</button>
       <button type="button" class="ghost-action" @click="openBatchHistory"><ClockCircleOutlined />生成记录</button>
     </div>

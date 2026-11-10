@@ -130,6 +130,7 @@ from backend.app.services.runtime_cache import (
 )
 from backend.app.services.sms import load_sms_config, send_sms_code
 from backend.app.services.subscriptions import (
+    resolve_user_plan,
     billing_settings,
     list_subscription_plans,
     serialize_order,
@@ -1178,7 +1179,7 @@ async def health_check_provider_group(group_key: str, request: Request, session:
 @router.get("/users")
 def list_users(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     users = session.scalars(select(User).order_by(User.created_at.desc())).all()
-    return [public_user(user) for user in users]
+    return [{**public_user(user), "effective_plan": resolve_user_plan(session, user).code} for user in users]
 
 
 @router.patch("/users/{user_id}")

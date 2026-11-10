@@ -62,7 +62,7 @@ export const useAuthStore = defineStore('auth', () => {
   const plans = computed<MembershipPlan[]>(() => plansRaw.value.length ? plansRaw.value.map((plan) => planFromDto(plan)) : fallbackPlans)
   const isAuthenticated = computed(() => Boolean(user.value))
   const isAdmin = computed(() => user.value?.role === 'admin')
-  const currentPlan = computed(() => planByKey(plans.value, user.value?.plan ?? 'free'))
+  const currentPlan = computed(() => beanSummary.value ? planFromDto(beanSummary.value.plan) : planByKey(plans.value, user.value?.plan ?? 'free'))
   const userAvatarUrl = computed(() => avatarDataUrl.value)
   const canExportWithoutWatermark = computed(() => Boolean(
     user.value
@@ -122,6 +122,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function applyAuthResponse(response: { user: Parameters<typeof toAuthUser>[0] | null; unread_count: number }): void {
+    if (user.value?.id !== response.user?.id) beanSummary.value = null
     user.value = response.user ? toAuthUser(response.user) : null
     unreadCount.value = response.unread_count
     loadStoredAvatar(user.value)

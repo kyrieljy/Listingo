@@ -223,10 +223,10 @@ function ocrAutoPrewarmSummary(){const status=ocrSettings.value?.prewarm_status;
             <tbody>
               <tr v-for="user in adminUsers" :key="user.id">
                 <td><div class="admin-user-cell"><i>{{ userInitial(user) }}</i><span><b>{{ user.display_name }}</b><small>{{ user.uid }} / {{ user.username || '未设置用户名' }}</small></span></div></td>
-                <td><span class="admin-muted-text">{{ user.phone_masked }}</span></td>
+                <td><span class="admin-muted-text">{{ user.phone }}</span></td>
                 <td><select v-model="user.role" class="admin-compact-select"><option value="user">普通用户</option><option value="admin">管理员</option></select></td>
                 <td><select v-model="user.status" class="admin-compact-select"><option value="active">正常</option><option value="disabled">停用</option></select></td>
-                <td><select v-model="user.plan" class="admin-compact-select plan"><option v-for="plan in adminPlanOptions(user)" :key="plan.code" :value="plan.code">{{ plan.name }}</option></select></td>
+                <td><span v-if="user.effective_plan && user.effective_plan !== user.plan" class="admin-muted-text">后台设置 </span><select v-model="user.plan" class="admin-compact-select plan"><option v-for="plan in adminPlanOptions(user)" :key="plan.code" :value="plan.code">{{ plan.name }}</option></select><small v-if="user.effective_plan && user.effective_plan !== user.plan" class="admin-muted-text"> 当前生效：{{ adminPlans.find((plan) => plan.code === user.effective_plan)?.name || user.effective_plan }}</small></td>
                 <td><button class="admin-soft-button" @click="saveAdminUser(user)">保存</button></td>
               </tr>
             </tbody>

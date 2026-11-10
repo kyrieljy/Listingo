@@ -14,7 +14,7 @@ import {
   UserOutlined,
   WechatOutlined,
 } from '@ant-design/icons-vue'
-import posterUrl from '../../assets/listingo-login-poster.png'
+import posterUrl from '../../assets/listingo-login-poster.webp'
 import { useAuthStore } from './auth-store'
 
 type LoginMethod = 'sms' | 'password'
@@ -73,6 +73,7 @@ const countryDropdownOpen = ref<'sms' | ''>('')
 const countryPicker = ref<HTMLElement | null>(null)
 let smsTimer: ReturnType<typeof window.setInterval> | null = null
 let adminTimer: ReturnType<typeof window.setInterval> | null = null
+let cancelPosterWarmup: (() => void) | undefined
 
 const passwordIsAdmin = computed(() => passwordIdentifier.value.trim().toLowerCase().includes('admin'))
 const firstPasswordMode = computed(() => Boolean(authStore.user?.firstPasswordPending))
@@ -120,6 +121,20 @@ async function loadWechatStatus(): Promise<boolean> {
 
 onMounted(async () => {
   document.addEventListener('click', closeCountryDropdownOutside, true)
+  const warmPoster = () => {
+    if (props.open || authStore.isAuthenticated) return
+    const poster = new Image()
+    poster.fetchPriority = 'low'
+    poster.src = posterUrl
+    void poster.decode().catch(() => {})
+  }
+  if (typeof window.requestIdleCallback === 'function') {
+    const id = window.requestIdleCallback(warmPoster, { timeout: 1500 })
+    cancelPosterWarmup = () => window.cancelIdleCallback(id)
+  } else {
+    const id = window.setTimeout(warmPoster, 250)
+    cancelPosterWarmup = () => window.clearTimeout(id)
+  }
   const { wechat, ...query } = route.query
   if (typeof wechat !== 'string') return
   await router.replace({ query })
@@ -276,6 +291,7 @@ async function submit(): Promise<void> {
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', closeCountryDropdownOutside, true)
+  cancelPosterWarmup?.()
   clearTimer('sms')
   clearTimer('admin')
 })

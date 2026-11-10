@@ -104,7 +104,7 @@ describe('auth model', () => {
     expect(authModalSource).toContain('buildPhoneNumber')
     expect(authModalSource).toContain('phoneCountryPrefix')
     expect(authModalSource).toContain('auth-country-menu')
-    expect(authModalSource).toContain('listingo-login-poster.png')
+    expect(authModalSource).toContain('listingo-login-poster.webp')
     expect(authModalSource).toContain('绑定手机号')
     expect(authModalSource).not.toContain('验证后将关联已有 Listingo 账号')
     expect(authCssSource).toContain('height: min(680px, calc(100vh - 48px))')

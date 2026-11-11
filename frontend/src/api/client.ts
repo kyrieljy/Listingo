@@ -262,7 +262,12 @@ export type BillingCycle = 'monthly' | 'yearly'
 export type EntitlementValue = boolean | string | number
 export type PlanEntitlements = Record<string, EntitlementValue>
 
+export async function acknowledgeWatermarkApi(): Promise<void> {
+  await api.put('/account/watermark-acknowledgement')
+}
+
 export type AuthUserDto = {
+  watermark_acknowledged?: boolean
   id: string
   phone: string
   phone_masked: string
@@ -427,7 +432,7 @@ export async function assistCopywriting(payload: {
   language: string
   selling_points: string
   dry_run: boolean
-}): Promise<{ selling_points: string; dry_run: boolean; provider_code: string | null }> {
+}): Promise<{ record_id?: string | null; selling_points: string; dry_run: boolean; provider_code: string | null }> {
   return (await api.post('/copywriting-assist', payload)).data
 }
 

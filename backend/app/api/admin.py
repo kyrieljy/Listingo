@@ -37,6 +37,7 @@ from backend.app.models import (
     User,
     Workflow,
     WorkflowVersion,
+    WechatIdentity,
 )
 from backend.app.schemas import (
     AdminBeanPackCreate,
@@ -68,6 +69,7 @@ from backend.app.schemas import (
     WorkflowVersionCreate,
 )
 from backend.app.security import mask_api_key
+from backend.app.services.admin_user_history import HistoryKind, history_detail, list_history
 from backend.app.services.auth import public_user, require_admin
 from backend.app.services.analytics import (
     build_business_metric_users,
@@ -1180,13 +1182,43 @@ async def health_check_provider_group(group_key: str, request: Request, session:
 
 
 @router.get("/users")
-def list_users(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+def list_users(request: Request, session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     users = session.scalars(select(User).order_by(User.created_at.desc())).all()
+    app_id = request.app.state.settings.wechat_login_app_id
+    openids = dict(session.execute(
+        select(WechatIdentity.user_id, WechatIdentity.openid).where(WechatIdentity.app_id == app_id)
+    ).all()) if app_id else {}
     result = []
     for user in users:
         plan = resolve_user_plan(session, user)
-        result.append({**public_user(user), "effective_plan": plan.code, "effective_plan_name": plan.name})
+        result.append({
+            **public_user(user), "effective_plan": plan.code, "effective_plan_name": plan.name,
+            "wechat_openid": openids.get(user.id), "admin_note": user.admin_note,
+        })
     return result
+
+
+@router.get("/users/{user_id}/image-history")
+def user_image_history(
+    user_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    if session.get(User, user_id) is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return list_history(session, user_id, offset, limit)
+
+
+@router.get("/users/{user_id}/image-history/{kind}/{job_id}")
+def user_image_history_detail(
+    request: Request,
+    user_id: str,
+    kind: HistoryKind,
+    job_id: str,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    return history_detail(session, user_id, kind, job_id, request.app.state.settings.data_dir)
 
 
 @router.get("/users/subscription-grant-plans")
@@ -1225,8 +1257,10 @@ def update_user(user_id: str, payload: AdminUserUpdate, session: Session = Depen
         user.role = updates["role"]
     if updates.get("status") is not None:
         user.status = updates["status"]
+    if "admin_note" in updates:
+        user.admin_note = updates["admin_note"]
     session.commit()
-    return public_user(user)
+    return {**public_user(user), "admin_note": user.admin_note}
 
 
 @router.get("/subscription-plans")

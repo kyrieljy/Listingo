@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from backend.app.models import AplusJob, Asset, GenerationJob, PromptVersion
+from backend.app.models import AplusJob, Asset, CopywritingRecord, GenerationJob, PromptVersion
 from backend.app.schemas import AplusGenerationJobCreate, AplusPlanJobCreate, GenerationJobCreate
 from backend.app.services.aplus_jobs import create_aplus_generation_job_from_plan, load_aplus_job
 from backend.app.services.content_safety import ContentSafetyBlocked, ensure_content_safe, run_local_text_safety_review
@@ -25,6 +25,13 @@ class TaskCreationError(Exception):
         self.status_code = status_code
         self.detail = detail
         super().__init__(detail)
+
+
+def _ensure_copywriting_record(session: Session, record_id: str | None, user_id: str | None) -> None:
+    if record_id is not None:
+        record = session.get(CopywritingRecord, record_id)
+        if record is None or record.user_id != user_id:
+            raise TaskCreationError(422, "Invalid copywriting record")
 
 
 def _ensure_assets(
@@ -77,6 +84,7 @@ def create_generation_job_record(
     is_admin_test: bool = False,
     user_id: str | None = None,
 ) -> GenerationJob:
+    _ensure_copywriting_record(session, payload.copywriting_record_id, user_id)
     _ensure_assets(session, payload.asset_ids, max_asset_count, user_id=user_id)
     if not payload.dry_run:
         try:
@@ -99,7 +107,7 @@ def create_generation_job_record(
 
     params = payload.model_dump()
     params["_prompt_versions"] = prompt_versions
-    _ensure_text_safe(payload.model_dump(exclude={"asset_ids", "dry_run"}))
+    _ensure_text_safe(payload.model_dump(exclude={"asset_ids", "dry_run", "copywriting_record_id"}))
     job = GenerationJob(
         user_id=user_id,
         status="queued",
@@ -125,8 +133,9 @@ def create_aplus_plan_job_record(
     is_admin_test: bool = False,
     user_id: str | None = None,
 ) -> AplusJob:
+    _ensure_copywriting_record(session, payload.copywriting_record_id, user_id)
     _ensure_assets(session, payload.asset_ids, max_asset_count, user_id=user_id)
-    _ensure_text_safe(payload.model_dump(exclude={"asset_ids", "dry_run"}))
+    _ensure_text_safe(payload.model_dump(exclude={"asset_ids", "dry_run", "copywriting_record_id"}))
     if not payload.dry_run:
         try:
             _enabled_provider(session, "llm", "default")

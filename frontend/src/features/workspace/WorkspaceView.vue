@@ -56,10 +56,13 @@ const selected = ref<string[]>([]); const editInstruction = ref(''); const editS
 const suiteEditPlaceholder = '写下这次想调整的画面；不填则按当前版本重新生成。比如：让背景更清爽、主体位置微调、保留商品外观。'
 const textEditLines = ref<ImageTextEditLine[]>([]); const textEditLoading = ref(false); const textEditSubmitting = ref(false)
 const textEditPanelStyle = ref<CSSProperties>({})
-const includeWatermark = ref(true)
+const watermarkOverride = ref<boolean | null>(null)
+const includeWatermark = computed(() => allowedIncludeWatermark(watermarkOverride.value ?? authStore.defaultIncludeWatermark))
 const batchSuiteWatermarkByItemId = ref<Record<string, boolean>>({})
 const aiSuggestion = ref(''); const aiWriteOpen = ref(false); const preferenceOpen = ref(false); const sellingPointsEditing = ref(false)
 const aiSuggestionEditing = ref(false)
+const suggestedCopywritingId = ref<string | null>(null)
+const appliedCopywritingId = ref<string | null>(null)
 const sellingPointsInput = ref<HTMLTextAreaElement | null>(null); const aiSuggestionInput = ref<HTMLTextAreaElement | null>(null)
 const form = ref(createDefaultWorkspaceForm())
 const IMAGE_JOB_POLL_INTERVAL_MS = 500
@@ -182,7 +185,7 @@ function allowedIncludeWatermark(value: boolean): boolean {
 }
 
 function suiteGroupIncludeWatermark(group: BatchSuiteResultGroup): boolean {
-  return batchSuiteWatermarkByItemId.value[group.item.id] ?? includeWatermark.value
+  return allowedIncludeWatermark(batchSuiteWatermarkByItemId.value[group.item.id] ?? includeWatermark.value)
 }
 
 function suiteItemIncludeWatermark(itemId: string): boolean {
@@ -338,12 +341,10 @@ watch(phase, () => {
 watch(() => job.value?.id, () => {
   closeTextEdit()
 })
-watch(() => authStore.canExportWithoutWatermark, (canExportWithoutWatermark) => {
-  if (!canExportWithoutWatermark) {
-    includeWatermark.value = true
-    syncSuiteGroupWatermarks(true)
-  }
-})
+watch([() => authStore.user?.id, () => authStore.canExportWithoutWatermark], () => {
+  watermarkOverride.value = null
+  batchSuiteWatermarkByItemId.value = {}
+}, { flush: 'sync' })
 onMounted(async () => {
   window.addEventListener('resize', updateTextEditPanelPosition)
   window.addEventListener('scroll', updateTextEditPanelPosition, true)
@@ -558,7 +559,7 @@ function openPricingFromInsufficientBeans(view: 'plans' | 'packs') {
   openPricing(view)
 }
 function updateIncludeWatermark(value: boolean) {
-  includeWatermark.value = allowedIncludeWatermark(value)
+  watermarkOverride.value = allowedIncludeWatermark(value)
   if (batchSuiteActive.value) syncSuiteGroupWatermarks(includeWatermark.value)
 }
 async function loadPhaseHistory() {
@@ -602,6 +603,7 @@ function clearCopywritingState() {
   aiWriteOpen.value = false
   aiSuggestionEditing.value = false
   sellingPointsEditing.value = false
+  appliedCopywritingId.value = null
   form.value.sellingPoints = ''
 }
 function removeAsset(id: string) {
@@ -609,6 +611,8 @@ function removeAsset(id: string) {
   clearCopywritingState()
 }
 function resetSuiteTask() {
+  watermarkOverride.value = null
+  appliedCopywritingId.value = null
   assets.value = []; job.value = null; selected.value = []; activeItem.value = null
   clearBatchSuiteResults()
   previewOpen.value = false; editOpen.value = false; editSubmitting.value = false; confirmOpen.value = false; aiWriteOpen.value = false; aiSuggestion.value = ''; historyOpen.value = false; mobileOpen.value = false; preferenceOpen.value = false; sellingPointsEditing.value = false; aiSuggestionEditing.value = false
@@ -662,6 +666,7 @@ async function aiWrite() {
   helping.value = true
   try {
     const result = await assistCopywriting({ asset_ids: assets.value.map((asset) => asset.id), platform: form.value.platform, market: form.value.market, language: form.value.language, selling_points: form.value.sellingPoints, dry_run: authStore.isAdmin ? form.value.dryRun : false })
+    suggestedCopywritingId.value = result.record_id ?? null
     aiSuggestion.value = result.selling_points; aiSuggestionEditing.value = false; aiWriteOpen.value = true
   } catch (error: unknown) { handleRequestError(error, 'AI 帮写失败，请检查语言模型配置') }
   finally { helping.value = false }
@@ -671,6 +676,7 @@ function applyAiSuggestion() {
   if (!aiSuggestion.value.trim()) return message.warning('AI 建议为空，请重新帮写')
   trackSuiteEvent('suite_ai_copywriting_apply', 'click', 'ai_copywriting')
   form.value.sellingPoints = aiSuggestion.value.trim()
+  appliedCopywritingId.value = suggestedCopywritingId.value
   aiSuggestion.value = ''
   aiSuggestionEditing.value = false
   aiWriteOpen.value = false
@@ -731,7 +737,10 @@ async function runConfirmedGeneration() {
   cancelRequested.value = false
   try {
     clearBatchSuiteResults()
-    const payload = buildGenerationPayload(assets.value.map((a) => a.id), form.value.sellingPoints, form.value)
+    const payload = {
+      ...buildGenerationPayload(assets.value.map((a) => a.id), form.value.sellingPoints, form.value),
+      copywriting_record_id: appliedCopywritingId.value,
+    }
     trackSuiteEvent('suite_generate_submit', 'submit', 'suite', { asset_count: assets.value.length, output_count: Number(payload.count || count.value) })
     job.value = createOptimisticJob(payload)
     selected.value = []
@@ -1116,6 +1125,9 @@ async function openHistoryJob(entry: HistoryEntry) {
                 :selected-count="selected.length"
                 :include-watermark="includeWatermark"
                 :can-export-without-watermark="authStore.canExportWithoutWatermark"
+                :account-id="authStore.user?.id"
+                :acknowledgement-saved="authStore.user?.watermarkAcknowledged"
+                :save-acknowledgement="authStore.acknowledgeWatermark"
                 :options="[{ format: 'zip', label: '下载批量结果 ZIP' }, { format: 'long_image', label: '下载长拼图 PNG' }]"
                 @update:include-watermark="updateIncludeWatermark"
                 @download="download"
@@ -1137,6 +1149,9 @@ async function openHistoryJob(entry: HistoryEntry) {
                   :selected-count="suiteGroupSelectedIds(group).length"
                   :include-watermark="suiteGroupIncludeWatermark(group)"
                   :can-export-without-watermark="authStore.canExportWithoutWatermark"
+                  :account-id="authStore.user?.id"
+                  :acknowledgement-saved="authStore.user?.watermarkAcknowledged"
+                  :save-acknowledgement="authStore.acknowledgeWatermark"
                   :options="[{ format: 'zip', label: '下载本任务 ZIP' }, { format: 'long_image', label: '下载本任务长图 PNG' }]"
                   @update:include-watermark="(value) => updateSuiteGroupIncludeWatermark(group, value)"
                   @download="(format) => downloadSuiteBatchGroup(group, format)"
@@ -1169,6 +1184,9 @@ async function openHistoryJob(entry: HistoryEntry) {
                 :selected-count="selected.length"
                 :include-watermark="includeWatermark"
                 :can-export-without-watermark="authStore.canExportWithoutWatermark"
+                :account-id="authStore.user?.id"
+                :acknowledgement-saved="authStore.user?.watermarkAcknowledged"
+                :save-acknowledgement="authStore.acknowledgeWatermark"
                 :options="[{ format: 'zip', label: '下载套图 ZIP' }, { format: 'long_image', label: '下载长拼图 PNG' }]"
                 @update:include-watermark="updateIncludeWatermark"
                 @download="download"
@@ -1194,7 +1212,7 @@ async function openHistoryJob(entry: HistoryEntry) {
       <div class="version-strip"><button v-for="version in activeItem?.versions" :key="version.id" @click="activeItem && (activeItem.current_version_id=version.id)">V{{ version.version_no }} · {{ version.instruction }}</button></div>
     </a-modal>
     <a-modal v-model:open="scriptOpen" title="图片脚本" :footer="null" width="760"><div v-if="activeItem" class="aplus-script-preview" v-html="renderMarkdown(activeItemScript)" /></a-modal>
-    <a-modal v-model:open="editOpen" title="二次编辑" ok-text="重新生成" cancel-text="取消" :confirm-loading="editSubmitting" @ok="submitEdit"><div class="edit-dialog"><img :src="currentPreview" alt="当前版本"/><label>修改要求<textarea v-model="editInstruction" rows="5" :placeholder="suiteEditPlaceholder"/></label><p>Live 时将使用“当前版本图 + 原始商品图 + 修改要求”调用改图模型；Dryrun 使用本地资产演示版本链。</p></div></a-modal>
+    <a-modal v-model:open="editOpen" title="二次编辑" ok-text="重新生成" cancel-text="取消" :confirm-loading="editSubmitting" @ok="submitEdit"><div class="edit-dialog"><img :src="currentPreview" alt="当前版本"/><label>修改要求<textarea v-model="editInstruction" rows="5" :placeholder="suiteEditPlaceholder"/></label></div></a-modal>
     <ImageTextEditPanel
       v-model:lines="textEditLines"
       :dirty="textEditDirty"

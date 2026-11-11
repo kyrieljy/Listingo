@@ -14,6 +14,7 @@ from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
+from backend.app.services.image_prompt_history import record_image_prompt
 from backend.app.config import Settings
 from backend.app.models import AplusItem, AplusJob, AplusVersion, Asset, ExecutionLog, PromptVersion, utcnow
 from backend.app.schemas import A_PLUS_MODULE_TOTAL_LIMIT
@@ -663,6 +664,7 @@ async def create_live_aplus_child_version(
         f"Original module payload:\n{item.prompt_text}\n\n"
         f"User edit instruction:\n{instruction}"
     )
+    record_image_prompt(session, job_id=job.id, item_id=item.id, prompt=prompt, aplus=True, instruction=instruction)
     client = ProviderClient()
 
     async def generate(provider_code: str) -> bytes:
@@ -1181,6 +1183,7 @@ async def _run_generation_item(
         provider_code = _aplus_atlas_provider_code(item.output_mode)
         provider_display_names = provider_display_names_by_code(session, [provider_code])
         prompt = build_aplus_generation_prompt(item)
+        record_image_prompt(session, job_id=job.id, item_id=item.id, prompt=prompt, aplus=True)
 
     try:
         async def generate() -> bytes:

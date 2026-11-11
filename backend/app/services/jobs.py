@@ -12,6 +12,7 @@ from PIL import Image, UnidentifiedImageError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from backend.app.services.image_prompt_history import record_image_prompt
 from backend.app.config import Settings
 from backend.app.models import (
     Asset,
@@ -1005,7 +1006,7 @@ async def _run_live_item(
         item.status = "running"
         prompt = generation_prompt_from_item(item)
         provider_display_names = provider_display_names_by_code(session, provider_codes)
-        session.commit()
+        record_image_prompt(session, job_id=job.id, item_id=item.id, prompt=prompt)
 
     async def generate(provider_code: str) -> bytes:
         with session_factory() as session:
@@ -1242,6 +1243,7 @@ async def create_live_regenerated_child_version(
     image_codes, preferred_code = regenerate_provider_route(session, item, route_key)
     provider_display_names = provider_display_names_by_code(session, image_codes)
     prompt = generation_prompt_from_item(item)
+    record_image_prompt(session, job_id=item.job_id, item_id=item.id, prompt=prompt, instruction="regenerate")
 
     async def generate(provider_code: str) -> bytes:
         provider = cached_provider_by_code(session, provider_code)
@@ -1434,6 +1436,8 @@ async def create_live_child_version(
         prompt = json.loads(rewritten)["prompt"]
     except Exception:
         prompt = rewritten
+    record_image_prompt(session, job_id=item.job_id, item_id=item.id, prompt=prompt, instruction=instruction)
+
     async def generate(provider_code: str) -> bytes:
         provider = cached_provider_by_code(session, provider_code)
         if not provider or not provider.encrypted_api_key:

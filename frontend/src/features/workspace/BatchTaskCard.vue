@@ -243,6 +243,7 @@ function applyAiSuggestion() {
   if (!props.task.aiSuggestion.trim()) return
   patch({
     sellingPoints: props.task.aiSuggestion.trim(),
+    appliedCopywritingId: props.task.suggestedCopywritingId,
     aiWriteOpen: false,
     aiSuggestionEditing: false,
     aiSuggestion: '',

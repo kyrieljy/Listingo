@@ -2,6 +2,7 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { message } from 'ant-design-vue'
 import {
+  acknowledgeWatermarkApi,
   changePasswordApi,
   confirmChangePhoneApi,
   confirmWechatPhoneApi,
@@ -68,6 +69,17 @@ export const useAuthStore = defineStore('auth', () => {
     user.value
     && (user.value.role === 'admin' || paidExportPlans.has(user.value.plan)),
   ))
+  const defaultIncludeWatermark = computed(() => !canExportWithoutWatermark.value || !user.value?.watermarkAcknowledged)
+
+  async function acknowledgeWatermark(): Promise<boolean> {
+    const accountId = user.value?.id
+    if (!accountId || !canExportWithoutWatermark.value) return false
+    await acknowledgeWatermarkApi()
+    if (user.value?.id !== accountId || !canExportWithoutWatermark.value) return false
+    user.value.watermarkAcknowledged = true
+    return true
+  }
+
   const canUseBatchGeneration = computed(() => hasEntitlement(currentPlan.value, 'batch_generation'))
   const historyItems = computed<AccountHistoryItem[]>(() => [])
 
@@ -325,6 +337,8 @@ export const useAuthStore = defineStore('auth', () => {
     currentPlan,
     userAvatarUrl,
     canExportWithoutWatermark,
+    defaultIncludeWatermark,
+    acknowledgeWatermark,
     canUseBatchGeneration,
     historyItems,
     hydrate,

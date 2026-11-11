@@ -58,6 +58,7 @@ class AssetOut(BaseModel):
 
 
 class GenerationJobCreate(BaseModel):
+    copywriting_record_id: str | None = Field(default=None, max_length=36)
     asset_ids: list[str] = Field(min_length=1, max_length=6)
     platform: str = Field(min_length=1, max_length=80)
     market: str = Field(min_length=1, max_length=80)
@@ -125,6 +126,7 @@ class CopywritingAssistCreate(BaseModel):
 
 
 class CopywritingAssistOut(BaseModel):
+    record_id: str | None = None
     selling_points: str
     dry_run: bool
     provider_code: str | None = None
@@ -266,6 +268,7 @@ class AplusModuleSelection(BaseModel):
 
 
 class AplusPlanJobCreate(BaseModel):
+    copywriting_record_id: str | None = Field(default=None, max_length=36)
     asset_ids: list[str] = Field(min_length=1, max_length=6)
     platform: str = Field(min_length=1, max_length=80)
     market: str = Field(min_length=1, max_length=80)
@@ -533,6 +536,7 @@ class WorkspaceConfigOut(BaseModel):
 
 
 class BatchItemCreate(BaseModel):
+    copywriting_record_id: str | None = Field(default=None, max_length=36)
     asset_ids: list[str] = Field(min_length=1, max_length=6)
     name: str = Field(default="", max_length=200)
     selling_points: str = Field(default="", max_length=6000)
@@ -713,6 +717,7 @@ class FirstPasswordCreate(BaseModel):
 
 
 class AuthUserOut(BaseModel):
+    watermark_acknowledged: bool = False
     id: str
     phone: str
     phone_masked: str
@@ -966,6 +971,7 @@ class NotificationOut(BaseModel):
 
 
 class AdminUserUpdate(BaseModel):
+    admin_note: str = Field(default="", max_length=1000)
     role: Literal["user", "admin"] | None = None
     status: Literal["active", "disabled"] | None = None
     plan_code: str | None = Field(default=None, max_length=40)

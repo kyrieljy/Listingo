@@ -116,6 +116,7 @@ def _suite_params(global_params: dict[str, Any], item: Any) -> dict[str, Any]:
     params.update(overrides)
     if params.get("ratio") and not params.get("aspect_ratio"):
         params["aspect_ratio"] = params["ratio"]
+    params["copywriting_record_id"] = item.copywriting_record_id
     params["asset_ids"] = item.asset_ids
     params["product_name"] = item.name or params.get("product_name") or ""
     params["selling_points"] = item.selling_points or params.get("selling_points") or params["product_name"]
@@ -144,6 +145,7 @@ def _aplus_params(global_params: dict[str, Any], item: Any) -> dict[str, Any]:
     if item.selling_points:
         parts.append(f"Selling points: {item.selling_points}")
     params["product_info"] = product_info or "\n".join(parts)
+    params["copywriting_record_id"] = item.copywriting_record_id
     params["asset_ids"] = item.asset_ids
     return _compact_dict(params)
 

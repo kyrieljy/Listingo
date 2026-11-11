@@ -22,6 +22,7 @@ from backend.app.models import (
     AplusVersion,
     BatchItem,
     BatchJob,
+    CopywritingRecord,
     ExecutionLog,
     GenerationItem,
     GenerationJob,
@@ -141,7 +142,7 @@ from backend.app.services.video_jobs import (
     run_video_job,
 )
 from backend.app.services.watermarking import apply_ai_watermark
-from backend.app.services.auth import ensure_owner_access, get_current_user, get_optional_user
+from backend.app.services.auth import can_export_without_watermark, ensure_owner_access, get_current_user, get_optional_user
 from backend.app.services.subscriptions import (
     BEANS_PER_IMAGE,
     assert_beans_sufficient,
@@ -241,23 +242,11 @@ def raise_task_creation_error(exc: TaskCreationError) -> None:
     raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
-PAID_EXPORT_PLANS = {
-    "standard",
-    "advanced",
-    "enterprise",
-    "internal",
-    "monthly_basic",
-    "monthly_standard",
-    "monthly_pro",
-    "yearly_basic",
-    "yearly_standard",
-    "yearly_flagship",
-}
 MONITORING_FIXTURE_JOB_ID_PREFIX = "demo-monitor-"
 
 
 def enforce_watermark_access(current_user: User, include_watermark: bool) -> None:
-    if include_watermark or current_user.current_plan_code in PAID_EXPORT_PLANS or current_user.role == "admin":
+    if include_watermark or can_export_without_watermark(current_user):
         return
     raise HTTPException(status_code=403, detail="当前套餐不支持无水印下载，请升级订阅")
 
@@ -971,8 +960,10 @@ async def assist_copywriting(
                 dry_run=True,
             )
         )
+        record = CopywritingRecord(user_id=current_user.id, original_input=payload.selling_points, rewritten_text=result)
+        session.add(record)
         session.commit()
-        return CopywritingAssistOut(selling_points=result, dry_run=True)
+        return CopywritingAssistOut(record_id=record.id, selling_points=result, dry_run=True)
 
     prompt = session.scalar(select(Prompt).where(Prompt.code == "copywriting-assist"))
     prompt_version = session.get(PromptVersion, prompt.active_version_id) if prompt and prompt.active_version_id else None
@@ -1063,8 +1054,13 @@ async def assist_copywriting(
             dry_run=False,
         )
     )
+    record = CopywritingRecord(
+        user_id=current_user.id, original_input=payload.selling_points, rewritten_text=selling_points.strip(),
+    )
+    session.add(record)
     session.commit()
     return CopywritingAssistOut(
+        record_id=record.id,
         selling_points=selling_points.strip(),
         dry_run=False,
         provider_code=provider.code,

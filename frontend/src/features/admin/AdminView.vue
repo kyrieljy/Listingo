@@ -16,6 +16,7 @@ import BrandLogo from '../../components/BrandLogo.vue'
 import CommercialCatalogPanel from './CommercialCatalogPanel.vue'
 import EnterpriseLeadsPanel from './EnterpriseLeadsPanel.vue'
 import { api, assistCopywriting, assistVideoCopywriting, userFacingApiErrorMessage } from '../../api/client'
+import UserImageHistory from './UserImageHistory.vue'
 import MonitoringDashboard from './MonitoringDashboard.vue'
 import SensitiveWordsPanel from './SensitiveWordsPanel.vue'
 import {
@@ -77,6 +78,34 @@ const prewarmingOcr=ref(false)
 const clearingOcrCache=ref(false)
 const ocrEngineOptions=[{value:'paddleocr',label:'PaddleOCR（PP-OCRv6 优先）'},{value:'auto',label:'Auto（PaddleOCR + RapidOCR）'},{value:'rapidocr',label:'RapidOCR 兼容模式'}]
 const ocrModelOptions=computed(()=>ocrSettings.value.supported_models?.length?ocrSettings.value.supported_models:defaultOcrSettings.supported_models)
+const historyTarget = ref<{ id: string; display_name: string } | null>(null)
+const noteTarget = ref<{ id: string; display_name: string; admin_note: string } | null>(null)
+const noteDraft = ref('')
+const noteSaving = ref(false)
+const noteError = ref('')
+function openAdminNote(user: { id: string; display_name: string; admin_note: string }) {
+  noteTarget.value = user
+  noteDraft.value = user.admin_note ?? ''
+  noteError.value = ''
+}
+async function saveAdminNote() {
+  const user = noteTarget.value
+  if (!user || noteSaving.value) return
+  noteSaving.value = true
+  noteError.value = ''
+  try {
+    const { data } = await api.patch(`/admin/users/${user.id}`, { admin_note: noteDraft.value })
+    const row = adminUsers.value.find((entry) => entry.id === user.id)
+    if (row) row.admin_note = data.admin_note
+    noteTarget.value = null
+    message.success('备注已保存')
+  } catch (error) {
+    noteError.value = adminApiErrorMessage(error, '备注保存失败，请重试')
+  } finally {
+    noteSaving.value = false
+  }
+}
+
 const adminUsers=ref<any[]>([]); const adminPlans=ref<any[]>([]); const adminOrders=ref<any[]>([]); const smsSettings=ref<any>({}); const smsTest=ref({phone:'18928268686',purpose:'login'}); const smsTesting=ref(false); const smsTestResult=ref<any|null>(null); const broadcast=ref({title:'',body:''})
 type GrantPlan = { code: string; name: string; billing_cycle: string; beans: number }
 const grantPlans = ref<GrantPlan[]>([])
@@ -275,14 +304,16 @@ function ocrAutoPrewarmSummary(){const status=ocrSettings.value?.prewarm_status;
             <input v-model="showPlanDiscrepancies" type="checkbox" /> 仅看套餐设置差异（{{ planDiscrepancies.length }}）
           </label>
           <table class="admin-data-table">
-            <thead><tr><th>用户</th><th>手机号</th><th>角色</th><th>状态</th><th>当前生效套餐</th><th></th></tr></thead>
+            <thead><tr><th>用户</th><th>手机号</th><th>微信 OpenID</th><th>备注</th><th>角色</th><th>状态</th><th>当前生效套餐</th><th></th></tr></thead>
             <tbody>
               <tr v-if="showPlanDiscrepancies && !planDiscrepancies.length">
-                <td colspan="6" class="admin-muted-text">没有套餐设置差异</td>
+                <td colspan="8" class="admin-muted-text">没有套餐设置差异</td>
               </tr>
               <tr v-for="user in displayedAdminUsers" :key="user.id">
                 <td><div class="admin-user-cell"><i>{{ userInitial(user) }}</i><span><b>{{ user.display_name }}</b><small>{{ user.uid }} / {{ user.username || '未设置用户名' }}</small></span></div></td>
                 <td><span class="admin-muted-text">{{ user.phone }}</span></td>
+                <td style="max-width: 15rem; overflow-wrap: anywhere"><code v-if="user.wechat_openid">{{ user.wechat_openid }}</code><span v-else class="admin-muted-text">未绑定</span></td>
+                <td><button type="button" class="admin-soft-button" style="max-width: 13rem; overflow-wrap: anywhere; white-space: normal" @click="openAdminNote(user)">{{ user.admin_note ? (user.admin_note.length > 48 ? user.admin_note.slice(0, 48) + '…' : user.admin_note) : '添加备注' }}</button></td>
                 <td><select v-model="user.role" class="admin-compact-select"><option value="user">普通用户</option><option value="admin">管理员</option></select></td>
                 <td><select v-model="user.status" class="admin-compact-select"><option value="active">正常</option><option value="disabled">停用</option></select></td>
                 <td>
@@ -290,6 +321,7 @@ function ocrAutoPrewarmSummary(){const status=ocrSettings.value?.prewarm_status;
                   <small v-if="hasPlanDiscrepancy(user)" class="admin-muted-text">原设置：{{ adminPlans.find((plan) => plan.code === user.plan)?.name || user.plan }}</small>
                 </td>
                 <td>
+                  <button class="admin-soft-button" @click="historyTarget = user">生图历史</button>
                   <button class="admin-soft-button" @click="saveAdminUser(user)">保存账号</button>
                   <button v-if="user.role === 'user' && user.status === 'active'" class="admin-soft-button" @click="openSubscriptionGrant(user)">授予套餐</button>
                 </td>
@@ -297,6 +329,13 @@ function ocrAutoPrewarmSummary(){const status=ocrSettings.value?.prewarm_status;
             </tbody>
           </table>
         </div>
+        <UserImageHistory v-if="historyTarget" :key="historyTarget.id" :user="historyTarget" @close="historyTarget = null" />
+        <a-modal :open="!!noteTarget" title="编辑运营备注" ok-text="保存备注" cancel-text="取消"
+          :confirm-loading="noteSaving" @cancel="!noteSaving && (noteTarget = null)" @ok="saveAdminNote">
+          <p>{{ noteTarget?.display_name }}</p>
+          <a-textarea v-model:value="noteDraft" aria-label="运营备注" :rows="5" :maxlength="1000" show-count :disabled="noteSaving" />
+          <a-alert v-if="noteError" type="error" :message="noteError" show-icon />
+        </a-modal>
         <a-modal
           :open="!!grantTarget" title="授予套餐" ok-text="确认授予" cancel-text="取消"
           :confirm-loading="grantSubmitting" :ok-button-props="{ disabled: !selectedGrantPlan }"

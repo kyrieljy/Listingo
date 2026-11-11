@@ -18,6 +18,7 @@ from uuid import uuid4
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 from sqlalchemy.orm import Session
 
+from backend.app.services.image_prompt_history import record_image_prompt
 from backend.app.config import Settings
 from backend.app.core.runtime import RuntimeStateService, default_runtime
 from backend.app.core.storage.keys import cache_key
@@ -909,6 +910,7 @@ async def _run_live_text_edit(
     *,
     item_id: str,
     job_id: str,
+    aplus: bool = False,
     current_file_path: str,
     aspect_ratio: str,
     lines: list[ImageTextEditLine],
@@ -929,6 +931,10 @@ async def _run_live_text_edit(
     provider_display_names = provider_display_names_by_code(session, provider_codes)
     client = ProviderClient()
     input_paths = [current_file_path]
+    record_image_prompt(
+        session, job_id=job_id, item_id=item_id, prompt=edit_prompt, aplus=aplus,
+        instruction=build_replacements_table(changed),
+    )
 
     async def generate(provider_code: str) -> bytes:
         provider = cached_provider_by_code(session, provider_code)
@@ -1042,6 +1048,7 @@ async def create_live_aplus_text_version(
         job_id=item.job_id,
         current_file_path=current.file_path,
         aspect_ratio=item.aspect_ratio,
+        aplus=True,
         lines=lines,
         settings=settings,
         cipher=cipher,

@@ -12,6 +12,7 @@ import type {
 export type { PlanCode as PlanKey, UserRole, UserStatus }
 
 export type AuthUser = {
+  watermarkAcknowledged?: boolean
   id: string
   phone: string
   username: string
@@ -129,6 +130,7 @@ export function toAuthUser(dto: AuthUserDto): AuthUser {
     role: dto.role,
     status: dto.status,
     plan: dto.plan,
+    watermarkAcknowledged: dto.watermark_acknowledged ?? false,
     gender: dto.gender,
     bio: dto.bio,
     passwordSet: dto.password_set,

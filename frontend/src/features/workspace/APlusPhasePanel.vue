@@ -94,7 +94,8 @@ const generationJob = ref<AplusJob | null>(null)
 const batchAplusResults = ref<BatchAplusResultGroup[]>([])
 const selectedPlanItemIds = ref<string[]>([])
 const selectedResultIds = ref<string[]>([])
-const includeWatermark = ref(true)
+const watermarkOverride = ref<boolean | null>(null)
+const includeWatermark = computed(() => allowedIncludeWatermark(watermarkOverride.value ?? authStore.defaultIncludeWatermark))
 const batchAplusWatermarkByItemId = ref<Record<string, boolean>>({})
 const naturalAspectRatios = ref<Record<string, string>>({})
 const previewItem = ref<AplusItem | null>(null)
@@ -114,6 +115,8 @@ const aiWriteOpen = ref(false)
 const batchOpen = ref(false)
 const productInfoEditing = ref(false)
 const aiSuggestionEditing = ref(false)
+const suggestedCopywritingId = ref<string | null>(null)
+const appliedCopywritingId = ref<string | null>(null)
 const productInfoInput = ref<HTMLTextAreaElement | null>(null)
 const aiSuggestionInput = ref<HTMLTextAreaElement | null>(null)
 const APLUS_JOB_POLL_INTERVAL_MS = 500
@@ -280,7 +283,7 @@ function allowedIncludeWatermark(value: boolean): boolean {
 }
 
 function aplusGroupIncludeWatermark(group: BatchAplusResultGroup): boolean {
-  return batchAplusWatermarkByItemId.value[group.item.id] ?? includeWatermark.value
+  return allowedIncludeWatermark(batchAplusWatermarkByItemId.value[group.item.id] ?? includeWatermark.value)
 }
 
 function aplusItemIncludeWatermark(itemId: string): boolean {
@@ -351,12 +354,10 @@ watch(() => generationJob.value?.id, () => {
   closeTextEdit()
 })
 onActivated(() => { void resumeCurrentAplusJobRefresh() })
-watch(() => authStore.canExportWithoutWatermark, (canExportWithoutWatermark) => {
-  if (!canExportWithoutWatermark) {
-    includeWatermark.value = true
-    syncAplusGroupWatermarks(true)
-  }
-})
+watch([() => authStore.user?.id, () => authStore.canExportWithoutWatermark], () => {
+  watermarkOverride.value = null
+  batchAplusWatermarkByItemId.value = {}
+}, { flush: 'sync' })
 
 onMounted(() => {
   trackAplusEvent('aplus_view', 'view', 'aplus')
@@ -395,6 +396,7 @@ function clearCopywritingState() {
   aiWriteOpen.value = false
   aiSuggestionEditing.value = false
   productInfoEditing.value = false
+  appliedCopywritingId.value = null
   form.value.productInfo = ''
 }
 
@@ -523,6 +525,7 @@ async function aiWrite() {
       selling_points: form.value.productInfo,
       dry_run: dryRun.value,
     })
+    suggestedCopywritingId.value = result.record_id ?? null
     aiSuggestion.value = result.selling_points
     aiSuggestionEditing.value = false
     aiWriteOpen.value = true
@@ -541,6 +544,7 @@ function applyAiSuggestion() {
   if (!aiSuggestion.value.trim()) return message.warning('AI 转写内容为空，请重新生成')
   trackAplusEvent('aplus_ai_copywriting_apply', 'click', 'ai_copywriting')
   form.value.productInfo = aiSuggestion.value.trim()
+  appliedCopywritingId.value = suggestedCopywritingId.value
   aiSuggestion.value = ''
   aiSuggestionEditing.value = false
   aiWriteOpen.value = false
@@ -549,7 +553,7 @@ function applyAiSuggestion() {
 }
 
 function updateIncludeWatermark(value: boolean) {
-  includeWatermark.value = allowedIncludeWatermark(value)
+  watermarkOverride.value = allowedIncludeWatermark(value)
   if (batchAplusActive.value) syncAplusGroupWatermarks(includeWatermark.value)
 }
 
@@ -890,7 +894,10 @@ async function generateImages() {
     return
   }
   clearBatchAplusResults()
-  const planPayload = buildAplusPlanPayload(assets.value.map((asset) => asset.id), form.value)
+  const planPayload = {
+    ...buildAplusPlanPayload(assets.value.map((asset) => asset.id), form.value),
+    copywriting_record_id: appliedCopywritingId.value,
+  }
   const optimisticPlan = createOptimisticPlanJob(planPayload)
   planJob.value = optimisticPlan
   selectedPlanItemIds.value = optimisticPlan.items.map((item) => item.id)
@@ -1259,6 +1266,7 @@ function downloadAplusBatchGroup(group: BatchAplusResultGroup, format: DownloadF
 }
 
 function startNewTask() {
+  watermarkOverride.value = null
   clearBatchAplusResults()
   assets.value = []
   uploading.value = false
@@ -1267,6 +1275,7 @@ function startNewTask() {
   generating.value = false
   cancelling.value = false
   cancelRequested.value = false
+  appliedCopywritingId.value = null
   form.value = createDefaultAplusForm()
   planJob.value = null
   generationJob.value = null
@@ -1393,6 +1402,9 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
               :selected-count="selectedResultIds.length"
               :include-watermark="includeWatermark"
               :can-export-without-watermark="authStore.canExportWithoutWatermark"
+              :account-id="authStore.user?.id"
+              :acknowledgement-saved="authStore.user?.watermarkAcknowledged"
+              :save-acknowledgement="authStore.acknowledgeWatermark"
               :options="[{ format: 'zip', label: '下载批量 A+ ZIP' }, { format: 'long_image', label: '下载长拼图 PNG' }]"
               @update:include-watermark="updateIncludeWatermark"
               @download="downloadResults"
@@ -1414,6 +1426,9 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
                 :selected-count="aplusGroupSelectedIds(group).length"
                 :include-watermark="aplusGroupIncludeWatermark(group)"
                 :can-export-without-watermark="authStore.canExportWithoutWatermark"
+                :account-id="authStore.user?.id"
+                :acknowledgement-saved="authStore.user?.watermarkAcknowledged"
+                :save-acknowledgement="authStore.acknowledgeWatermark"
                 :options="[{ format: 'zip', label: '下载本任务 A+ ZIP' }, { format: 'long_image', label: '下载本任务长图 PNG' }]"
                 @update:include-watermark="(value) => updateAplusGroupIncludeWatermark(group, value)"
                 @download="(format) => downloadAplusBatchGroup(group, format)"
@@ -1465,6 +1480,9 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
               :selected-count="selectedResultIds.length"
               :include-watermark="includeWatermark"
               :can-export-without-watermark="authStore.canExportWithoutWatermark"
+              :account-id="authStore.user?.id"
+              :acknowledgement-saved="authStore.user?.watermarkAcknowledged"
+              :save-acknowledgement="authStore.acknowledgeWatermark"
               :options="[{ format: 'zip', label: '下载 A+ ZIP' }, { format: 'long_image', label: '下载长拼图 PNG' }]"
               @update:include-watermark="updateIncludeWatermark"
               @download="downloadResults"

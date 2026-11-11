@@ -27,6 +27,9 @@ class TimestampMixin:
 class User(Base, TimestampMixin):
     __tablename__ = "app_user"
 
+    watermark_acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    admin_note: Mapped[str] = mapped_column(String(1000), default="", server_default="")
+
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     phone: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
@@ -671,6 +674,15 @@ class BatchItem(Base, TimestampMixin):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     batch_job: Mapped[BatchJob] = relationship(back_populates="items")
+
+
+class CopywritingRecord(Base, TimestampMixin):
+    __tablename__ = "copywriting_record"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_user.id", ondelete="CASCADE"), index=True)
+    original_input: Mapped[str] = mapped_column(Text)
+    rewritten_text: Mapped[str] = mapped_column(Text)
 
 
 class ExecutionLog(Base):

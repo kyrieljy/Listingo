@@ -493,6 +493,7 @@ async function aiWriteTask(index: number) {
     updateTask(index, {
       ...latest,
       aiSuggestion: result.selling_points,
+      suggestedCopywritingId: result.record_id ?? null,
       aiSuggestionEditing: false,
       aiWriteOpen: true,
       aiWriting: false,

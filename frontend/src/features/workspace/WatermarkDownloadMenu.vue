@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { DownloadOutlined, MoreOutlined } from '@ant-design/icons-vue'
 import type { DownloadFormat } from '../../api/client'
 
@@ -8,10 +8,13 @@ type DownloadOption = {
   label: string
 }
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   selectedCount: number
   includeWatermark: boolean
   canExportWithoutWatermark: boolean
+  accountId?: string
+  acknowledgementSaved?: boolean
+  saveAcknowledgement: () => Promise<boolean>
   buttonLabel?: string
   options?: DownloadOption[]
 }>(), {
@@ -29,6 +32,14 @@ const menuRoot = ref<HTMLElement | null>(null)
 const openMenu = ref<'formats' | 'watermark' | null>(null)
 const acknowledgementOpen = ref(false)
 const watermarkAcknowledged = ref(false)
+const savingAcknowledgement = ref(false)
+const acknowledgementError = ref('')
+
+watch([() => props.accountId, () => props.canExportWithoutWatermark], () => {
+  acknowledgementOpen.value = false
+  watermarkAcknowledged.value = false
+  acknowledgementError.value = ''
+})
 
 function toggleMenu(menu: 'formats' | 'watermark') {
   openMenu.value = openMenu.value === menu ? null : menu
@@ -46,9 +57,10 @@ function toggleWatermark(event: Event, canExportWithoutWatermark: boolean) {
     input.checked = true
     return
   }
-  if (canExportWithoutWatermark && !value) {
+  if (!value && !props.acknowledgementSaved) {
     input.checked = true
     watermarkAcknowledged.value = false
+    acknowledgementError.value = ''
     acknowledgementOpen.value = true
     openMenu.value = null
     return
@@ -57,15 +69,33 @@ function toggleWatermark(event: Event, canExportWithoutWatermark: boolean) {
 }
 
 function cancelWatermarkAcknowledgement() {
+  if (savingAcknowledgement.value) return
   acknowledgementOpen.value = false
   watermarkAcknowledged.value = false
 }
 
-function confirmWatermarkRemoval() {
-  if (!watermarkAcknowledged.value) return
-  acknowledgementOpen.value = false
-  watermarkAcknowledged.value = false
-  emit('update:includeWatermark', false)
+async function confirmWatermarkRemoval() {
+  if (!watermarkAcknowledged.value || !props.canExportWithoutWatermark || savingAcknowledgement.value) return
+  const accountId = props.accountId
+  savingAcknowledgement.value = true
+  acknowledgementError.value = ''
+  try {
+    const saved = await props.saveAcknowledgement()
+    if (!acknowledgementOpen.value || props.accountId !== accountId || !props.canExportWithoutWatermark) return
+    if (!saved) {
+      acknowledgementError.value = '当前无法关闭水印，请重试'
+      return
+    }
+    acknowledgementOpen.value = false
+    watermarkAcknowledged.value = false
+    emit('update:includeWatermark', false)
+  } catch {
+    if (acknowledgementOpen.value && props.accountId === accountId) {
+      acknowledgementError.value = '知悉状态保存失败，请重试'
+    }
+  } finally {
+    savingAcknowledgement.value = false
+  }
 }
 
 function closeOnOutside(event: PointerEvent) {
@@ -112,6 +142,11 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', closeOnOutside
       title="关闭 AI 水印确认"
       ok-text="确定"
       cancel-text="取消"
+      :confirm-loading="savingAcknowledgement"
+      :closable="!savingAcknowledgement"
+      :mask-closable="!savingAcknowledgement"
+      :keyboard="!savingAcknowledgement"
+      :cancel-button-props="{ disabled: savingAcknowledgement }"
       :ok-button-props="{ disabled: !watermarkAcknowledged, danger: true }"
       @ok="confirmWatermarkRemoval"
       @cancel="cancelWatermarkAcknowledgement"
@@ -125,9 +160,10 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', closeOnOutside
           <li>防止误导公众：根据法规要求，若您发布的图片涉及新闻时事、公众人物或可能影响社会舆论，请务必在显眼位置标注“由AI生成”。因未标注导致的社会误解或谣言扩散，平台将配合监管部门追溯至您的账号。</li>
         </ol>
         <label class="watermark-acknowledgement-check">
-          <input v-model="watermarkAcknowledged" type="checkbox" />
+          <input v-model="watermarkAcknowledged" type="checkbox" :disabled="savingAcknowledgement" />
           <span>我已知悉</span>
         </label>
+        <a-alert v-if="acknowledgementError" type="error" :message="acknowledgementError" show-icon />
       </div>
     </a-modal>
   </div>

@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import { describe, expect, it, vi } from 'vitest'
 
 import WatermarkDownloadMenu from './WatermarkDownloadMenu.vue'
 
@@ -24,12 +24,18 @@ const AModalStub = defineComponent({
   `,
 })
 
-async function openWatermarkMenu(canExportWithoutWatermark: boolean) {
+async function openWatermarkMenu(
+  canExportWithoutWatermark: boolean,
+  saveAcknowledgement = vi.fn(async () => true),
+  acknowledgementSaved = false,
+) {
   const wrapper = mount(WatermarkDownloadMenu, {
     props: {
       selectedCount: 1,
       includeWatermark: true,
       canExportWithoutWatermark,
+      acknowledgementSaved,
+      saveAcknowledgement,
     },
     global: {
       stubs: {
@@ -73,6 +79,7 @@ describe('WatermarkDownloadMenu', () => {
     expect(modal.props('okButtonProps')).toEqual({ disabled: false, danger: true })
 
     await modal.get('.modal-ok').trigger('click')
+    await flushPromises()
     expect(wrapper.emitted('update:includeWatermark')).toEqual([[false]])
   })
 
@@ -96,6 +103,33 @@ describe('WatermarkDownloadMenu', () => {
       .toEqual({ disabled: true, danger: true })
   })
 
+  it('disables the watermark without prompting after the account has acknowledged', async () => {
+    const save = vi.fn(async () => true)
+    const wrapper = await openWatermarkMenu(true, save, true)
+    await wrapper.get('input[type="checkbox"]').setValue(false)
+    expect(wrapper.getComponent(AModalStub).props('open')).toBe(false)
+    expect(wrapper.emitted('update:includeWatermark')).toEqual([[false]])
+    expect(save).not.toHaveBeenCalled()
+  })
+
+  it('keeps the checkbox selected after a failed save and retries', async () => {
+    const save = vi.fn(async () => true).mockRejectedValueOnce(new Error('offline'))
+    const wrapper = await openWatermarkMenu(true, save)
+    await wrapper.get('input[type="checkbox"]').setValue(false)
+    const modal = wrapper.getComponent(AModalStub)
+    const checkbox = modal.get('input[type="checkbox"]')
+    await checkbox.setValue(true)
+    await modal.get('.modal-ok').trigger('click')
+    await flushPromises()
+    expect(modal.props('open')).toBe(true)
+    expect((checkbox.element as HTMLInputElement).checked).toBe(true)
+    expect(wrapper.emitted('update:includeWatermark')).toBeUndefined()
+    await modal.get('.modal-ok').trigger('click')
+    await flushPromises()
+    expect(save).toHaveBeenCalledTimes(2)
+    expect(wrapper.emitted('update:includeWatermark')).toEqual([[false]])
+  })
+
   it('keeps non-subscribed users locked to watermark exports', async () => {
     const wrapper = await openWatermarkMenu(false)
     const watermarkInput = wrapper.get('input[type="checkbox"]')
@@ -113,6 +147,7 @@ describe('WatermarkDownloadMenu', () => {
         selectedCount: 1,
         includeWatermark: false,
         canExportWithoutWatermark: true,
+        saveAcknowledgement: vi.fn(async () => true),
       },
       global: {
         stubs: {

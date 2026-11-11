@@ -619,7 +619,7 @@ describe('workspace model', () => {
 
   it('routes image downloads through watermark preferences', () => {
     expect(apiClientSource).toContain('include_watermark: String(includeWatermark)')
-    expect(workspaceSource).toContain('const includeWatermark = ref(true)')
+    expect(workspaceSource).toContain('watermarkOverride.value ?? authStore.defaultIncludeWatermark')
     expect(workspaceSource).toContain('const batchSuiteWatermarkByItemId = ref<Record<string, boolean>>({})')
     expect(workspaceSource).toContain('function updateSuiteGroupIncludeWatermark')
     expect(workspaceSource).toContain('function suiteGroupIncludeWatermark')

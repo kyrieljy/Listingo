@@ -24,6 +24,8 @@ export type BatchTaskDraft = {
   id: string
   name: string
   sellingPoints: string
+  suggestedCopywritingId?: string | null
+  appliedCopywritingId?: string | null
   aiSuggestion: string
   aiWriteOpen: boolean
   aiSuggestionEditing: boolean
@@ -214,6 +216,7 @@ export function buildBatchPayload(
       asset_ids: task.assets.map((asset) => asset.id),
       name: task.name.trim() || extractBatchProductName(task.sellingPoints),
       selling_points: task.sellingPoints.trim(),
+      ...(task.appliedCopywritingId ? { copywriting_record_id: task.appliedCopywritingId } : {}),
       overrides: task.overrides,
     })),
   }

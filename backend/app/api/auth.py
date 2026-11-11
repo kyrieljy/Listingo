@@ -42,6 +42,7 @@ from backend.app.schemas import (
     SubscriptionPlanOut,
 )
 from backend.app.services.auth import (
+    can_export_without_watermark,
     SESSION_COOKIE,
     clear_session_cookies,
     find_user_by_identifier,
@@ -369,6 +370,17 @@ def me(current_user: User | None = Depends(get_optional_user), session: Session 
     if not current_user:
         return {"user": None, "unread_count": 0}
     return {"user": public_user(current_user), "unread_count": unread_count(session, current_user)}
+
+
+@router.put("/account/watermark-acknowledgement")
+def acknowledge_watermark(
+    current_user: User = Depends(get_current_user), session: Session = Depends(get_session),
+) -> dict[str, bool]:
+    if not can_export_without_watermark(current_user):
+        raise HTTPException(status_code=403, detail="当前套餐不支持无水印下载，请升级订阅")
+    current_user.watermark_acknowledged = True
+    session.commit()
+    return {"watermark_acknowledged": True}
 
 
 @router.patch("/account/profile", response_model=AuthMeOut)

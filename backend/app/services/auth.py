@@ -42,6 +42,24 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+PAID_EXPORT_PLANS = {
+    "standard",
+    "advanced",
+    "enterprise",
+    "internal",
+    "monthly_basic",
+    "monthly_standard",
+    "monthly_pro",
+    "yearly_basic",
+    "yearly_standard",
+    "yearly_flagship",
+}
+
+
+def can_export_without_watermark(user: User) -> bool:
+    return user.role == "admin" or user.current_plan_code in PAID_EXPORT_PLANS
+
+
 def public_user(user: User) -> dict[str, Any]:
     return {
         "id": user.id,
@@ -55,6 +73,7 @@ def public_user(user: User) -> dict[str, Any]:
         "role": user.role,
         "status": user.status,
         "plan": user.current_plan_code,
+        "watermark_acknowledged": user.watermark_acknowledged,
         "gender": user.gender,
         "bio": user.bio,
         "password_set": user.password_set,

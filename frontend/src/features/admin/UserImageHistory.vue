@@ -87,6 +87,15 @@ function openEntry(entry: Entry) {
   void loadDetail(entry.kind, entry.id)
 }
 
+function isSelected(entry: Entry) {
+  return selected.value?.kind === entry.kind && selected.value.id === entry.id
+}
+
+function toggleEntry(entry: Entry) {
+  if (isSelected(entry)) clearDetail()
+  else openEntry(entry)
+}
+
 function openChild(entry: Child) {
   if (!entry.job_kind || !entry.job_id) return
   child.value = entry
@@ -111,7 +120,7 @@ watch(() => props.user.id, () => void loadPage(0), { immediate: true })
       <a-empty v-else-if="!entries.length && !loading" description="暂无生图记录" />
       <ul v-else class="history-list">
         <li v-for="entry in entries" :key="`${entry.kind}-${entry.id}`">
-          <button type="button" :aria-pressed="selected?.id === entry.id" @click="openEntry(entry)">
+          <button type="button" :aria-expanded="isSelected(entry)" @click="toggleEntry(entry)">
             <strong>{{ labels[entry.kind] }}</strong>
             <time :datetime="entry.created_at">{{ new Date(entry.created_at).toLocaleString() }}</time>
             <span>{{ statuses[entry.status] || entry.status }}</span>
@@ -200,7 +209,7 @@ watch(() => props.user.id, () => void loadPage(0), { immediate: true })
 <style scoped>
 .history-list { list-style: none; padding: 0; margin: 0; }
 .history-list button { display: flex; flex-wrap: wrap; gap: .75rem; width: 100%; text-align: left; margin-bottom: .5rem; padding: .65rem .8rem; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; }
-.history-list button[aria-pressed="true"] { border-color: #2563eb; background: #eff6ff; }
+.history-list button[aria-expanded="true"], .history-list button[aria-pressed="true"] { border-color: #2563eb; background: #eff6ff; }
 .history-list button:disabled { opacity: .65; }
 .history-pagination { display: flex; align-items: center; justify-content: flex-end; gap: .75rem; }
 .history-detail { border-top: 1px solid #e2e8f0; margin-top: 1rem; padding-top: 1rem; }

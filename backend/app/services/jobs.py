@@ -43,6 +43,7 @@ from backend.app.services.prompt_contract import (
 )
 from backend.app.services.sensitive_words import load_sensitive_word_snapshot
 from backend.app.services.content_safety import ContentSafetyBlocked, ensure_content_safe, run_content_safety_review
+from backend.app.services.provider_catalog import image_edit_route, image_preference
 from backend.app.services.provider_routing import (
     ProviderRecord,
     enabled_provider_for_route,
@@ -54,7 +55,7 @@ from backend.app.services.provider_routing import (
 )
 from backend.app.services.provider_catalog import DEFAULT_ROUTE_CHAINS
 from backend.app.services.provider_limiter import provider_slot
-from backend.app.services.providers import ProviderClient, provider_requires_public_urls, requested_image_size
+from backend.app.services.providers import ProviderClient, generated_image_extension, provider_requested_image_size, provider_requires_public_urls
 from backend.app.services.redaction import safe_json
 from backend.app.services.storage import public_file_url
 from backend.app.services.subscriptions import BEANS_PER_IMAGE, BeanLedger, confirm_beans
@@ -121,14 +122,14 @@ PLATFORM_PROMPT_NAMES = {
 
 
 def image_provider_route(preference: str, session: Session | None = None) -> list[str]:
-    route_key = "suite_layout" if preference == "layout" else "suite_fidelity"
+    route_key = "suite_layout" if image_preference(preference) == "quality" else "suite_fidelity"
     if session is not None:
         return route_provider_codes(session, route_key)
     return list(DEFAULT_ROUTE_CHAINS[route_key])
 
 
 def suite_route_key(preference: str | None) -> str:
-    return "suite_layout" if preference == "layout" else "suite_fidelity"
+    return "suite_layout" if image_preference(preference) == "quality" else "suite_fidelity"
 
 
 def generation_prompt_from_item(item: GenerationItem) -> str:
@@ -756,7 +757,7 @@ async def _run_live_job(
             "brand_style": params.get("brand_style") or "由商品品类、目标市场和可见包装风格推导，不使用通用固定模板",
             "aspect_ratio": params["aspect_ratio"],
             "image_plan": image_plan,
-            "model_preference": "视觉排版优先：加强文字层级与版式组织" if params.get("model_preference") == "layout" else "商品保持优先：强化产品锁定与参考图一致性",
+            "model_preference": "生成质量优先" if image_preference(params.get("model_preference")) == "quality" else "生成速度优先",
         }
         combined_prompt = append_runtime_contract(render_prompt_variables(prompt_content, prompt_variables), job_count)
         user_prompt = json.dumps({**prompt_variables, "count": job_count}, ensure_ascii=False)
@@ -1051,7 +1052,7 @@ async def _run_live_item(
     try:
         image_bytes, used_code = await run_image_route(provider_codes, generate, provider_display_names)
         width, height = validate_generated_image_bytes(image_bytes)
-        result_name = f"{item_id}-{uuid4().hex[:8]}.png"
+        result_name = f"{item_id}-{uuid4().hex[:8]}{generated_image_extension(image_bytes)}"
         destination = settings.results_dir / result_name
         destination.write_bytes(image_bytes)
         with session_factory() as session:
@@ -1126,7 +1127,7 @@ async def _run_live_item(
                 instruction="Live 初始生成",
                 file_path=str(destination),
                 url=f"/files/results/{result_name}",
-                metadata_json=safe_json({"dry_run": False, "provider": used_code, "requested_size": requested_image_size(aspect_ratio), "actual_size": [width, height]}),
+                metadata_json=safe_json({"dry_run": False, "provider": used_code, "requested_size": provider_requested_image_size(cached_provider_by_code(session, used_code), aspect_ratio), "actual_size": [width, height]}),
             )
             session.add(version)
             session.flush()
@@ -1153,7 +1154,7 @@ async def _run_live_item(
                     node="image_generate",
                     provider_id=item.provider_id,
                     status="succeeded",
-                    request_summary=safe_json({"route_symbol": "#@", "aspect_ratio": aspect_ratio, "requested_size": requested_image_size(aspect_ratio), "prompt_chars": len(prompt)}),
+                    request_summary=safe_json({"route_symbol": "#@", "aspect_ratio": aspect_ratio, "requested_size": provider_requested_image_size(cached_provider_by_code(session, used_code), aspect_ratio), "prompt_chars": len(prompt)}),
                     response_summary=safe_json({"url": version.url, "bytes": len(image_bytes)}),
                     dry_run=False,
                 )
@@ -1270,7 +1271,7 @@ async def create_live_regenerated_child_version(
     image_bytes, used_code = await run_image_route(image_codes, generate, provider_display_names)
     width, height = validate_generated_image_bytes(image_bytes)
     version_no = max((version.version_no for version in item.versions), default=0) + 1
-    result_name = f"{item.job_id}-{item.index + 1}-regen-v{version_no}-{uuid4().hex[:8]}.png"
+    result_name = f"{item.job_id}-{item.index + 1}-regen-v{version_no}-{uuid4().hex[:8]}{generated_image_extension(image_bytes)}"
     destination = settings.results_dir / result_name
     destination.write_bytes(image_bytes)
     try:
@@ -1334,7 +1335,7 @@ async def create_live_regenerated_child_version(
                 "route_key": route_key,
                 "provider": used_code,
                 "source_provider_preferred": used_code == preferred_code,
-                "requested_size": requested_image_size(aspect_ratio),
+                "requested_size": provider_requested_image_size(cached_provider_by_code(session, used_code), aspect_ratio),
                 "actual_size": [width, height],
             }
         ),
@@ -1367,7 +1368,7 @@ async def create_live_regenerated_child_version(
                 {
                     "route_key": route_key,
                     "source_provider_preferred": used_code == preferred_code,
-                    "requested_size": requested_image_size(aspect_ratio),
+                    "requested_size": provider_requested_image_size(cached_provider_by_code(session, used_code), aspect_ratio),
                     "prompt_chars": len(prompt),
                 }
             ),
@@ -1417,7 +1418,7 @@ async def create_live_child_version(
             safety_prompt,
         )
 
-    image_codes = route_provider_codes(session, "image_edit")
+    image_codes = route_provider_codes(session, image_edit_route(params.get("model_preference")))
     provider_display_names = provider_display_names_by_code(session, image_codes)
     edit_prompt = session.get(PromptVersion, prompt_versions.get("edit-rewrite"))
     if not edit_prompt:
@@ -1463,7 +1464,7 @@ async def create_live_child_version(
     image_bytes, used_code = await run_image_route(image_codes, generate, provider_display_names)
     width, height = validate_generated_image_bytes(image_bytes)
     version_no = max((version.version_no for version in item.versions), default=0) + 1
-    result_name = f"{item.job_id}-{item.index + 1}-v{version_no}-{uuid4().hex[:8]}.png"
+    result_name = f"{item.job_id}-{item.index + 1}-v{version_no}-{uuid4().hex[:8]}{generated_image_extension(image_bytes)}"
     destination = settings.results_dir / result_name
     destination.write_bytes(image_bytes)
     try:
@@ -1519,7 +1520,7 @@ async def create_live_child_version(
         instruction=instruction,
         file_path=str(destination),
         url=f"/files/results/{result_name}",
-        metadata_json=safe_json({"dry_run": False, "provider": used_code, "capability_routed": True, "requested_size": requested_image_size(params["aspect_ratio"]), "actual_size": [width, height]}),
+        metadata_json=safe_json({"dry_run": False, "provider": used_code, "capability_routed": True, "requested_size": provider_requested_image_size(cached_provider_by_code(session, used_code), params["aspect_ratio"]), "actual_size": [width, height]}),
     )
     session.add(version)
     session.flush()
@@ -1545,7 +1546,7 @@ async def create_live_child_version(
             node="image_generate_edit",
             provider_id=item.provider_id,
             status="succeeded",
-            request_summary=safe_json({"instruction": instruction, "input_image_count": len(input_paths), "requested_size": requested_image_size(params["aspect_ratio"])}),
+            request_summary=safe_json({"instruction": instruction, "input_image_count": len(input_paths), "requested_size": provider_requested_image_size(cached_provider_by_code(session, used_code), params["aspect_ratio"])}),
             response_summary=safe_json({"url": version.url, "version_no": version_no}),
             dry_run=False,
         )

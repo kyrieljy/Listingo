@@ -128,6 +128,7 @@ from backend.app.services.content_safety import (
     run_local_text_safety_review,
 )
 from backend.app.services.providers import ProviderClient
+from backend.app.services.provider_catalog import aplus_image_route
 from backend.app.services.provider_routing import route_provider_codes
 from backend.app.services.redaction import safe_json
 from backend.app.services.storage import store_upload
@@ -1240,7 +1241,7 @@ async def create_aplus_generation_job(
         raise HTTPException(status_code=422, detail="普通 A+ 和高级 A+ 只支持亚马逊平台")
     if not payload.dry_run:
         route_keys = {
-            "aplus_mobile" if target.mode == "amazon_aplus_advanced_mobile" else "aplus_detail"
+            aplus_image_route(target.mode, plan_params.get("model_preference"))
             for target in payload.output_targets
         }
         try:

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { modelPreferenceOptions, normalizeModelPreference } from './workspace-model'
 import { computed, nextTick, ref } from 'vue'
 import {
   CheckOutlined,
@@ -386,8 +387,8 @@ function openCopyEditor() {
       <label>市场<select :value="overrideValue('market')" @change="setOverride('market', inputValue($event))"><option value="">跟随全局-市场</option><option v-for="value in marketChoices" :key="value" :value="value">{{ value }}</option></select></label>
       <label>语言<select :value="overrideValue('language')" @change="setOverride('language', inputValue($event))"><option value="">跟随全局-语言</option><option v-for="value in languageChoices" :key="value" :value="value">{{ value }}</option></select></label>
       <label v-if="businessType === 'suite'">比例<select :value="overrideValue('aspect_ratio')" @change="setOverride('aspect_ratio', inputValue($event))"><option value="">跟随全局-比例</option><option v-for="value in ratioOptions" :key="value" :value="value">{{ value }}</option></select></label>
-      <label v-if="businessType === 'suite'">生成偏好<select :value="overrideValue('model_preference')" @change="setOverride('model_preference', inputValue($event))"><option value="">跟随全局-生成偏好</option><option value="fidelity">商品保持优先</option><option value="layout">视觉排版优先</option></select></label>
-      <label v-else>输出规格<select :value="outputSpecOverrideValue" @change="setOverride('output_spec', inputValue($event))"><option value="">跟随全局-输出规格</option><option v-for="spec in itemOutputSpecChoices" :key="spec.value" :value="spec.value">{{ spec.label }}</option></select></label>
+      <label>生成偏好<select :value="overrideValue('model_preference') ? normalizeModelPreference(overrideValue('model_preference')) : ''" @change="setOverride('model_preference', inputValue($event))"><option value="">跟随全局-生成偏好</option><option v-for="option in modelPreferenceOptions" :key="option.key" :value="option.key">{{ option.label }}</option></select></label>
+      <label v-if="businessType === 'aplus'">输出规格<select :value="outputSpecOverrideValue" @change="setOverride('output_spec', inputValue($event))"><option value="">跟随全局-输出规格</option><option v-for="spec in itemOutputSpecChoices" :key="spec.value" :value="spec.value">{{ spec.label }}</option></select></label>
     </div>
     <section v-if="businessType === 'aplus' && task.overridesOpen" class="batch-override-module-panel" :class="{ disabled: taskFollowsGlobalModules }">
       <header>

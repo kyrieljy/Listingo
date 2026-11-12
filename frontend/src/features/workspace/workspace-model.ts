@@ -1,6 +1,15 @@
 export type PhaseKey = 'suite' | 'aplus' | 'agent' | 'video'
 export type SuiteMode = 'smart' | 'custom'
-export type ModelPreference = 'fidelity' | 'layout'
+export type ModelPreference = 'speed' | 'quality'
+
+export function normalizeModelPreference(value: unknown): ModelPreference {
+  return value === 'quality' || value === 'layout' ? 'quality' : 'speed'
+}
+
+export const modelPreferenceOptions = [
+  { key: 'speed', label: '生成速度优先', description: '优先缩短生成时间' },
+  { key: 'quality', label: '生成质量优先', description: '优先呈现细节与一致性' },
+] as const
 export type CustomCountKey = 'white_background' | 'scene' | 'selling_point' | 'other'
 
 export type CustomCounts = Record<CustomCountKey, number>
@@ -46,6 +55,7 @@ export type AplusForm = {
   market: string
   language: string
   category: string
+  modelPreference?: ModelPreference
   productInfo: string
   selectedModules: AplusModuleSelection[]
   outputSpec: AplusOutputSpec
@@ -200,6 +210,7 @@ export function createDefaultAplusForm(): AplusForm {
     language: '英文',
     category: '',
     productInfo: '',
+    modelPreference: 'speed',
     selectedModules: [...defaultAplusModules],
     outputSpec: 'amazon_aplus_standard',
     advancedTargets: ['web'],
@@ -249,6 +260,7 @@ export function buildAplusPlanPayload(assetIds: string[], form: AplusForm) {
     language: form.language,
     category: form.category,
     product_info: form.productInfo,
+    model_preference: normalizeModelPreference(form.modelPreference),
     module_selections: moduleSelections,
     selected_modules: moduleSelections.map((selection) => selection.name),
     output_targets: buildAplusOutputTargets(form),
@@ -281,7 +293,7 @@ export function createDefaultWorkspaceForm(): WorkspaceForm {
     mode: 'smart',
     smartCount: 7,
     customCounts: { white_background: 1, scene: 2, selling_point: 2, other: 2 },
-    modelPreference: 'fidelity',
+    modelPreference: 'speed',
     dryRun: false,
   }
 }
@@ -341,7 +353,7 @@ export function buildGenerationPayload(
     mode: form.mode,
     count,
     custom_counts: form.mode === 'custom' ? form.customCounts : undefined,
-    model_preference: form.modelPreference,
+    model_preference: normalizeModelPreference(form.modelPreference),
     dry_run: form.dryRun,
   }
 }

@@ -76,7 +76,7 @@ class GenerationJobCreate(BaseModel):
     mode: Literal["smart", "custom"] = "smart"
     count: int = Field(default=7, ge=7, le=12)
     custom_counts: "CustomImageCounts | None" = None
-    model_preference: Literal["fidelity", "layout"] = "fidelity"
+    model_preference: Literal["speed", "quality", "fidelity", "layout"] = "speed"
     dry_run: bool = False
 
     @field_validator("aspect_ratio")
@@ -268,6 +268,7 @@ class AplusModuleSelection(BaseModel):
 
 
 class AplusPlanJobCreate(BaseModel):
+    model_preference: Literal["speed", "quality", "fidelity", "layout"] = "speed"
     copywriting_record_id: str | None = Field(default=None, max_length=36)
     asset_ids: list[str] = Field(min_length=1, max_length=6)
     platform: str = Field(min_length=1, max_length=80)

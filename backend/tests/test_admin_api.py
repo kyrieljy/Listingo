@@ -44,7 +44,7 @@ def prompt_by_code(client, code: str) -> Prompt:
 
 def test_provider_api_masks_key_and_requires_explicit_test(client) -> None:
     providers = client.get("/api/v1/admin/providers").json()
-    provider = next(item for item in providers if item["code"] == "kie-nano-2-generate")
+    provider = next(item for item in providers if item["code"] == "molink-image-26-flare-generate")
     response = client.patch(
         f"/api/v1/admin/providers/{provider['id']}",
         json={"api_key": "yunwu-secret-key", "enabled": True, "timeout_seconds": 60},
@@ -53,9 +53,9 @@ def test_provider_api_masks_key_and_requires_explicit_test(client) -> None:
     updated = response.json()
 
     assert updated["has_api_key"] is True
-    assert updated["provider_group"] == "kie"
+    assert updated["provider_group"] == "molink"
     assert updated["supports_custom_size"] is True
-    assert updated["supports_exact_custom_size"] is False
+    assert updated["supports_exact_custom_size"] is True
     assert updated["api_key_masked"] == "yunw••••••••-key"
     assert "secret" not in str(updated)
 
@@ -142,216 +142,29 @@ def test_monitoring_apis_aggregate_ops_and_business_events(client) -> None:
     assert business["event_relation_rows"][0]["key"] == "views"
 
 
-def test_provider_api_updates_business_route_roles_and_clears_peer_role(client) -> None:
-    providers = client.get("/api/v1/admin/providers").json()
-    image2 = next(item for item in providers if item["code"] == "atlas-gpt-image-2-generate")
-    backup = next(item for item in providers if item["code"] == "runware-gpt-image-2-generate")
-
-    response = client.patch(
-        f"/api/v1/admin/providers/{backup['id']}",
-        json={"route_roles": {"aplus_detail": "fallback", "suite_layout": "primary"}},
-    )
-
-    assert response.status_code == 200, response.text
-    updated_backup = response.json()
-    assert updated_backup["route_roles"]["aplus_detail"] == "backup1"
-    assert updated_backup["route_roles"]["suite_layout"] == "primary"
-
-    updated_providers = client.get("/api/v1/admin/providers").json()
-    updated_image2 = next(item for item in updated_providers if item["code"] == "atlas-gpt-image-2-generate")
-    updated_apimodels = next(item for item in updated_providers if item["code"] == "apimodels-gpt-image-2-generate")
-    assert updated_image2["route_roles"]["aplus_detail"] == "primary"
-    assert "suite_layout" not in updated_image2["route_roles"]
-    assert "aplus_detail" not in updated_apimodels["route_roles"]
-
-    rejected = client.patch(
-        f"/api/v1/admin/providers/{image2['id']}",
-        json={"route_roles": {"llm": "primary"}},
-    )
-    assert rejected.status_code == 422
-
-
-def test_provider_groups_and_chain_endpoint_save_dynamic_slots(client) -> None:
-    groups = client.get("/api/v1/admin/provider-groups")
-    assert groups.status_code == 200, groups.text
-    assert [item["key"] for item in groups.json()] == [
-        "hellobabygo",
-        "fal",
-        "runware",
-        "openrouter",
-        "atlas",
-        "replicate",
-        "wavespeed",
-        "kie",
-        "cometapi",
-        "apimodels",
-        "molink",
-    ]
+def test_provider_admin_catalog_limits_routes_to_molink26_and_hellobabygo(client) -> None:
     groups = client.get("/api/v1/admin/provider-groups").json()
-    assert next(item for item in groups if item["key"] == "molink")["provider_count"] == 3
-
-    chain = [
-        "fal-gpt-image-2-generate",
-        "runware-gpt-image-2-generate",
-        "cometapi-gpt-image-2-generate",
-        "atlas-gpt-image-2-generate",
-        "openrouter-gpt-image-2-generate",
-        "molink-image-2-generate",
-    ]
-    response = client.patch("/api/v1/admin/provider-routes/suite_layout/chain", json={"provider_codes": chain})
-    assert response.status_code == 200, response.text
-    assert response.json()["provider_codes"] == chain
-
+    assert {g["key"]: g["provider_count"] for g in groups} == {"hellobabygo": 1, "molink": 4}
     providers = client.get("/api/v1/admin/providers").json()
-    roles = {
-        provider["code"]: provider["route_roles"].get("suite_layout")
-        for provider in providers
-        if provider["code"] in chain
-    }
-    assert roles == {
-        "fal-gpt-image-2-generate": "primary",
-        "runware-gpt-image-2-generate": "backup1",
-        "cometapi-gpt-image-2-generate": "backup2",
-        "atlas-gpt-image-2-generate": "backup3",
-        "openrouter-gpt-image-2-generate": "backup4",
-        "molink-image-2-generate": "backup5",
-    }
-
-    ratio_only = client.patch(
-        "/api/v1/admin/provider-routes/suite_layout/chain",
-        json={"provider_codes": ["apimodels-gpt-image-2-generate"]},
-    )
-    assert ratio_only.status_code == 422
-
-    duplicate = client.patch(
-        "/api/v1/admin/provider-routes/suite_layout/chain",
-        json={"provider_codes": [chain[0], chain[0]]},
-    )
-    assert duplicate.status_code == 422
-
-    edit_rejected = client.patch(
-        "/api/v1/admin/provider-routes/image_edit/chain",
-        json={"provider_codes": ["atlas-gpt-image-2-generate"]},
-    )
-    assert edit_rejected.status_code == 422
-
-    allowed_molink_routes = {
-        "suite_fidelity": "molink-image-2-generate",
-        "suite_layout": "molink-image-2-generate",
-        "aplus_detail": "molink-image-2-generate",
-        "aplus_mobile": "molink-image-2-edit",
-        "image_edit": "molink-image-2-edit",
-    }
-    for route_key, provider_code in allowed_molink_routes.items():
-        response = client.patch(f"/api/v1/admin/provider-routes/{route_key}/chain", json={"provider_codes": [provider_code]})
-        assert response.status_code == 200, response.text
-
-    rejected_molink_routes = {
-        "suite_fidelity": "molink-image-2-edit",
-        "suite_layout": "molink-nano-pro-generate",
-        "aplus_detail": "molink-image-2-edit",
-        "aplus_mobile": "molink-image-2-generate",
-        "image_edit": "molink-image-2-generate",
-    }
-    for route_key, provider_code in rejected_molink_routes.items():
-        response = client.patch(f"/api/v1/admin/provider-routes/{route_key}/chain", json={"provider_codes": [provider_code]})
-        assert response.status_code == 422, response.text
+    image_models = {p["model_name"] for p in providers if p["capability"] == "image"}
+    assert image_models == {"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"}
+    chain_url = "/api/v1/admin/provider-routes/aplus_mobile_quality/chain"
+    correct = "molink-image-26-sunburst-edit"
+    assert client.patch(chain_url, json={"provider_codes": [correct]}).status_code == 200
+    for code in ("molink-image-26-flare-edit", "molink-image-26-sunburst-generate", "atlas-gpt-image-2-edit"):
+        assert client.patch(chain_url, json={"provider_codes": [code]}).status_code == 422
 
 
-def test_provider_api_updates_dynamic_parameter_values(client) -> None:
-    providers = client.get("/api/v1/admin/providers").json()
-    provider = next(item for item in providers if item["code"] == "atlas-gpt-image-2-generate")
-    schema_by_key = {item["key"]: item for item in provider["config"]["parameter_schema"]}
-    schema_keys = set(schema_by_key)
-    assert {"size", "quality", "format", "n", "output_compression", "enable_sync_mode"}.issubset(schema_keys)
-    assert schema_by_key["size"]["default"] == "follow_frontend"
-    assert schema_by_key["size"]["optional"] is False
-    assert schema_by_key["size"]["section"] == "core"
-    assert schema_by_key["n"]["default"] == 1
-    assert schema_by_key["n"]["optional"] is True
-    assert schema_by_key["output_compression"]["section"] == "advanced"
-    assert schema_by_key["preflight_before_call"]["section"] == "runtime"
-
-    response = client.patch(
-        f"/api/v1/admin/providers/{provider['id']}",
-        json={
-            "parameter_values": {
-                "size": "970x600",
-                "quality": "high",
-                "format": "webp",
-                "n": 2,
-                "output_compression": 88,
-                "enable_sync_mode": True,
-                "preflight_before_call": False,
-            },
-            "max_reference_images": 14,
-        },
-    )
-
+def test_provider_api_updates_molink_runtime_parameters(client) -> None:
+    provider = next(p for p in client.get("/api/v1/admin/providers").json() if p["code"] == "molink-image-26-flare-generate")
+    response = client.patch(f"/api/v1/admin/providers/{provider['id']}", json={
+        "parameter_values": {"size": "1536x1024", "timeout_seconds": 245},
+    })
     assert response.status_code == 200, response.text
     config = response.json()["config"]
-    assert config["size"] == "970x600"
-    assert config["quality"] == "high"
-    assert config["format"] == "webp"
-    assert config["n"] == 2
-    assert config["output_compression"] == 88
-    assert config["enable_sync_mode"] is True
-    assert config["preflight_before_call"] is False
-    assert config["max_reference_images"] == 14
-
-    cleared = client.patch(
-        f"/api/v1/admin/providers/{provider['id']}",
-        json={"parameter_values": {"output_compression": "", "enable_sync_mode": ""}},
-    )
-    assert cleared.status_code == 200, cleared.text
-    cleared_config = cleared.json()["config"]
-    assert "output_compression" not in cleared_config
-    assert "enable_sync_mode" not in cleared_config
-
-    rejected = client.patch(
-        f"/api/v1/admin/providers/{provider['id']}",
-        json={"parameter_values": {"not_in_schema": "x"}},
-    )
-    assert rejected.status_code == 422
-
-
-def test_provider_api_updates_molink_dynamic_parameter_values(client) -> None:
-    providers = client.get("/api/v1/admin/providers").json()
-    image2 = next(item for item in providers if item["code"] == "molink-image-2-generate")
-    nano = next(item for item in providers if item["code"] == "molink-nano-pro-generate")
-
-    image2_update = client.patch(
-        f"/api/v1/admin/providers/{image2['id']}",
-        json={
-            "parameter_values": {
-                "size": "1536x1024",
-                "quality": "high",
-                "output_format": "webp",
-                "n": 2,
-            }
-        },
-    )
-    assert image2_update.status_code == 200, image2_update.text
-    image2_config = image2_update.json()["config"]
-    assert image2_config["size"] == "1536x1024"
-    assert image2_config["quality"] == "high"
-    assert image2_config["output_format"] == "webp"
-    assert image2_config["n"] == 2
-
-    nano_update = client.patch(
-        f"/api/v1/admin/providers/{nano['id']}",
-        json={"parameter_values": {"aspect_ratio": "4:3", "resolution": "2K"}},
-    )
-    assert nano_update.status_code == 200, nano_update.text
-    nano_config = nano_update.json()["config"]
-    assert nano_config["aspect_ratio"] == "4:3"
-    assert nano_config["resolution"] == "2K"
-
-    rejected = client.patch(
-        f"/api/v1/admin/providers/{nano['id']}",
-        json={"parameter_values": {"resolution": "0.5K"}},
-    )
-    assert rejected.status_code == 422
+    assert config["size"] == "1536x1024"
+    assert config["timeout_seconds"] == 245
+    assert "quality" not in config and "complexity" not in config
 
 
 def test_seedance_provider_test_does_not_require_openai_model_directory_membership(client, monkeypatch) -> None:

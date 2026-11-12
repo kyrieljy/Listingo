@@ -109,7 +109,7 @@ def _suite_params(global_params: dict[str, Any], item: Any) -> dict[str, Any]:
         "mode": "smart",
         "count": 7,
         "custom_counts": None,
-        "model_preference": "fidelity",
+        "model_preference": "speed",
         "dry_run": True,
     }
     params.update(global_params or {})
@@ -951,7 +951,7 @@ def _suite_fixture_payload(asset_ids: list[str], *, partial: bool) -> BatchJobCr
             "aspect_ratio": "1:1",
             "count": 7,
             "mode": "smart",
-            "model_preference": "fidelity",
+            "model_preference": "speed",
             "dry_run": True,
         },
         notification_config={"in_app": True, "completion_toast": False, "validation_fixture": True},

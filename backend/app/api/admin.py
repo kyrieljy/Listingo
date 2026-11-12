@@ -499,9 +499,9 @@ def provider_matches_route_definition(provider: Provider, route_key: str, defini
     family = str(config.get("model_family") or provider.model_name or provider.code)
     if route_key == "suite_fidelity":
         return operation == "generate" and ("nano-banana" in family or family == "gpt-image-2")
-    if route_key in {"suite_layout", "aplus_detail"}:
+    if route_key in {"suite_layout", "aplus_detail", "aplus_detail_quality"}:
         return operation == "generate" and family == "gpt-image-2"
-    if route_key in {"aplus_mobile", "image_edit"}:
+    if route_key in {"aplus_mobile", "aplus_mobile_quality", "image_edit", "image_edit_quality"}:
         return operation == "edit" and family == "gpt-image-2" and bool(config.get("supports_edit"))
     if route_key == "video":
         return operation == "video" and family == "seedance-2.0"
@@ -542,6 +542,7 @@ def list_provider_groups(session: Session = Depends(get_session)) -> list[dict[s
             **counts.get(group["key"], {"provider_count": 0, "enabled_count": 0, "keyed_count": 0}),
         }
         for group in PROVIDER_GROUPS
+        if group["key"] in counts
     ]
 
 

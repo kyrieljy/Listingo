@@ -101,24 +101,11 @@ def test_image_route_errors_use_current_provider_display_name() -> None:
     assert "yunwu-image-2" not in message
 
 
-def test_frontend_model_preference_routes_to_expected_hidden_providers() -> None:
-    assert image_provider_route("fidelity") == [
-        "apimodels-nano-pro-generate",
-        "kie-nano-2-generate",
-        "atlas-nano-2-generate",
-        "apimodels-nano-2-generate",
-        "runware-nano-2-generate",
-        "molink-image-2-generate",
-        "molink-nano-pro-generate",
-    ]
-    assert image_provider_route("layout") == [
-        "atlas-gpt-image-2-generate",
-        "cometapi-gpt-image-2-generate",
-        "runware-gpt-image-2-generate",
-        "fal-gpt-image-2-generate",
-        "openrouter-gpt-image-2-generate",
-        "molink-image-2-generate",
-    ]
+def test_frontend_model_preference_routes_to_molink26_and_accepts_legacy_values() -> None:
+    for preference in ("fidelity", "speed", None):
+        assert image_provider_route(preference) == ["molink-image-26-flare-generate"]
+    for preference in ("layout", "quality"):
+        assert image_provider_route(preference) == ["molink-image-26-sunburst-generate"]
 
 
 def test_image_text_ocr_lines_are_sorted_and_prompt_is_rendered(tmp_path, monkeypatch) -> None:
@@ -1916,6 +1903,43 @@ def test_molink_image2_reference_and_edit_use_multipart_output_format(tmp_path) 
     assert 'name="n"' not in seen["body_text"]
 
 
+@pytest.mark.parametrize("model", ["gpt-image-2.6-flare", "gpt-image-2.6-sunburst"])
+def test_molink26_sends_project_canvas_and_preserves_upstream_bytes(model, tmp_path) -> None:
+    source = tmp_path / "source.png"
+    raw = png_bytes()
+    source.write_bytes(raw)
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(raw).decode()}]})
+
+    provider = media_image_provider("molink26", "molink", "gpt-image-2", {
+        "size_param_mode": "size_string", "requires_public_urls": False,
+        "edit_base_url": "https://www.getmolinkapi.com/v1/images/edits", "output_format": "png",
+    })
+    provider.model_name = model
+    provider.base_url = "https://www.getmolinkapi.com/v1/images/generations"
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            client = ProviderClient(http_client)
+            assert await client.generate_image(provider, "test-key", "test", [], "600:450") == raw
+            assert await client.edit_image(provider, "test-key", "test", [str(source)], "600:450") == raw
+
+    asyncio.run(run())
+    generation, edit = seen
+    assert generation.url.path == "/v1/images/generations"
+    payload = json.loads(generation.content)
+    assert (payload["model"], payload["size"], payload["n"]) == (model, "944x704", 1)
+    assert "quality" not in payload and "complexity" not in payload
+    assert edit.url.path == "/v1/images/edits"
+    assert b'name="image"; filename="source.png"' in edit.content
+    assert b'944x704' in edit.content and model.encode() in edit.content
+    assert b'name="n"' in edit.content
+    assert b'name="quality"' not in edit.content and b'name="complexity"' not in edit.content
+
+
 def test_molink_nano_pro_uses_native_image_config_and_inline_references(tmp_path) -> None:
     source = tmp_path / "source.png"
     source.write_bytes(b"nano-source")
@@ -2375,8 +2399,8 @@ def create_live_aplus_generation_job(
     *,
     output_modes: list[str],
 ) -> tuple[str, str]:
-    add_provider(session, cipher, "atlas-gpt-image-2-generate", "image")
-    add_provider(session, cipher, "atlas-gpt-image-2-edit", "image")
+    add_provider(session, cipher, "molink-image-26-flare-generate", "image")
+    add_provider(session, cipher, "molink-image-26-flare-edit", "image")
     prompt_version = add_prompt_version(session, "aplus-meta")
     asset_path = settings.uploads_dir / "aplus-source.png"
     asset_bytes = png_bytes()
@@ -2469,7 +2493,7 @@ def test_suite_and_aplus_stop_before_next_provider_when_image_safety_hits(client
     with session_factory() as session:
         llm_default = add_provider(session, cipher, "doubao-seed-2-0-mini", "llm", default=True)
         add_provider(session, cipher, "qwen-3-6", "llm", fallback=True)
-        add_provider(session, cipher, "apimodels-nano-pro-generate", "image")
+        add_provider(session, cipher, "molink-image-26-flare-generate", "image")
         meta_prompt = add_prompt_version(session, "ecommerce-meta")
         vision_prompt = add_prompt_version(session, "product-vision")
         safety_prompt = add_prompt_version(session, "content-safety-review", "safety prompt")
@@ -2542,7 +2566,7 @@ def test_suite_and_aplus_stop_before_next_provider_when_image_safety_hits(client
         assert all(json.loads(log.response_summary)["categories"] == ["pornography", "violence", "politics"] for log in logs)
 
 
-def test_aplus_live_advanced_mobile_derives_from_web_master_with_atlas_edit(client, monkeypatch) -> None:
+def test_aplus_live_advanced_mobile_derives_from_web_master_with_molink_edit(client, monkeypatch) -> None:
     session_factory = client.app.state.session_factory
     settings = client.app.state.settings
     settings.public_asset_base_url = "https://assets.example.test"
@@ -2561,8 +2585,8 @@ def test_aplus_live_advanced_mobile_derives_from_web_master_with_atlas_edit(clie
     asyncio.run(aplus_jobs.run_aplus_generation_job(job_id, session_factory, settings, cipher))
 
     assert [(call["type"], call["provider"]) for call in recording_client.calls] == [
-        ("generate", "atlas-gpt-image-2-generate"),
-        ("edit", "atlas-gpt-image-2-edit"),
+        ("generate", "molink-image-26-flare-generate"),
+        ("edit", "molink-image-26-flare-edit"),
     ]
     assert recording_client.generate_calls[0]["input_paths"] == [asset_path]
     mobile_edit = recording_client.edit_calls[0]
@@ -2588,7 +2612,7 @@ def test_aplus_live_advanced_mobile_derives_from_web_master_with_atlas_edit(clie
         assert [item.status for item in items] == ["succeeded", "succeeded"]
 
 
-def test_aplus_live_mobile_only_uses_direct_atlas_mobile_generation(client, monkeypatch) -> None:
+def test_aplus_live_mobile_only_uses_direct_molink_mobile_generation(client, monkeypatch) -> None:
     session_factory = client.app.state.session_factory
     settings = client.app.state.settings
     settings.public_asset_base_url = "https://assets.example.test"
@@ -2607,7 +2631,7 @@ def test_aplus_live_mobile_only_uses_direct_atlas_mobile_generation(client, monk
     asyncio.run(aplus_jobs.run_aplus_generation_job(job_id, session_factory, settings, cipher))
 
     assert [(call["type"], call["provider"]) for call in recording_client.calls] == [
-        ("generate", "atlas-gpt-image-2-edit"),
+        ("generate", "molink-image-26-flare-edit"),
     ]
     assert recording_client.generate_calls[0]["input_paths"] == [asset_path]
     assert recording_client.generate_calls[0]["aspect_ratio"] == "600:450"
@@ -2616,14 +2640,14 @@ def test_aplus_live_mobile_only_uses_direct_atlas_mobile_generation(client, monk
     assert "不依赖 Web 母版" in recording_client.generate_calls[0]["prompt"]
 
 
-def test_aplus_live_atlas_failure_does_not_fallback_to_backup_provider(client, monkeypatch) -> None:
+def test_aplus_live_molink_failure_does_not_fallback_to_backup_provider(client, monkeypatch) -> None:
     session_factory = client.app.state.session_factory
     settings = client.app.state.settings
     settings.public_asset_base_url = "https://assets.example.test"
     cipher = client.app.state.cipher
     attempted: list[str] = []
 
-    class FailingAtlasClient:
+    class FailingMoLinkClient:
         async def generate_image(
             self,
             provider: Provider,
@@ -2631,7 +2655,7 @@ def test_aplus_live_atlas_failure_does_not_fallback_to_backup_provider(client, m
             **_kwargs: Any,
         ) -> bytes:
             attempted.append(provider.code)
-            raise RuntimeError("atlas down")
+            raise RuntimeError("molink down")
 
         async def edit_image(
             self,
@@ -2640,9 +2664,9 @@ def test_aplus_live_atlas_failure_does_not_fallback_to_backup_provider(client, m
             **_kwargs: Any,
         ) -> bytes:
             attempted.append(provider.code)
-            raise RuntimeError("atlas edit down")
+            raise RuntimeError("molink edit down")
 
-    monkeypatch.setattr(aplus_jobs, "ProviderClient", FailingAtlasClient)
+    monkeypatch.setattr(aplus_jobs, "ProviderClient", FailingMoLinkClient)
 
     with session_factory() as session:
         job_id, _asset_path = create_live_aplus_generation_job(
@@ -2656,13 +2680,13 @@ def test_aplus_live_atlas_failure_does_not_fallback_to_backup_provider(client, m
 
     asyncio.run(aplus_jobs.run_aplus_generation_job(job_id, session_factory, settings, cipher))
 
-    assert attempted == ["atlas-gpt-image-2-generate"]
+    assert attempted == ["molink-image-26-flare-generate"]
     with session_factory() as session:
         job = session.get(AplusJob, job_id)
         item = session.scalar(select(AplusItem).where(AplusItem.job_id == job_id))
         assert job.status == "failed"
         assert item.status == "failed"
-        assert "atlas down" in item.error
+        assert "molink down" in item.error
 
 
 def create_live_suite_item_with_version(
@@ -2749,19 +2773,19 @@ def test_suite_empty_instruction_regenerate_prefers_original_provider(client, mo
             settings,
             cipher,
             model_preference="fidelity",
-            provider_code="apimodels-nano-pro-generate",
+            provider_code="molink-image-26-flare-generate",
         )
         item = session.get(GenerationItem, item_id)
         version = asyncio.run(jobs_service.create_live_child_version(session, item, "", settings, cipher))
         metadata = json.loads(version.metadata_json)
 
-    assert [call["provider"] for call in recording_client.generate_calls] == ["apimodels-nano-pro-generate"]
+    assert [call["provider"] for call in recording_client.generate_calls] == ["molink-image-26-flare-generate"]
     assert recording_client.edit_calls == []
     assert version.parent_version_id == current_version_id
     assert version.instruction == ""
     assert metadata["edit_type"] == "regenerate"
     assert metadata["route_key"] == "suite_fidelity"
-    assert metadata["provider"] == "apimodels-nano-pro-generate"
+    assert metadata["provider"] == "molink-image-26-flare-generate"
     assert metadata["source_provider_preferred"] is True
 
 
@@ -2779,7 +2803,7 @@ def test_suite_empty_instruction_regenerate_falls_back_when_original_provider_un
             model_preference="fidelity",
             provider_code="apimodels-nano-pro-generate",
         )
-        add_provider(session, cipher, "kie-nano-2-generate", "image")
+        add_provider(session, cipher, "molink-image-26-flare-generate", "image")
         original = session.scalar(select(Provider).where(Provider.code == "apimodels-nano-pro-generate"))
         original.enabled = False
         session.commit()
@@ -2787,10 +2811,10 @@ def test_suite_empty_instruction_regenerate_falls_back_when_original_provider_un
         version = asyncio.run(jobs_service.create_live_child_version(session, item, "", settings, cipher))
         metadata = json.loads(version.metadata_json)
 
-    assert [call["provider"] for call in recording_client.generate_calls] == ["kie-nano-2-generate"]
+    assert [call["provider"] for call in recording_client.generate_calls] == ["molink-image-26-flare-generate"]
     assert recording_client.edit_calls == []
     assert metadata["route_key"] == "suite_fidelity"
-    assert metadata["provider"] == "kie-nano-2-generate"
+    assert metadata["provider"] == "molink-image-26-flare-generate"
     assert metadata["source_provider_preferred"] is False
 
 
@@ -2806,16 +2830,16 @@ def test_suite_layout_empty_instruction_regenerate_uses_layout_route(client, mon
             settings,
             cipher,
             model_preference="layout",
-            provider_code="atlas-gpt-image-2-generate",
+            provider_code="molink-image-26-sunburst-generate",
         )
         item = session.get(GenerationItem, item_id)
         version = asyncio.run(jobs_service.create_live_child_version(session, item, "", settings, cipher))
         metadata = json.loads(version.metadata_json)
 
-    assert [call["provider"] for call in recording_client.generate_calls] == ["atlas-gpt-image-2-generate"]
+    assert [call["provider"] for call in recording_client.generate_calls] == ["molink-image-26-sunburst-generate"]
     assert recording_client.edit_calls == []
     assert metadata["route_key"] == "suite_layout"
-    assert metadata["provider"] == "atlas-gpt-image-2-generate"
+    assert metadata["provider"] == "molink-image-26-sunburst-generate"
 
 
 def test_suite_non_empty_instruction_still_uses_image_edit_route(client, monkeypatch) -> None:
@@ -2833,7 +2857,7 @@ def test_suite_non_empty_instruction_still_uses_image_edit_route(client, monkeyp
             model_preference="fidelity",
             provider_code="apimodels-nano-pro-generate",
         )
-        add_provider(session, cipher, "atlas-gpt-image-2-edit", "image")
+        add_provider(session, cipher, "molink-image-26-flare-edit", "image")
         session.commit()
         item = session.get(GenerationItem, item_id)
         version = asyncio.run(
@@ -2842,8 +2866,8 @@ def test_suite_non_empty_instruction_still_uses_image_edit_route(client, monkeyp
         metadata = json.loads(version.metadata_json)
 
     assert recording_client.generate_calls == []
-    assert [call["provider"] for call in recording_client.edit_calls] == ["atlas-gpt-image-2-edit"]
-    assert metadata["provider"] == "atlas-gpt-image-2-edit"
+    assert [call["provider"] for call in recording_client.edit_calls] == ["molink-image-26-flare-edit"]
+    assert metadata["provider"] == "molink-image-26-flare-edit"
     assert metadata.get("edit_type") != "regenerate"
 
 
@@ -2863,7 +2887,7 @@ def test_live_generation_text_version_still_uses_image_edit_route(client, monkey
             provider_code="apimodels-nano-pro-generate",
         )
         add_prompt_version(session, "image-text-edit", "replace text {{REPLACEMENTS_TABLE}}")
-        add_provider(session, cipher, "atlas-gpt-image-2-edit", "image")
+        add_provider(session, cipher, "molink-image-26-flare-edit", "image")
         session.commit()
         item = session.get(GenerationItem, item_id)
         version = asyncio.run(
@@ -2879,9 +2903,9 @@ def test_live_generation_text_version_still_uses_image_edit_route(client, monkey
         metadata = json.loads(version.metadata_json)
 
     assert recording_client.generate_calls == []
-    assert [call["provider"] for call in recording_client.edit_calls] == ["atlas-gpt-image-2-edit"]
+    assert [call["provider"] for call in recording_client.edit_calls] == ["molink-image-26-flare-edit"]
     assert metadata["edit_type"] == "text"
-    assert metadata["provider"] == "atlas-gpt-image-2-edit"
+    assert metadata["provider"] == "molink-image-26-flare-edit"
 
 
 @pytest.mark.parametrize("image_size, aspect_ratio", [((640, 640), "1:1"), ((640, 480), "1:1")])

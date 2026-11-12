@@ -22,6 +22,7 @@ from backend.app.security import ApiKeyCipher
 from backend.app.core.runtime import default_runtime
 from backend.app.services.execution import run_image_route
 from backend.app.services.jobs import _call_llm_with_fallback, _enabled_provider, validate_generated_image_bytes
+from backend.app.services.provider_catalog import aplus_image_route, image_edit_route
 from backend.app.services.provider_routing import (
     ProviderSnapshot,
     cached_provider_by_code,
@@ -30,7 +31,7 @@ from backend.app.services.provider_routing import (
 )
 from backend.app.services.provider_limiter import provider_slot
 from backend.app.services.prompt_contract import parse_product_facts, sensitive_image_categories
-from backend.app.services.providers import ProviderClient, provider_requires_public_urls, requested_image_size
+from backend.app.services.providers import ProviderClient, generated_image_extension, provider_requested_image_size, provider_requires_public_urls
 from backend.app.services.redaction import safe_json
 from backend.app.services.sensitive_words import load_sensitive_word_snapshot
 from backend.app.services.storage import public_file_url
@@ -60,8 +61,6 @@ OUTPUT_MODE_LABELS = {
     "amazon_aplus_advanced_web": "高级 A+ Web",
     "amazon_aplus_advanced_mobile": "高级 A+ 移动端",
 }
-A_PLUS_ATLAS_DETAIL_PROVIDER_CODE = "atlas-gpt-image-2-generate"
-A_PLUS_ATLAS_MOBILE_PROVIDER_CODE = "atlas-gpt-image-2-edit"
 
 
 def _normalize_module_selections(params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -652,7 +651,7 @@ async def create_live_aplus_child_version(
     asset_ids = json.loads(job.asset_ids_json)
     asset_paths = [asset.file_path for asset in session.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()]
     input_paths = [current.file_path, *asset_paths]
-    route_key = "image_edit"
+    route_key = image_edit_route(_aplus_preference(json.loads(job.params_json)))
     provider_codes = route_provider_codes(session, route_key)
     provider_display_names = provider_display_names_by_code(session, provider_codes)
     prompt = (
@@ -692,7 +691,7 @@ async def create_live_aplus_child_version(
     image_bytes, used_code = await run_image_route(provider_codes, generate, provider_display_names)
     width, height = validate_generated_image_bytes(image_bytes)
     version_no = max((version.version_no for version in item.versions), default=0) + 1
-    result_name = f"aplus-{item.job_id}-{item.index + 1}-v{version_no}-{uuid4().hex[:8]}.png"
+    result_name = f"aplus-{item.job_id}-{item.index + 1}-v{version_no}-{uuid4().hex[:8]}{generated_image_extension(image_bytes)}"
     destination = settings.results_dir / result_name
     destination.write_bytes(image_bytes)
     version = AplusVersion(
@@ -702,7 +701,7 @@ async def create_live_aplus_child_version(
         instruction=instruction,
         file_path=str(destination),
         url=f"/files/results/{result_name}",
-        metadata_json=safe_json({"dry_run": False, "provider": used_code, "route_key": route_key, "requested_size": requested_image_size(item.aspect_ratio), "actual_size": [width, height]}),
+        metadata_json=safe_json({"dry_run": False, "provider": used_code, "route_key": route_key, "requested_size": provider_requested_image_size(cached_provider_by_code(session, used_code), item.aspect_ratio), "actual_size": [width, height]}),
     )
     session.add(version)
     session.flush()
@@ -1012,6 +1011,7 @@ def create_aplus_generation_job_from_plan(
         "module_item_ids": payload.module_item_ids,
         "output_targets": [target.model_dump() for target in payload.output_targets],
         "plan_params": json.loads(plan_job.params_json),
+        "model_preference": json.loads(plan_job.params_json).get("model_preference", "speed"),
     }
     job = AplusJob(
         job_type="generation",
@@ -1030,19 +1030,15 @@ def create_aplus_generation_job_from_plan(
     return job
 
 
-def _aplus_generation_route_key(output_mode: str) -> str:
-    return "aplus_mobile" if output_mode == "amazon_aplus_advanced_mobile" else "aplus_detail"
-
-
-def _aplus_atlas_provider_code(output_mode: str) -> str:
-    return A_PLUS_ATLAS_MOBILE_PROVIDER_CODE if output_mode == "amazon_aplus_advanced_mobile" else A_PLUS_ATLAS_DETAIL_PROVIDER_CODE
-
-
-def _enabled_aplus_atlas_provider(session: Session, provider_code: str) -> ProviderSnapshot:
+def _enabled_aplus_provider(session: Session, provider_code: str) -> ProviderSnapshot:
     provider = cached_provider_by_code(session, provider_code)
     if not provider or not provider.enabled or not provider.encrypted_api_key:
-        raise RuntimeError(f"A+ Atlas Provider {provider_code} 未启用或缺少 API Key")
+        raise RuntimeError(f"A+ Provider {provider_code} 未启用或缺少 API Key")
     return provider
+
+
+def _aplus_preference(params: dict[str, Any]) -> str | None:
+    return params.get("model_preference") or params.get("plan_params", {}).get("model_preference")
 
 
 async def run_aplus_generation_job(
@@ -1067,9 +1063,8 @@ async def run_aplus_generation_job(
             asset_ids = json.loads(job.asset_ids_json)
             asset_paths = [asset.file_path for asset in session.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()]
             if not job.dry_run:
-                provider_codes = {_aplus_atlas_provider_code(item.output_mode) for item in job.items}
-                for provider_code in provider_codes:
-                    _enabled_aplus_atlas_provider(session, provider_code)
+                for route in {aplus_image_route(item.output_mode, _aplus_preference(params)) for item in job.items}:
+                    route_provider_codes(session, route)
             session.commit()
 
         if job.dry_run:
@@ -1166,7 +1161,7 @@ async def _run_generation_item(
         item.status = "running"
         session.commit()
         input_paths = asset_paths
-        route_key = _aplus_generation_route_key(item.output_mode)
+        route_key = aplus_image_route(item.output_mode, _aplus_preference(params))
         if item.output_mode == "amazon_aplus_advanced_mobile" and item.source_web_item_id:
             source = session.scalar(
                 select(AplusItem)
@@ -1180,7 +1175,7 @@ async def _run_generation_item(
                 session.commit()
                 return
             input_paths = [source_version.file_path]
-        provider_code = _aplus_atlas_provider_code(item.output_mode)
+        provider_code = route_provider_codes(session, route_key)[0]
         provider_display_names = provider_display_names_by_code(session, [provider_code])
         prompt = build_aplus_generation_prompt(item)
         record_image_prompt(session, job_id=job.id, item_id=item.id, prompt=prompt, aplus=True)
@@ -1192,7 +1187,7 @@ async def _run_generation_item(
                 job = session.get(AplusJob, item.job_id) if item else None
                 if not item or not job or job.status in CANCEL_REQUESTED_STATUSES:
                     raise RuntimeError(USER_CANCELLED_ERROR)
-                provider = _enabled_aplus_atlas_provider(session, provider_code)
+                provider = _enabled_aplus_provider(session, provider_code)
                 input_urls = (
                     [public_file_url(settings, path) for path in input_paths]
                     if provider_requires_public_urls(provider) and input_paths
@@ -1245,7 +1240,7 @@ async def _run_generation_item(
                 message = message.replace(provider_code, display_name)
             raise RuntimeError(f"{display_name}: {message}") from exc
         width, height = validate_generated_image_bytes(image_bytes)
-        result_name = f"aplus-{item_id}-{uuid4().hex[:8]}.png"
+        result_name = f"aplus-{item_id}-{uuid4().hex[:8]}{generated_image_extension(image_bytes)}"
         destination = settings.results_dir / result_name
         destination.write_bytes(image_bytes)
         with session_factory() as session:
@@ -1257,7 +1252,7 @@ async def _run_generation_item(
                 instruction="Live A+ 生成",
                 file_path=str(destination),
                 url=f"/files/results/{result_name}",
-                metadata_json=safe_json({"dry_run": False, "provider": used_code, "route_key": route_key, "requested_size": requested_image_size(item.aspect_ratio), "actual_size": [width, height]}),
+                metadata_json=safe_json({"dry_run": False, "provider": used_code, "route_key": route_key, "requested_size": provider_requested_image_size(cached_provider_by_code(session, used_code), item.aspect_ratio), "actual_size": [width, height]}),
             )
             session.add(version)
             session.flush()

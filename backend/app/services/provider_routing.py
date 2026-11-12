@@ -33,15 +33,15 @@ VALID_PROVIDER_ROUTE_ROLES: set[str] = set(ROUTE_SLOT_ORDER)
 PROVIDER_ROUTE_DEFINITIONS: dict[str, dict[str, Any]] = {
     "suite_fidelity": {
         "category": "套图",
-        "title": "保真",
-        "description": "套图商品保真优先链路，优先 Nano Pro，备线 Nano 2。",
+        "title": "速度",
+        "description": "MoLink Image 2.6 Flare。",
         "capability": "image",
         "operation": "generate",
         "default_chain": DEFAULT_ROUTE_CHAINS["suite_fidelity"],
     },
     "suite_layout": {
         "category": "套图",
-        "title": "排版",
+        "title": "质量",
         "description": "套图视觉排版链路，使用 GPT Image 2 generations。",
         "capability": "image",
         "operation": "generate",
@@ -49,7 +49,7 @@ PROVIDER_ROUTE_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "aplus_detail": {
         "category": "A+",
-        "title": "详情页",
+        "title": "速度 · 生成",
         "description": "A+ 详情页、普通 A+ 与高级 A+ Web 生图链路。",
         "capability": "image",
         "operation": "generate",
@@ -57,7 +57,7 @@ PROVIDER_ROUTE_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "aplus_mobile": {
         "category": "A+",
-        "title": "移动端",
+        "title": "速度 · 编辑",
         "description": "高级 A+ 移动端 600:450 由 GPT Image 2 edit 生成。",
         "capability": "image",
         "operation": "edit",
@@ -65,7 +65,7 @@ PROVIDER_ROUTE_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "image_edit": {
         "category": "改图",
-        "title": "图片编辑",
+        "title": "速度",
         "description": "套图、A+ 结果图二次编辑和文字替换链路，只使用图片 edit 能力。",
         "capability": "image",
         "operation": "edit",
@@ -88,6 +88,14 @@ PROVIDER_ROUTE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default_chain": DEFAULT_ROUTE_CHAINS["llm"],
     },
 }
+
+for _base_route, _title in (("aplus_detail", "质量 · 生成"), ("aplus_mobile", "质量 · 编辑"), ("image_edit", "质量")):
+    _quality_route = f"{_base_route}_quality"
+    PROVIDER_ROUTE_DEFINITIONS[_quality_route] = {
+        **PROVIDER_ROUTE_DEFINITIONS[_base_route],
+        "title": _title,
+        "default_chain": DEFAULT_ROUTE_CHAINS[_quality_route],
+    }
 
 DEFAULT_ROUTE_ROLES_BY_PROVIDER: dict[str, dict[str, ProviderRouteRole]] = {}
 for route_key, chain in DEFAULT_ROUTE_CHAINS.items():
@@ -248,6 +256,8 @@ def write_provider_config(provider: Provider, config: dict[str, Any]) -> None:
 
 
 def provider_is_route_eligible(provider: ProviderRecord, route_key: str) -> bool:
+    if route_key != "llm" and provider.code not in DEFAULT_ROUTE_CHAINS.get(route_key, ()):
+        return False
     config = provider_config(provider)
     if route_key in GPT_IMAGE2_EXACT_SIZE_ROUTE_KEYS and not bool(config.get("supports_exact_custom_size")):
         return False

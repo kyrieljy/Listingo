@@ -15,6 +15,8 @@ import {
   apiErrorStatus, assistCopywriting, batchSelectionDownloadUrl, cancelJob, createJob, editItem, editItemText, generationDownloadUrl, getJob, listAplusGenerationJobs, listAplusPlanJobs, listJobs, ocrItemText, retryFailedItems, retryItem, uploadAsset, userFacingApiErrorMessage,
   type AplusJob, type Asset, type DownloadFormat, type ImageTextEditLine, type Job, type JobItem,
 } from '../../api/client'
+import ModelPreferencePicker from './ModelPreferencePicker.vue'
+import { modelPreferenceOptions, normalizeModelPreference } from './workspace-model'
 import APlusPhasePanel from './APlusPhasePanel.vue'
 import AccountModal from '../auth/AccountModal.vue'
 import AuthModal from '../auth/AuthModal.vue'
@@ -59,7 +61,7 @@ const textEditPanelStyle = ref<CSSProperties>({})
 const watermarkOverride = ref<boolean | null>(null)
 const includeWatermark = computed(() => allowedIncludeWatermark(watermarkOverride.value ?? authStore.defaultIncludeWatermark))
 const batchSuiteWatermarkByItemId = ref<Record<string, boolean>>({})
-const aiSuggestion = ref(''); const aiWriteOpen = ref(false); const preferenceOpen = ref(false); const sellingPointsEditing = ref(false)
+const aiSuggestion = ref(''); const aiWriteOpen = ref(false); const sellingPointsEditing = ref(false)
 const aiSuggestionEditing = ref(false)
 const suggestedCopywritingId = ref<string | null>(null)
 const appliedCopywritingId = ref<string | null>(null)
@@ -78,10 +80,6 @@ const sellingPointsPlaceholder = `建议包含以下信息，帮助生成更精�
 4. 期望场景
 5. 具体参数`
 const demoImages = [tumblerFeature, tumblerLifestyle, tumblerCommute, tumblerSource]
-const modelPreferenceOptions = [
-  { key: 'fidelity' as const, label: '商品保持优先', description: '优先保持商品外观、颜色、结构和标签一致' },
-  { key: 'layout' as const, label: '视觉排版优先', description: '强化画面排版与文字呈现，商品保持度略低' },
-]
 function currentItemUrl(item: JobItem | null): string | undefined {
   return item?.versions.find((version) => version.id === item.current_version_id)?.url ?? item?.versions.at(-1)?.url
 }
@@ -90,8 +88,7 @@ const count = computed(() => generationCount(form.value))
 const uploadLimitReached = computed(() => assets.value.length >= PRODUCT_IMAGE_UPLOAD_LIMIT)
 const customValid = computed(() => form.value.mode === 'smart' || (count.value >= 7 && count.value <= 12))
 const inputValid = computed(() => form.value.sellingPoints.trim().length > 0)
-const layoutPreferred = computed(() => form.value.modelPreference === 'layout')
-const selectedModelPreference = computed(() => modelPreferenceOptions.find((option) => option.key === form.value.modelPreference) ?? modelPreferenceOptions[0])
+const selectedModelPreference = computed(() => modelPreferenceOptions.find((option) => option.key === normalizeModelPreference(form.value.modelPreference)) ?? modelPreferenceOptions[0])
 const suiteJobActive = computed(() => Boolean(job.value && !FINAL_JOB_STATUSES.has(job.value.status)))
 const activeItemScript = computed(() => activeItem.value ? scriptMarkdown(activeItem.value) : '')
 // 非 admin 恒显 Live（前台无法选择 dryrun）；admin 以开关为准（021）
@@ -333,7 +330,6 @@ function closeTextEdit() {
 watch(phase, () => {
   trackPhaseView(phase.value)
   mobileOpen.value = false
-  preferenceOpen.value = false
   closeTextEdit()
   if (phase.value === 'suite') void resumeCurrentSuiteJobRefresh()
   void restoreActiveJobForCurrentRoute()
@@ -577,11 +573,7 @@ async function openHistoryDrawer() {
   historyOpen.value = true
   await loadPhaseHistory()
 }
-function selectModelPreference(key: (typeof modelPreferenceOptions)[number]['key']) {
-  trackSuiteEvent('suite_model_preference_click', 'click', 'suite', { model_preference: key })
-  form.value.modelPreference = key
-  preferenceOpen.value = false
-}
+
 function openSuiteBatch() {
   trackSuiteEvent('suite_batch_click', 'click', 'batch_suite')
   suiteBatchOpen.value = true
@@ -615,13 +607,12 @@ function resetSuiteTask() {
   appliedCopywritingId.value = null
   assets.value = []; job.value = null; selected.value = []; activeItem.value = null
   clearBatchSuiteResults()
-  previewOpen.value = false; editOpen.value = false; editSubmitting.value = false; confirmOpen.value = false; aiWriteOpen.value = false; aiSuggestion.value = ''; historyOpen.value = false; mobileOpen.value = false; preferenceOpen.value = false; sellingPointsEditing.value = false; aiSuggestionEditing.value = false
+  previewOpen.value = false; editOpen.value = false; editSubmitting.value = false; confirmOpen.value = false; aiWriteOpen.value = false; aiSuggestion.value = ''; historyOpen.value = false; mobileOpen.value = false; sellingPointsEditing.value = false; aiSuggestionEditing.value = false
   form.value = createDefaultWorkspaceForm()
 }
 function startNewTask() {
   historyOpen.value = false
   mobileOpen.value = false
-  preferenceOpen.value = false
   suppressedAutoRestorePhases.value = copyPhaseSet(suppressedAutoRestorePhases.value, phase.value)
   if (phase.value === 'aplus') {
     aplusPanel.value?.startNewTask()
@@ -1059,18 +1050,7 @@ async function openHistoryJob(entry: HistoryEntry) {
             <div v-if="form.sellingPoints.trim() && !sellingPointsEditing" class="markdown-preview main-copy-preview" role="button" tabindex="0" aria-label="编辑商品卖点与要求" @click="showSellingPointsEditor" @keydown.enter.prevent="showSellingPointsEditor" @keydown.space.prevent="showSellingPointsEditor" v-html="renderMarkdown(form.sellingPoints)"></div>
             <textarea v-else ref="sellingPointsInput" v-model="form.sellingPoints" class="selling-points-input" rows="8" :placeholder="sellingPointsPlaceholder" @focus="sellingPointsEditing = true" @blur="sellingPointsEditing = false"/>
           </div>
-          <div class="model-preference-row">
-            <span><b>生成偏好</b><small>{{ selectedModelPreference.description }}</small></span>
-            <div class="model-preference-select">
-              <button class="model-preference-trigger" type="button" :aria-expanded="preferenceOpen" aria-haspopup="listbox" @click="preferenceOpen = !preferenceOpen">{{ selectedModelPreference.label }}<DownOutlined/></button>
-              <div v-if="preferenceOpen" class="model-preference-menu" role="listbox" aria-label="生成偏好">
-                <button v-for="option in modelPreferenceOptions" :key="option.key" type="button" role="option" :aria-selected="option.key === form.modelPreference" @click="selectModelPreference(option.key)">
-                  <span><b>{{ option.label }}</b><small>{{ option.description }}</small></span>
-                  <CheckOutlined v-if="option.key === form.modelPreference"/>
-                </button>
-              </div>
-            </div>
-          </div>
+          <ModelPreferencePicker v-model="form.modelPreference" @update:model-value="trackSuiteEvent('suite_model_preference_click', 'click', 'suite', { model_preference: $event })" />
           <Teleport to="body">
             <div v-if="aiWriteOpen" class="ai-write-popover" role="dialog" aria-label="AI 帮写建议">
               <header><strong><ThunderboltOutlined/>AI 帮写建议</strong><button type="button" aria-label="关闭 AI 帮写建议" @click="aiWriteOpen=false"><CloseOutlined/></button></header>
@@ -1226,7 +1206,7 @@ async function openHistoryJob(entry: HistoryEntry) {
       @reload="reloadTextEditLines"
       @remove="removeTextEditLine"
     />
-    <a-modal v-model:open="confirmOpen" title="确认生成策略" ok-text="确认并开始生成" cancel-text="返回修改" @ok="runConfirmedGeneration"><div class="generation-confirm"><p>系统将先读取商品图提取事实，再由当前 Meta Prompt 规划套图；生成前后会拦截黄赌毒、政治内容和政治领导人等安全风险。</p><dl><div><dt>平台 / 市场</dt><dd>{{ form.platform }} / {{ form.market }}</dd></div><div><dt>语言 / 比例</dt><dd>{{ form.language }} / {{ ratioValues[form.ratio] || '1:1' }}</dd></div><div><dt>套图结构</dt><dd>{{ form.mode==='smart' ? `智能匹配 ${count} 张` : `自定义 ${count} 张` }}</dd></div><div><dt>生成偏好</dt><dd>{{ layoutPreferred ? '视觉排版优先' : '商品保持优先' }}</dd></div><div><dt>内容安全</dt><dd>输入、规划文本和最终图片均会进行安全审计</dd></div></dl></div></a-modal>
+    <a-modal v-model:open="confirmOpen" title="确认生成策略" ok-text="确认并开始生成" cancel-text="返回修改" @ok="runConfirmedGeneration"><div class="generation-confirm"><p>系统将先读取商品图提取事实，再由当前 Meta Prompt 规划套图；生成前后会拦截黄赌毒、政治内容和政治领导人等安全风险。</p><dl><div><dt>平台 / 市场</dt><dd>{{ form.platform }} / {{ form.market }}</dd></div><div><dt>语言 / 比例</dt><dd>{{ form.language }} / {{ ratioValues[form.ratio] || '1:1' }}</dd></div><div><dt>套图结构</dt><dd>{{ form.mode==='smart' ? `智能匹配 ${count} 张` : `自定义 ${count} 张` }}</dd></div><div><dt>生成偏好</dt><dd>{{ selectedModelPreference.label }}</dd></div><div><dt>内容安全</dt><dd>输入、规划文本和最终图片均会进行安全审计</dd></div></dl></div></a-modal>
   </div>
 </template>
 

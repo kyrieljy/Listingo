@@ -79,23 +79,23 @@ export const providerRouteDefinitions: ProviderRouteDefinition[] = [
     key: 'suite_fidelity',
     categoryKey: 'suite',
     categoryTitle: '套图',
-    title: '保真',
-    description: 'Nano Pro 主线 + Nano 2 备线，强调商品外观、颜色、结构与标签一致。',
+    title: '速度',
+    description: 'MoLink Image 2.6 Flare。',
     capability: 'image',
   },
   {
     key: 'suite_layout',
     categoryKey: 'suite',
     categoryTitle: '套图',
-    title: '排版',
-    description: 'GPT Image 2 generations，强化文字层级与海报版式。',
+    title: '质量',
+    description: 'MoLink Image 2.6 Sunburst。',
     capability: 'image',
   },
   {
     key: 'aplus_detail',
     categoryKey: 'aplus',
     categoryTitle: 'A+',
-    title: '详情页',
+    title: '速度 · 生成',
     description: 'A+ 详情页、普通 A+ 与高级 A+ Web 生图链路。',
     capability: 'image',
   },
@@ -103,16 +103,40 @@ export const providerRouteDefinitions: ProviderRouteDefinition[] = [
     key: 'aplus_mobile',
     categoryKey: 'aplus',
     categoryTitle: 'A+',
-    title: '移动端',
-    description: '高级 A+ 移动端 600:450，必须使用 GPT Image 2 edit。',
+    title: '速度 · 编辑',
+    description: '高级 A+ 移动端 600:450，使用 MoLink Flare 编辑。',
     capability: 'image',
   },
   {
     key: 'image_edit',
     categoryKey: 'image_edit',
     categoryTitle: '改图',
-    title: '图片编辑',
+    title: '速度',
     description: '套图与 A+ 结果图二次编辑、文字替换，只调用图片 edit 能力。',
+    capability: 'image',
+  },
+  {
+    key: 'aplus_detail_quality',
+    categoryKey: 'aplus',
+    categoryTitle: 'A+',
+    title: '质量 · 生成',
+    description: 'MoLink Image 2.6 Sunburst。',
+    capability: 'image',
+  },
+  {
+    key: 'aplus_mobile_quality',
+    categoryKey: 'aplus',
+    categoryTitle: 'A+',
+    title: '质量 · 编辑',
+    description: 'MoLink Image 2.6 Sunburst。',
+    capability: 'image',
+  },
+  {
+    key: 'image_edit_quality',
+    categoryKey: 'image_edit',
+    categoryTitle: '改图',
+    title: '质量',
+    description: 'MoLink Image 2.6 Sunburst。',
     capability: 'image',
   },
   {
@@ -168,29 +192,16 @@ function providerGroupLabel(provider: ProviderDisplayRecord): string {
   return provider.provider_group_label || provider.provider_group || '未分组'
 }
 
-function providerModelFamily(provider: ProviderDisplayRecord): string {
-  return String(provider.config?.model_family || provider.model_name || provider.code)
-}
+
 
 export function providerMatchesRoute(provider: ProviderDisplayRecord, route: ProviderRouteDefinition): boolean {
   if (provider.capability !== route.capability) return false
   const operation = String(provider.operation || provider.config?.operation || '')
-  const family = providerModelFamily(provider)
-  const requiresExactSize = route.key === 'suite_layout' || route.key === 'aplus_detail' || route.key === 'aplus_mobile' || route.key === 'image_edit'
-  if (requiresExactSize && !provider.supports_exact_custom_size) return false
-  if (route.key === 'suite_fidelity') {
-    return operation === 'generate' && (family.includes('nano-banana') || family === 'gpt-image-2')
-  }
-  if (route.key === 'suite_layout' || route.key === 'aplus_detail') {
-    return operation === 'generate' && family === 'gpt-image-2'
-  }
-  if (route.key === 'aplus_mobile' || route.key === 'image_edit') {
-    return operation === 'edit' && family === 'gpt-image-2' && Boolean(provider.supports_edit)
-  }
-  if (route.key === 'video') {
-    return operation === 'video' && family === 'seedance-2.0'
-  }
-  return true
+  if (route.capability === 'video') return provider.code === 'hellobabygo-seedance-2-0-video'
+  if (route.capability !== 'image') return true
+  const model = route.key === 'suite_layout' || route.key.endsWith('_quality') ? 'sunburst' : 'flare'
+  const expected = route.key.startsWith('image_edit') || route.key.startsWith('aplus_mobile') ? 'edit' : 'generate'
+  return operation === expected && provider.code === `molink-image-26-${model}-${expected}`
 }
 
 function assignedProviderItems(providers: ProviderDisplayRecord[], route: ProviderRouteDefinition): ProviderBusinessItem[] {

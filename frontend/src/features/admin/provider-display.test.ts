@@ -140,73 +140,31 @@ describe('provider business display', () => {
     expect(providerRuntimeState(provider('yunwu-nano-pro', true, true)).tone).toBe('ready')
   })
 
-  it('groups providers by business route and defaults to the primary provider group', () => {
-    const groups = groupProvidersByBusinessRoute(baseProviders())
-
-    expect(groups.map((group) => group.key)).toEqual(['suite_fidelity', 'suite_layout', 'aplus_detail', 'aplus_mobile', 'image_edit', 'video', 'llm'])
-    expect(groups[0].defaultProviderGroup).toBe('apimodels')
-    expect(groups[0].selectedProviderGroup).toBe('apimodels')
-    expect(groups[0].providerGroups.map((item) => item.key)).toEqual(['apimodels', 'kie', 'atlas'])
-    expect(groups[0].providers.map((item) => item.code)).toEqual(['apimodels-nano-pro-generate'])
-    expect(groups[0].route).toContain('kie-nano-2-generate')
-    expect(groups[1].providers.map((item) => item.code)).toEqual(['atlas-gpt-image-2-generate'])
-    expect(groups[3].providers.map((item) => item.code)).toEqual(['atlas-gpt-image-2-edit'])
-    expect(groups[5].providers.map((item) => item.code)).toEqual(['cometapi-seedance-2-0-video'])
-    expect(groups[6].providers.map((item) => item.routeRole)).toEqual(['primary', 'backup1'])
-    expect(groups.every((group) => group.ready)).toBe(true)
-  })
-
-  it('lets an admin switch a route to another transit provider group', () => {
-    const groups = groupProvidersByBusinessRoute(baseProviders(), { suite_fidelity: 'kie' })
-    const fidelity = groups.find((group) => group.key === 'suite_fidelity')
-
-    expect(fidelity?.selectionMode).toBe('provider_group')
-    expect(fidelity?.selectedProviderGroup).toBe('kie')
-    expect(fidelity?.providers.map((item) => item.code)).toEqual(['kie-nano-2-generate'])
-  })
-
-  it('exposes a chain configuration mode with all compatible model candidates', () => {
-    const groups = groupProvidersByBusinessRoute([
-      provider('apimodels-nano-pro-generate'),
-      provider('kie-nano-2-generate'),
-      provider('atlas-nano-2-generate'),
-      provider('runware-nano-2-generate'),
-      provider('atlas-gpt-image-2-generate'),
-      provider('molink-image-2-generate'),
-    ], { suite_fidelity: providerRouteChainConfigValue })
-
-    const fidelity = groups.find((group) => group.key === 'suite_fidelity')
-    expect(fidelity?.selectionMode).toBe('chain_config')
-    expect(fidelity?.providers.map((item) => item.code)).toEqual([
-      'apimodels-nano-pro-generate',
-      'kie-nano-2-generate',
-      'molink-image-2-generate',
-    ])
-    expect(fidelity?.chainCandidates.map((item) => item.code)).toEqual([
-      'apimodels-nano-pro-generate',
-      'kie-nano-2-generate',
-      'molink-image-2-generate',
+  it('offers only the matching MoLink model for each image route', () => {
+    const candidates = [
+      'molink-image-26-flare-generate',
+      'molink-image-26-sunburst-generate',
+      'molink-image-26-flare-edit',
+      'molink-image-26-sunburst-edit',
       'atlas-gpt-image-2-generate',
-      'atlas-nano-2-generate',
-      'runware-nano-2-generate',
-    ])
-  })
-
-  it('groups MoLink models into the confirmed route matrix', () => {
-    const groups = groupProvidersByBusinessRoute([
-      provider('molink-image-2-generate'),
-      provider('molink-image-2-edit'),
-      provider('molink-nano-pro-generate'),
-    ])
-
-    expect(groups.find((group) => group.key === 'suite_fidelity')?.chainCandidates.map((item) => item.code)).toEqual([
-      'molink-image-2-generate',
-      'molink-nano-pro-generate',
-    ])
-    expect(groups.find((group) => group.key === 'suite_layout')?.chainCandidates.map((item) => item.code)).toEqual(['molink-image-2-generate'])
-    expect(groups.find((group) => group.key === 'aplus_detail')?.chainCandidates.map((item) => item.code)).toEqual(['molink-image-2-generate'])
-    expect(groups.find((group) => group.key === 'aplus_mobile')?.chainCandidates.map((item) => item.code)).toEqual(['molink-image-2-edit'])
-    expect(groups.find((group) => group.key === 'image_edit')?.chainCandidates.map((item) => item.code)).toEqual(['molink-image-2-edit'])
+      'molink-image-2-edit',
+    ]
+    const groups = groupProvidersByBusinessRoute(candidates.map(code => provider(code)), {
+      suite_fidelity: providerRouteChainConfigValue,
+    })
+    const expected = {
+      suite_fidelity: candidates[0],
+      suite_layout: candidates[1],
+      aplus_detail: candidates[0],
+      aplus_detail_quality: candidates[1],
+      aplus_mobile: candidates[2],
+      aplus_mobile_quality: candidates[3],
+      image_edit: candidates[2],
+      image_edit_quality: candidates[3],
+    }
+    for (const [route, code] of Object.entries(expected)) {
+      expect(groups.find(group => group.key === route)?.chainCandidates.map(item => item.code)).toEqual([code])
+    }
   })
 
   it('groups routes into the requested major model categories', () => {
@@ -214,8 +172,8 @@ describe('provider business display', () => {
 
     expect(categories.map((category) => category.key)).toEqual(['suite', 'aplus', 'image_edit', 'video', 'llm'])
     expect(categories[0].groups.map((group) => group.key)).toEqual(['suite_fidelity', 'suite_layout'])
-    expect(categories[1].groups.map((group) => group.key)).toEqual(['aplus_detail', 'aplus_mobile'])
-    expect(categories[2].groups.map((group) => group.key)).toEqual(['image_edit'])
+    expect(categories[1].groups.map((group) => group.key)).toEqual(['aplus_detail', 'aplus_mobile', 'aplus_detail_quality', 'aplus_mobile_quality'])
+    expect(categories[2].groups.map((group) => group.key)).toEqual(['image_edit', 'image_edit_quality'])
     expect(categories[3].groups.map((group) => group.key)).toEqual(['video'])
     expect(categories[4].groups.map((group) => group.key)).toEqual(['llm'])
   })

@@ -123,6 +123,7 @@ export function createBatchGlobalParams(
   if (businessType === 'aplus') {
     const outputTargets = buildAplusOutputTargets(aplusForm)
     return {
+      model_preference: aplusForm.modelPreference ?? "speed",
       platform: aplusForm.platform,
       market: aplusForm.market,
       language: aplusForm.language,

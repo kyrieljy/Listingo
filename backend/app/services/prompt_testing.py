@@ -60,6 +60,7 @@ from backend.app.services.prompt_contract import (
     render_prompt_variables,
     validate_meta_prompt_semantics,
 )
+from backend.app.services.provider_catalog import aplus_image_route, image_preference
 from backend.app.services.provider_routing import route_provider_codes
 from backend.app.services.providers import ProviderClient
 from backend.app.services.redaction import safe_json
@@ -137,7 +138,7 @@ def _suite_payload(inputs: dict[str, Any], *, dry_run: bool) -> GenerationJobCre
         mode=mode,  # type: ignore[arg-type]
         count=count,
         custom_counts=custom_counts,
-        model_preference=str(inputs.get("model_preference") or "fidelity"),  # type: ignore[arg-type]
+        model_preference=str(inputs.get("model_preference") or "speed"),  # type: ignore[arg-type]
         dry_run=dry_run,
     )
 
@@ -167,6 +168,7 @@ def _aplus_payload(inputs: dict[str, Any], *, dry_run: bool) -> AplusPlanJobCrea
     output_targets = inputs.get("output_targets") or [{"mode": "detail", "aspect_ratio": "1:1"}]
     module_selections = inputs.get("module_selections") or [{"name": "商品主视觉", "count": 1}, {"name": "卖点拆解", "count": 1}]
     return AplusPlanJobCreate(
+        model_preference=image_preference(inputs.get("model_preference")),
         asset_ids=[str(item) for item in inputs.get("asset_ids", [])],
         platform=str(inputs.get("platform") or "亚马逊"),
         market=str(inputs.get("market") or "美国"),
@@ -292,7 +294,7 @@ def _build_llm_test_prompts(
             "brand_style": payload.brand_style or "由商品品类、目标市场和可见包装风格推导",
             "aspect_ratio": payload.aspect_ratio,
             "image_plan": image_plan,
-            "model_preference": "视觉排版优先" if payload.model_preference == "layout" else "商品保持优先",
+            "model_preference": "生成质量优先" if image_preference(payload.model_preference) == "quality" else "生成速度优先",
         }
         return (
             append_runtime_contract(render_prompt_variables(prompt_content, prompt_variables), payload.count),
@@ -573,7 +575,7 @@ def _create_aplus_plan_admin_test_job(
     _enabled_provider(session, "llm", "default")
     _enabled_provider(session, "llm", "fallback")
     for target in data.output_targets:
-        route_provider_codes(session, "aplus_mobile" if target.mode == "amazon_aplus_advanced_mobile" else "aplus_detail")
+        route_provider_codes(session, aplus_image_route(target.mode, data.model_preference))
     prompt_version_id = prompt.active_version_id
     product_vision = _active_prompt_version(session, "product-vision")
     if not prompt_version_id:

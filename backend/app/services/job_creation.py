@@ -11,6 +11,7 @@ from backend.app.schemas import AplusGenerationJobCreate, AplusPlanJobCreate, Ge
 from backend.app.services.aplus_jobs import create_aplus_generation_job_from_plan, load_aplus_job
 from backend.app.services.content_safety import ContentSafetyBlocked, ensure_content_safe, run_local_text_safety_review
 from backend.app.services.jobs import _enabled_provider, image_provider_route
+from backend.app.services.provider_catalog import aplus_image_route
 from backend.app.services.provider_routing import (
     ProviderSnapshot,
     cached_provider_by_code,
@@ -154,7 +155,7 @@ def create_aplus_plan_job_record(
     if not payload.dry_run:
         provider_codes: list[str] = []
         for target in payload.output_targets:
-            route_key = "aplus_mobile" if target.mode == "amazon_aplus_advanced_mobile" else "aplus_detail"
+            route_key = aplus_image_route(target.mode, payload.model_preference)
             provider_codes.extend(route_provider_codes(session, route_key))
         _ensure_provider_reference_capacity(session, provider_codes, len(payload.asset_ids))
 
@@ -195,7 +196,7 @@ def create_aplus_generation_job_record(
         try:
             provider_codes: list[str] = []
             for target in payload.output_targets:
-                route_key = "aplus_mobile" if target.mode == "amazon_aplus_advanced_mobile" else "aplus_detail"
+                route_key = aplus_image_route(target.mode, plan_params.get("model_preference"))
                 provider_codes.extend(route_provider_codes(session, route_key))
             _ensure_provider_reference_capacity(session, provider_codes, len(json.loads(plan_job.asset_ids_json)))
         except RuntimeError as exc:

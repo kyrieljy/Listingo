@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ModelPreferencePicker from './ModelPreferencePicker.vue'
 import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch, type CSSProperties } from 'vue'
 import { message } from 'ant-design-vue'
 import backpackScene from '../../assets/listingo-demo-backpack-01.webp'
@@ -1338,6 +1339,7 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
       <div class="markdown-input-frame aplus-product-info-markdown-frame">
         <div v-if="form.productInfo.trim() && !productInfoEditing" class="markdown-preview main-copy-preview" role="button" tabindex="0" aria-label="编辑商品卖点与要求" @click="showProductInfoEditor" @keydown.enter.prevent="showProductInfoEditor" @keydown.space.prevent="showProductInfoEditor" v-html="renderMarkdown(form.productInfo)"></div>
         <textarea v-else ref="productInfoInput" v-model="form.productInfo" class="aplus-product-info selling-points-input" rows="6" :placeholder="productInfoPlaceholder" @focus="productInfoEditing = true" @blur="productInfoEditing = false" />
+        <ModelPreferencePicker v-model="form.modelPreference" />
       </div>
       <Teleport to="body">
         <div v-if="aiWriteOpen" class="ai-write-popover" role="dialog" aria-label="AI 转写建议">

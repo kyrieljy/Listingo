@@ -4,6 +4,9 @@ import asyncio
 import base64
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from io import BytesIO
+
+from PIL import Image
 from email.utils import parsedate_to_datetime
 import json
 import math
@@ -152,6 +155,17 @@ def _image_direction(aspect_ratio: str) -> str:
 def requested_image_size(aspect_ratio: str) -> dict[str, Any]:
     width, height = IMAGE_DIMENSIONS_BY_RATIO.get(aspect_ratio, (1024, 1024))
     return {"aspect_ratio": aspect_ratio, "width": width, "height": height, "size": f"{width}x{height}"}
+
+
+def generated_image_extension(content: bytes) -> str:
+    with Image.open(BytesIO(content)) as image:
+        return ".jpg" if image.format == "JPEG" else f".{image.format.lower()}"
+
+
+def provider_requested_image_size(provider: Provider | None, aspect_ratio: str) -> dict[str, Any]:
+    if provider and provider.code.startswith("molink-image-26-"):
+        return _provider_request_image_size_for_config(provider_config_dict(provider), aspect_ratio)
+    return requested_image_size(aspect_ratio)
 
 
 def _uses_frontend_value(value: Any) -> bool:
@@ -946,7 +960,9 @@ class ProviderClient:
                 "output_format": _configured_output_format(config),
                 "n": _configured_optional_int(config, "n", minimum=1, maximum=10) or 1,
             }
-            if config.get("quality"):
+            if provider.model_name.startswith("gpt-image-2.6-"):
+                image2_payload["n"] = 1
+            elif config.get("quality"):
                 image2_payload["quality"] = str(config["quality"])
             return image2_payload
         if group == "molink" and config.get("api_shape") == "gemini_generate_content":
@@ -1155,9 +1171,11 @@ class ProviderClient:
             "prompt": prompt,
             "size": requested["size"],
         }
-        if config.get("provider_group") != "molink":
+        if provider.model_name.startswith("gpt-image-2.6-"):
+            form["n"] = "1"
+        elif config.get("provider_group") != "molink":
             form["n"] = str(_configured_optional_int(config, "n", minimum=1, maximum=10) or 1)
-        if config.get("quality"):
+        if config.get("quality") and not provider.model_name.startswith("gpt-image-2.6-"):
             form["quality"] = str(config["quality"])
         if config.get("provider_group") == "molink":
             form["output_format"] = _configured_output_format(config)

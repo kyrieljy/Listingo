@@ -19,8 +19,6 @@ from backend.app.services.provider_routing import (
 )
 from backend.app.services.provider_catalog import (
     DEFAULT_ROUTE_CHAINS,
-    GPT_IMAGE2_EXACT_SIZE_ROUTE_KEYS,
-    ROUTE_SLOT_ORDER,
     media_provider_presets,
 )
 from backend.app.services.workflow_registry import default_workflow_json, workflow_preset_dicts
@@ -232,81 +230,6 @@ def ensure_default_provider_route_roles(session: Session) -> None:
         write_provider_config(provider, config)
 
 
-def _provider_supports_exact_route(provider: Provider) -> bool:
-    config = provider_config(provider)
-    return not config.get("hidden_legacy") and bool(config.get("supports_exact_custom_size"))
-
-
-def _clear_route_key(providers: list[Provider], route_key: str) -> None:
-    for provider in providers:
-        config = provider_config(provider)
-        roles = normalize_route_roles(config.get("route_roles"))
-        if route_key not in roles:
-            continue
-        roles.pop(route_key, None)
-        config["route_roles"] = roles
-        write_provider_config(provider, config)
-
-
-def _assign_default_route_chain(providers: list[Provider], route_key: str) -> None:
-    by_code = {provider.code: provider for provider in providers}
-    _clear_route_key(providers, route_key)
-    for index, provider_code in enumerate(DEFAULT_ROUTE_CHAINS.get(route_key, [])[: len(ROUTE_SLOT_ORDER)]):
-        provider = by_code.get(provider_code)
-        if not provider or not _provider_supports_exact_route(provider):
-            continue
-        config = provider_config(provider)
-        roles = normalize_route_roles(config.get("route_roles"))
-        roles[route_key] = ROUTE_SLOT_ORDER[index]  # type: ignore[assignment]
-        config["route_roles"] = roles
-        write_provider_config(provider, config)
-
-
-def ensure_gpt_image2_exact_size_route_roles(session: Session) -> None:
-    providers = session.scalars(select(Provider)).all()
-    by_code = {provider.code: provider for provider in providers}
-    for route_key in GPT_IMAGE2_EXACT_SIZE_ROUTE_KEYS:
-        had_ineligible_assignment = False
-        for provider in providers:
-            config = provider_config(provider)
-            roles = normalize_route_roles(config.get("route_roles"))
-            if route_key not in roles:
-                continue
-            if _provider_supports_exact_route(provider):
-                continue
-            roles.pop(route_key, None)
-            config["route_roles"] = roles
-            write_provider_config(provider, config)
-            had_ineligible_assignment = True
-
-        assigned_roles: set[str] = set()
-        assigned_codes: set[str] = set()
-        for provider in providers:
-            roles = normalize_route_roles(provider_config(provider).get("route_roles"))
-            if route_key in roles and _provider_supports_exact_route(provider):
-                assigned_roles.add(roles[route_key])
-                assigned_codes.add(provider.code)
-
-        if had_ineligible_assignment or "primary" not in assigned_roles:
-            _assign_default_route_chain(providers, route_key)
-            continue
-
-        for index, provider_code in enumerate(DEFAULT_ROUTE_CHAINS.get(route_key, [])[: len(ROUTE_SLOT_ORDER)]):
-            role = ROUTE_SLOT_ORDER[index]
-            if role in assigned_roles or provider_code in assigned_codes:
-                continue
-            provider = by_code.get(provider_code)
-            if not provider or not _provider_supports_exact_route(provider):
-                continue
-            config = provider_config(provider)
-            roles = normalize_route_roles(config.get("route_roles"))
-            roles[route_key] = role  # type: ignore[assignment]
-            config["route_roles"] = roles
-            write_provider_config(provider, config)
-            assigned_roles.add(role)
-            assigned_codes.add(provider_code)
-
-
 def seed_database(session: Session, *, admin_phone: str = "18928268686", production: bool = False) -> None:
     seed_subscription_defaults(session)
 
@@ -431,7 +354,23 @@ def seed_database(session: Session, *, admin_phone: str = "18928268686", product
             )
         )
     session.flush()
-    ensure_gpt_image2_exact_size_route_roles(session)
+    media = session.scalars(select(Provider).where(Provider.capability.in_(("image", "video")))).all()
+    previous_molink = next((p for p in media if p.code == "molink-image-2-generate"), None)
+    active_codes = {code for route, chain in DEFAULT_ROUTE_CHAINS.items() if route != "llm" for code in chain}
+    for provider in media:
+        config = provider_config(provider)
+        if provider.code in active_codes:
+            config.pop("hidden_legacy", None)
+            config["route_roles"] = default_route_roles_for_provider(provider.code)
+            if provider.code.startswith("molink-image-26-") and previous_molink and previous_molink.encrypted_api_key:
+                if not provider.encrypted_api_key:
+                    provider.encrypted_api_key = previous_molink.encrypted_api_key
+                    provider.enabled = True
+        else:
+            provider.enabled = provider.is_default = provider.is_fallback = False
+            config["hidden_legacy"] = True
+            config["route_roles"] = {}
+        write_provider_config(provider, config)
     ensure_default_provider_route_roles(session)
 
     legacy_video = session.scalar(select(Provider).where(Provider.code == LEGACY_VIDEO_PROVIDER_CODE))

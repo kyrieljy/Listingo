@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { modelPreferenceOptions, normalizeModelPreference } from './workspace-model'
 import { computed, nextTick, ref, watch } from 'vue'
 import {
   CheckOutlined,
@@ -82,10 +83,7 @@ const fallbackConfig: WorkspaceConfig = {
   max_provider_concurrency: 0,
 }
 
-const modelPreferenceOptions = [
-  { key: 'fidelity' as const, label: '商品保持优先', description: '优先保持商品外观、颜色、结构和标签一致' },
-  { key: 'layout' as const, label: '视觉排版优先', description: '强化画面排版与文字呈现，商品保持度略低' },
-]
+
 
 const config = ref<WorkspaceConfig>(fallbackConfig)
 const globalParams = ref<BatchGlobalParams>(createBatchGlobalParams(props.businessType, props.suiteForm, props.aplusForm))
@@ -583,7 +581,7 @@ async function submitBatch() {
         <label>目标市场<select :value="globalParams.market" @change="setGlobalParam('market', selectValue($event))"><option v-for="value in marketChoices" :key="value" :value="value">{{ value }}</option></select></label>
         <label>图片语言<select :value="globalParams.language" @change="setGlobalParam('language', selectValue($event))"><option v-for="value in languageChoices" :key="value" :value="value">{{ value }}</option></select></label>
         <label v-if="businessType === 'suite'">画面比例<select :value="globalParams.aspect_ratio" @change="setGlobalParam('aspect_ratio', selectValue($event))"><option v-for="value in ratioOptions" :key="value" :value="value">{{ value }}</option></select></label>
-        <label v-if="businessType === 'suite'">生成偏好<select :value="String(globalParams.model_preference || 'fidelity')" @change="setGlobalParam('model_preference', selectValue($event))"><option v-for="option in modelPreferenceOptions" :key="option.key" :value="option.key">{{ option.label }}</option></select></label>
+        <label>生成偏好<select :value="normalizeModelPreference(globalParams.model_preference)" @change="setGlobalParam('model_preference', selectValue($event))"><option v-for="option in modelPreferenceOptions" :key="option.key" :value="option.key">{{ option.label }}</option></select></label>
       </div>
 
       <div v-if="businessType === 'aplus'" class="batch-aplus-config">

@@ -24,9 +24,11 @@ from backend.app.core.runtime import RuntimeStateService, default_runtime
 from backend.app.core.storage.keys import cache_key
 from backend.app.models import (
     AplusItem,
+    AplusJob,
     AplusVersion,
     ExecutionLog,
     GenerationItem,
+    GenerationJob,
     GenerationVersion,
     PromptVersion,
 )
@@ -35,13 +37,14 @@ from backend.app.security import ApiKeyCipher
 from backend.app.services.content_safety import ensure_content_safe, run_local_text_safety_review
 from backend.app.services.execution import run_image_route
 from backend.app.services.provider_limiter import provider_slot
+from backend.app.services.provider_catalog import image_edit_route
 from backend.app.services.provider_routing import (
     cached_provider_by_code,
     provider_display_names_by_code,
     route_provider_codes,
 )
 from backend.app.services.runtime_cache import active_prompt_version_id
-from backend.app.services.providers import ProviderClient, provider_requires_public_urls, requested_image_size
+from backend.app.services.providers import ProviderClient, generated_image_extension, provider_requested_image_size, provider_requires_public_urls
 from backend.app.services.redaction import safe_json
 from backend.app.services.storage import public_file_url
 
@@ -927,7 +930,10 @@ async def _run_live_text_edit(
         {"item_id": item_id, "job_id": job_id, "aspect_ratio": aspect_ratio},
     )
     ensure_content_safe(run_local_text_safety_review(build_replacements_table(changed)), "Input content safety blocked")
-    provider_codes = route_provider_codes(session, "image_edit")
+    job = session.get(AplusJob if aplus else GenerationJob, job_id)
+    params = json.loads(job.params_json) if job else {}
+    preference = params.get("model_preference") or params.get("plan_params", {}).get("model_preference")
+    provider_codes = route_provider_codes(session, image_edit_route(preference))
     provider_display_names = provider_display_names_by_code(session, provider_codes)
     client = ProviderClient()
     input_paths = [current_file_path]
@@ -986,7 +992,7 @@ async def create_live_generation_text_version(
     with Image.open(BytesIO(image_bytes)) as image:
         width, height = image.size
     version_no = max((version.version_no for version in item.versions), default=0) + 1
-    result_name = f"{item.job_id}-{item.index + 1}-text-v{version_no}-{uuid4().hex[:8]}.png"
+    result_name = f"{item.job_id}-{item.index + 1}-text-v{version_no}-{uuid4().hex[:8]}{generated_image_extension(image_bytes)}"
     destination = settings.results_dir / result_name
     destination.write_bytes(image_bytes)
     version = GenerationVersion(
@@ -1003,7 +1009,7 @@ async def create_live_generation_text_version(
                 "provider": used_code,
                 "prompt_code": IMAGE_TEXT_EDIT_PROMPT_CODE,
                 "prompt_version_id": prompt_version_id,
-                "requested_size": requested_image_size(aspect_ratio),
+                "requested_size": provider_requested_image_size(cached_provider_by_code(session, used_code), aspect_ratio),
                 "actual_size": [width, height],
                 "replacements": [line.model_dump() for line in changed],
             }
@@ -1021,7 +1027,7 @@ async def create_live_generation_text_version(
             node="image_text_edit",
             provider_id=item.provider_id,
             status="succeeded",
-            request_summary=safe_json({"line_count": len(changed), "prompt_version_id": prompt_version_id, "requested_size": requested_image_size(aspect_ratio)}),
+            request_summary=safe_json({"line_count": len(changed), "prompt_version_id": prompt_version_id, "requested_size": provider_requested_image_size(cached_provider_by_code(session, used_code), aspect_ratio)}),
             response_summary=safe_json({"url": version.url, "version_no": version_no}),
             dry_run=False,
         )
@@ -1056,7 +1062,7 @@ async def create_live_aplus_text_version(
     with Image.open(BytesIO(image_bytes)) as image:
         width, height = image.size
     version_no = max((version.version_no for version in item.versions), default=0) + 1
-    result_name = f"aplus-{item.job_id}-{item.index + 1}-text-v{version_no}-{uuid4().hex[:8]}.png"
+    result_name = f"aplus-{item.job_id}-{item.index + 1}-text-v{version_no}-{uuid4().hex[:8]}{generated_image_extension(image_bytes)}"
     destination = settings.results_dir / result_name
     destination.write_bytes(image_bytes)
     version = AplusVersion(
@@ -1073,7 +1079,7 @@ async def create_live_aplus_text_version(
                 "provider": used_code,
                 "prompt_code": IMAGE_TEXT_EDIT_PROMPT_CODE,
                 "prompt_version_id": prompt_version_id,
-                "requested_size": requested_image_size(item.aspect_ratio),
+                "requested_size": provider_requested_image_size(cached_provider_by_code(session, used_code), item.aspect_ratio),
                 "actual_size": [width, height],
                 "replacements": [line.model_dump() for line in changed],
             }
@@ -1091,7 +1097,7 @@ async def create_live_aplus_text_version(
             node="image_text_edit",
             provider_id=item.provider_id,
             status="succeeded",
-            request_summary=safe_json({"line_count": len(changed), "prompt_version_id": prompt_version_id, "requested_size": requested_image_size(item.aspect_ratio)}),
+            request_summary=safe_json({"line_count": len(changed), "prompt_version_id": prompt_version_id, "requested_size": provider_requested_image_size(cached_provider_by_code(session, used_code), item.aspect_ratio)}),
             response_summary=safe_json({"url": version.url, "version_no": version_no}),
             dry_run=False,
         )

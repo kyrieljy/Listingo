@@ -42,7 +42,7 @@ def test_production_seed_preserves_existing_bootstrap_account_settings(client) -
         )
 
 
-def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(client) -> None:
+def test_seed_creates_molink26_and_versioned_assets(client) -> None:
     session_factory = client.app.state.session_factory
     with session_factory() as session:
         providers = session.scalars(select(Provider).order_by(Provider.code)).all()
@@ -54,145 +54,25 @@ def test_seed_creates_nano_pro_primary_nano2_fallback_and_versioned_assets(clien
         assert all(provider.enabled is False for provider in providers)
         assert not any(provider.code.startswith("yunwu-") for provider in providers)
         assert VIDEO_PROVIDER_CODE not in {provider.code for provider in providers}
-        assert {provider_config(provider).get("provider_group") for provider in providers if provider.capability in {"image", "video"}} == {
-            item["key"] for item in PROVIDER_GROUPS
+        assert {provider_config(p)["provider_group"] for p in providers if p.capability in {"image", "video"}} == {
+            "molink", "hellobabygo",
         }
-        doubao = next(provider for provider in providers if provider.code == "doubao-seed-2-0-mini")
-        qwen = next(provider for provider in providers if provider.code == "qwen-3-6")
-        assert doubao.is_default is True and doubao.is_fallback is False
-        assert qwen.is_default is False and qwen.is_fallback is True
+        doubao = next(p for p in providers if p.code == "doubao-seed-2-0-mini")
+        qwen = next(p for p in providers if p.code == "qwen-3-6")
         assert provider_route_roles(doubao) == {"llm": "primary"}
         assert provider_route_roles(qwen) == {"llm": "backup1"}
-        by_code = {provider.code: provider for provider in providers}
-        molink_generate = by_code["molink-image-2-generate"]
-        molink_edit = by_code["molink-image-2-edit"]
-        molink_nano = by_code["molink-nano-pro-generate"]
-        assert [provider.label for provider in (molink_generate, molink_edit, molink_nano)] == [
-            "MoLink Image 2",
-            "MoLink Image 2 edit",
-            "MoLink Nano Banana Pro",
-        ]
-        assert [provider.enabled for provider in (molink_generate, molink_edit, molink_nano)] == [False, False, False]
-        assert provider_route_roles(molink_generate) == {
-            "suite_fidelity": "backup5",
-            "suite_layout": "backup5",
-            "aplus_detail": "backup5",
-        }
-        assert provider_route_roles(molink_edit) == {"aplus_mobile": "backup5", "image_edit": "backup5"}
-        assert provider_route_roles(molink_nano) == {"suite_fidelity": "backup6"}
-        assert molink_generate.base_url == "https://getmolinkapi.com/v1/images/generations"
-        assert molink_edit.base_url == "https://getmolinkapi.com/v1/images/edits"
-        assert molink_nano.base_url == "https://getmolinkapi.com/v1beta/models/gemini-3-pro-image:generateContent"
-        assert [provider.model_name for provider in (molink_generate, molink_edit, molink_nano)] == [
-            "gpt-image-2",
-            "gpt-image-2",
-            "gemini-3-pro-image",
-        ]
-        for provider in (molink_generate, molink_edit, molink_nano):
+        by_code = {p.code: p for p in providers}
+        for route, chain in DEFAULT_ROUTE_CHAINS.items():
+            for index, code in enumerate(chain):
+                assert provider_route_roles(by_code[code])[route] == ROUTE_SLOT_ORDER[index]
+        for provider in providers:
+            if provider.capability != "image":
+                continue
             config = provider_config(provider)
-            assert config["provider_group"] == "molink"
-            assert config["requires_public_urls"] is False
-            assert config["health_check"]["url"] == "https://getmolinkapi.com/v1/models"
-        molink_generate_config = provider_config(molink_generate)
-        assert molink_generate_config["size_param_mode"] == "size_string"
-        assert molink_generate_config["size_alignment"] == 16
-        assert molink_generate_config["output_format"] == "png"
-        assert {item["key"] for item in molink_generate_config["parameter_schema"]} >= {
-            "size",
-            "quality",
-            "output_format",
-            "n",
-        }
-        molink_nano_config = provider_config(molink_nano)
-        assert molink_nano_config["resolution"] == "1K"
-        assert molink_nano_config["allowed_resolutions"] == ["1K", "2K", "4K"]
-        assert {item["key"] for item in molink_nano_config["parameter_schema"]} >= {"aspect_ratio", "resolution"}
-        for route_key, chain in DEFAULT_ROUTE_CHAINS.items():
-            for index, provider_code in enumerate(chain[: len(ROUTE_SLOT_ORDER)]):
-                assert provider_route_roles(by_code[provider_code])[route_key] == ROUTE_SLOT_ORDER[index]
-        ratio_only_image2_codes = {
-            "apimodels-gpt-image-2-generate",
-            "apimodels-gpt-image-2-edit",
-            "kie-gpt-image-2-generate",
-            "kie-gpt-image-2-edit",
-            "wavespeed-gpt-image-2-generate",
-            "wavespeed-gpt-image-2-edit",
-            "replicate-gpt-image-2-generate",
-            "replicate-gpt-image-2-edit",
-        }
-        for route_key in ("suite_layout", "aplus_detail", "aplus_mobile", "image_edit"):
-            assert not (ratio_only_image2_codes & set(DEFAULT_ROUTE_CHAINS[route_key]))
-        nano_pro = by_code["apimodels-nano-pro-generate"]
-        nano = by_code["kie-nano-2-generate"]
-        image2 = by_code["atlas-gpt-image-2-generate"]
-        aplus_mobile = by_code["atlas-gpt-image-2-edit"]
-        video = by_code["hellobabygo-seedance-2-0-video"]
-        apimodels_providers = [provider for provider in providers if provider_config(provider).get("provider_group") == "apimodels"]
-        assert nano_pro.adapter == "media_image"
-        assert nano.adapter == "media_image"
-        assert image2.adapter == "media_image"
-        assert aplus_mobile.adapter == "media_image"
-        assert video.adapter == "hellobabygo_video_generation"
-        assert apimodels_providers
-        assert all(provider.base_url.startswith("https://apimodels.app/api/v1/") for provider in apimodels_providers)
-        assert not any("api.apimodels.app" in provider.base_url for provider in apimodels_providers)
-        apimodels_image2_config = provider_config(by_code["apimodels-gpt-image-2-generate"])
-        assert by_code["apimodels-gpt-image-2-generate"].model_name == "gpt-image-2"
-        assert apimodels_image2_config["size_param_mode"] == "aspect_ratio_resolution"
-        assert apimodels_image2_config["resolution"] == "1K"
-        assert apimodels_image2_config["max_reference_images"] == 16
-        assert apimodels_image2_config["supports_exact_custom_size"] is False
-        assert "quality" not in apimodels_image2_config
-        assert "quality" not in {item["key"] for item in apimodels_image2_config["parameter_schema"]}
-        assert by_code["apimodels-nano-pro-generate"].model_name == "gemini-3-pro-image-gemini"
-        assert by_code["apimodels-nano-2-generate"].model_name == "nanobanana2/gemini-3.1-flash-image-preview"
-        assert by_code["atlas-gpt-image-2-generate"].model_name == "openai/gpt-image-2/text-to-image"
-        assert provider_config(by_code["atlas-gpt-image-2-generate"])["edit_model_name"] == "openai/gpt-image-2/edit"
-        assert provider_config(by_code["atlas-gpt-image-2-generate"])["size_alignment"] == 16
-        assert provider_config(by_code["atlas-gpt-image-2-generate"])["enable_sync_mode"] is True
-        assert provider_config(by_code["atlas-gpt-image-2-generate"])["enable_base64_output"] is True
-        assert by_code["atlas-gpt-image-2-edit"].model_name == "openai/gpt-image-2/edit"
-        assert provider_config(by_code["atlas-gpt-image-2-edit"])["size_param_mode"] == "size_string"
-        assert provider_config(by_code["atlas-gpt-image-2-edit"])["size_alignment"] == 16
-        assert provider_config(by_code["atlas-gpt-image-2-edit"])["enable_sync_mode"] is True
-        assert provider_config(by_code["atlas-gpt-image-2-edit"])["enable_base64_output"] is True
-        exact_image2_codes = {
-            "atlas-gpt-image-2-generate",
-            "atlas-gpt-image-2-edit",
-            "cometapi-gpt-image-2-generate",
-            "cometapi-gpt-image-2-edit",
-            "runware-gpt-image-2-generate",
-            "runware-gpt-image-2-edit",
-            "fal-gpt-image-2-generate",
-            "fal-gpt-image-2-edit",
-            "openrouter-gpt-image-2-generate",
-            "openrouter-gpt-image-2-edit",
-        }
-        for provider_code in exact_image2_codes:
-            config = provider_config(by_code[provider_code])
-            assert config["model_family"] == "gpt-image-2"
-            assert config["supports_exact_custom_size"] is True
-            assert config["size_alignment"] == 16
-        assert by_code["atlas-nano-2-generate"].model_name == "google/nano-banana-2/text-to-image"
-        assert provider_config(by_code["atlas-nano-2-generate"])["edit_model_name"] == "google/nano-banana-2/edit"
-        assert provider_config(by_code["fal-gpt-image-2-generate"])["edit_base_url"].endswith("/openai/gpt-image-2/edit")
-        assert by_code["wavespeed-gpt-image-2-generate"].base_url.endswith("/openai/gpt-image-2/text-to-image")
-        assert provider_config(by_code["wavespeed-gpt-image-2-generate"])["edit_base_url"].endswith("/openai/gpt-image-2/edit")
-        assert provider_config(by_code["wavespeed-gpt-image-2-edit"])["size_param_mode"] == "aspect_ratio_resolution"
-        assert by_code["wavespeed-nano-2-generate"].base_url.endswith("/google/nano-banana-2/text-to-image")
-        assert by_code["kie-gpt-image-2-generate"].model_name == "gpt-image-2-text-to-image"
-        assert provider_config(by_code["kie-gpt-image-2-generate"])["edit_model_name"] == "gpt-image-2-image-to-image"
-        assert by_code["kie-seedance-2-0-video"].model_name == "bytedance/seedance-2"
-        assert by_code["hellobabygo-seedance-2-0-video"].base_url == "https://api.hellobabygo.com/v1/videos"
-        assert by_code["hellobabygo-seedance-2-0-video"].model_name == "seedance-2.0"
-        assert by_code["fal-seedance-2-0-video"].base_url.endswith("/bytedance/seedance-2.0/image-to-video")
-        assert provider_config(by_code["cometapi-nano-2-generate"])["api_shape"] == "gemini_generate_content"
-        assert provider_config(nano_pro)["supports_custom_size"] is True
-        assert provider_config(image2)["supports_custom_size"] is True
-        assert provider_config(image2)["supports_exact_custom_size"] is True
-        assert provider_config(aplus_mobile)["supports_edit"] is True
-        assert provider_config(video)["model_family"] == "seedance-2.0"
-        assert DEFAULT_ROUTE_CHAINS["video"][0] == "hellobabygo-seedance-2-0-video"
+            assert provider.model_name in {"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"}
+            assert provider.base_url.startswith("https://www.getmolinkapi.com/v1/images/")
+            assert config["timeout_seconds"] == 240 and config["size_alignment"] == 16
+            assert "quality" not in config and "complexity" not in config
         assert doubao.base_url.endswith("/api/v1/chat/completions")
         assert doubao.model_name == "bytedance/doubao-seed-2-0-mini"
         assert prompt is not None and prompt.active_version_id is not None
@@ -240,119 +120,29 @@ def test_image_edit_route_requires_configured_primary_provider(client) -> None:
             raise AssertionError("image_edit route should require an enabled provider with an API key")
 
 
-def test_route_provider_codes_skips_unkeyed_primary_and_uses_backup(client) -> None:
+def test_seed_retires_old_models_and_copies_molink_credential(client) -> None:
     with client.app.state.session_factory() as session:
-        primary = session.scalar(select(Provider).where(Provider.code == "atlas-gpt-image-2-generate"))
-        backup = session.scalar(select(Provider).where(Provider.code == "cometapi-gpt-image-2-generate"))
-        assert primary is not None and backup is not None
-        primary.enabled = True
-        primary.encrypted_api_key = None
-        backup.enabled = True
-        backup.encrypted_api_key = client.app.state.cipher.encrypt("backup-key")
-        session.commit()
-
-        assert route_provider_codes(session, "suite_layout") == ["cometapi-gpt-image-2-generate"]
-
-
-def test_route_provider_codes_preserves_existing_order_and_uses_appended_molink_backups(client) -> None:
-    with client.app.state.session_factory() as session:
-        chain = DEFAULT_ROUTE_CHAINS["suite_fidelity"]
-        by_code = {
-            provider.code: provider
-            for provider in session.scalars(select(Provider).where(Provider.code.in_(chain))).all()
-        }
-        assert set(by_code) == set(chain)
-        for provider in by_code.values():
-            provider.enabled = True
-            provider.encrypted_api_key = client.app.state.cipher.encrypt(f"{provider.code}-key")
-        session.commit()
-
-        assert route_provider_codes(session, "suite_fidelity") == chain
-
-
-def test_seed_updates_provider_contract_but_preserves_admin_parameters(client) -> None:
-    session_factory = client.app.state.session_factory
-    with session_factory() as session:
-        provider = session.scalar(select(Provider).where(Provider.code == "wavespeed-gpt-image-2-generate"))
-        config = provider_config(provider)
-        config.update(
-            {
-                "quality": "high",
-                "resolution": "2K",
-                "edit_base_url": "https://old.example.test/wrong-edit",
-                "size_param_mode": "size_string",
-                "route_roles": {"suite_layout": "backup4"},
-            }
+        legacy = Provider(
+            code="molink-image-2-generate", label="Legacy MoLink", capability="image",
+            adapter="media_image", base_url="https://getmolinkapi.com/v1/images/generations",
+            model_name="gpt-image-2", enabled=True,
+            encrypted_api_key=client.app.state.cipher.encrypt("test-key"),
+            config_json=json.dumps({"route_roles": {"suite_fidelity": "primary"}}),
         )
-        provider.config_json = json.dumps(config, ensure_ascii=False)
+        session.add(legacy)
         session.commit()
-
-        seed_database(session)
-        session.commit()
-
-        refreshed = session.scalar(select(Provider).where(Provider.code == "wavespeed-gpt-image-2-generate"))
-        refreshed_config = provider_config(refreshed)
-        assert refreshed_config["quality"] == "high"
-        assert refreshed_config["resolution"] == "2K"
-        assert refreshed_config["size_param_mode"] == "aspect_ratio_resolution"
-        assert refreshed_config["edit_base_url"] == "https://api.wavespeed.ai/api/v3/openai/gpt-image-2/edit"
-        assert provider_route_roles(refreshed) == {}
-        for index, provider_code in enumerate(DEFAULT_ROUTE_CHAINS["suite_layout"]):
-            provider = session.scalar(select(Provider).where(Provider.code == provider_code))
-            assert provider_route_roles(provider)["suite_layout"] == ROUTE_SLOT_ORDER[index]
-
-
-def test_reseed_adds_molink_without_modifying_existing_providers(client) -> None:
-    session_factory = client.app.state.session_factory
-    with session_factory() as session:
-        # Isolate legacy one-time config cleanup from the append-only assertion.
-        seed_database(session)
-        session.commit()
-        molink_codes = {"molink-image-2-generate", "molink-image-2-edit", "molink-nano-pro-generate"}
-        for provider in session.scalars(select(Provider).where(Provider.code.in_(molink_codes))).all():
-            session.delete(provider)
-        session.commit()
-
-        def protected_snapshot(provider: Provider) -> tuple:
-            config = json.loads(provider.config_json or "{}")
-            parameter_keys = {
-                str(item.get("key"))
-                for item in provider_config(provider).get("parameter_schema", [])
-                if isinstance(item, dict) and isinstance(item.get("key"), str)
-            }
-            return (
-                provider.label,
-                provider.capability,
-                provider.adapter,
-                provider.base_url,
-                provider.model_name,
-                provider.enabled,
-                provider.is_default,
-                provider.is_fallback,
-                provider.encrypted_api_key,
-                config.get("route_roles"),
-                {key: config.get(key) for key in parameter_keys},
-            )
-
-        before = {
-            provider.code: protected_snapshot(provider)
-            for provider in session.scalars(select(Provider)).all()
-            if provider.code not in molink_codes
-        }
-
-        seed_database(session)
-        session.commit()
-
-        after = {
-            provider.code: protected_snapshot(provider)
-            for provider in session.scalars(select(Provider)).all()
-            if provider.code not in molink_codes
-        }
-        assert after == before
-        assert set(after) == set(before)
-        added = session.scalars(select(Provider).where(Provider.code.in_(molink_codes))).all()
-        assert {provider.code for provider in added} == molink_codes
-        assert all(not provider.enabled and not provider.encrypted_api_key for provider in added)
+        legacy_id = legacy.id
+        for _ in range(2):
+            seed_database(session)
+            assert session.get(Provider, legacy_id) is not None
+            assert not legacy.enabled and provider_config(legacy)["hidden_legacy"]
+            assert provider_route_roles(legacy) == {}
+            for route, chain in DEFAULT_ROUTE_CHAINS.items():
+                if route == "llm" or route == "video":
+                    continue
+                assert route_provider_codes(session, route) == chain
+                selected = session.scalar(select(Provider).where(Provider.code == chain[0]))
+                assert selected.encrypted_api_key == legacy.encrypted_api_key
 
 
 def test_seed_upgrades_an_existing_legacy_workflow_once(client) -> None:

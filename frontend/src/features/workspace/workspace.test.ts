@@ -1,3 +1,4 @@
+import preferencePickerSource from './ModelPreferencePicker.vue?raw'
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
@@ -478,23 +479,23 @@ describe('workspace model', () => {
   })
 
   it('hides model names behind business preferences', () => {
-    expect(workspaceSource).toContain('商品保持优先')
-    expect(workspaceSource).toContain('视觉排版优先')
+    expect(createDefaultWorkspaceForm().modelPreference).toBe('speed')
+    expect(createDefaultAplusForm().modelPreference).toBe('speed')
     expect(workspaceSource).not.toContain('Nano Pro')
     expect(workspaceSource).not.toContain('Image 2')
   })
 
   it('places model preference as a dropdown directly under the selling points input', () => {
     const inputIndex = workspaceSource.indexOf('class="selling-points-input"')
-    const selectorIndex = workspaceSource.indexOf('class="model-preference-row"')
+    const selectorIndex = workspaceSource.indexOf('<ModelPreferencePicker')
     const suiteConfigIndex = workspaceSource.indexOf('class="form-section suite-config"')
 
     expect(inputIndex).toBeGreaterThan(-1)
     expect(selectorIndex).toBeGreaterThan(inputIndex)
     expect(selectorIndex).toBeLessThan(suiteConfigIndex)
-    expect(workspaceSource).toContain('class="model-preference-trigger"')
-    expect(workspaceSource).toContain('class="model-preference-menu"')
-    expect(workspaceSource).toContain('selectModelPreference')
+    expect(preferencePickerSource).toContain('class="model-preference-trigger"')
+    expect(preferencePickerSource).toContain('class="model-preference-menu"')
+    expect(aplusPanelSource).toContain('<ModelPreferencePicker')
     expect(workspaceSource).not.toContain('Live 会读取商品图，并把这里的自然语言与视觉信息解析为结构化事实')
     expect(workspaceSource).not.toContain('class="preference-switch"')
   })

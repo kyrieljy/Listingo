@@ -41,7 +41,11 @@ onMounted(async () => { try { info.value = (await api.get('/site-info')).data } 
 .site-footer-links { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px 16px; }
 .site-footer p { margin: 0; }
 @media (max-width: 760px) {
-  .site-footer { padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
+  .site-footer {
+    position: relative;
+    z-index: 45;
+    margin-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+  }
 }
 .site-footer button { border: 0; padding: 0; background: transparent; color: inherit; cursor: pointer; }
 .site-footer a { color: inherit; }

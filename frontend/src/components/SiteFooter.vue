@@ -40,6 +40,9 @@ onMounted(async () => { try { info.value = (await api.get('/site-info')).data } 
 .site-footer { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 16px; text-align: center; font-size: 12px; color: #687384; background: #f7f8fa; }
 .site-footer-links { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px 16px; }
 .site-footer p { margin: 0; }
+@media (max-width: 760px) {
+  .site-footer { padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
+}
 .site-footer button { border: 0; padding: 0; background: transparent; color: inherit; cursor: pointer; }
 .site-footer a { color: inherit; }
 </style>

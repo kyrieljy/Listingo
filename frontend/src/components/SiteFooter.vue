@@ -8,11 +8,14 @@ onMounted(async () => { try { info.value = (await api.get('/site-info')).data } 
 
 <template>
   <footer class="site-footer">
-    <a v-if="info.icp_number" href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">{{ info.icp_number }}</a>
-    <button @click="document = '服务协议'">服务协议</button>
-    <button @click="document = '隐私政策'">隐私政策</button>
-    <button @click="document = '退款说明'">退款说明</button>
-    <span v-if="info.support_contact">客服：{{ info.support_contact }}</span>
+    <div class="site-footer-links">
+      <button @click="document = '服务协议'">服务协议</button>
+      <button @click="document = '隐私政策'">隐私政策</button>
+      <button @click="document = '退款说明'">退款说明</button>
+      <span v-if="info.support_contact">客服：{{ info.support_contact }}</span>
+    </div>
+    <p>© 2026 龙熠（深圳）互联网信息服务有限责任公司 版权所有</p>
+    <a v-if="info.icp_number" href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">ICP备案号：{{ info.icp_number }}</a>
   </footer>
   <a-modal :open="!!document" :title="document" :footer="null" @cancel="document = ''">
     <template v-if="document === '服务协议'">
@@ -34,7 +37,9 @@ onMounted(async () => { try { info.value = (await api.get('/site-info')).data } 
 </template>
 
 <style scoped>
-.site-footer { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 16px; padding: 10px 16px; font-size: 12px; color: #687384; background: #f7f8fa; }
+.site-footer { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 16px; text-align: center; font-size: 12px; color: #687384; background: #f7f8fa; }
+.site-footer-links { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px 16px; }
+.site-footer p { margin: 0; }
 .site-footer button { border: 0; padding: 0; background: transparent; color: inherit; cursor: pointer; }
 .site-footer a { color: inherit; }
 </style>

@@ -169,10 +169,10 @@ def test_provider_api_updates_molink_runtime_parameters(client) -> None:
 
 def test_seedance_provider_test_does_not_require_openai_model_directory_membership(client, monkeypatch) -> None:
     providers = client.get("/api/v1/admin/providers").json()
-    provider = next(item for item in providers if item["code"] == "openrouter-seedance-2-0-video")
+    provider = next(item for item in providers if item["code"] == "hellobabygo-seedance-2-0-video")
     update = client.patch(
         f"/api/v1/admin/providers/{provider['id']}",
-        json={"api_key": "openrouter-secret-key", "enabled": True, "timeout_seconds": 60},
+        json={"api_key": "hellobabygo-test-key", "enabled": True, "timeout_seconds": 60},
     )
     assert update.status_code == 200, update.text
     seen: dict[str, str] = {}
@@ -196,7 +196,7 @@ def test_seedance_provider_test_does_not_require_openai_model_directory_membersh
     result = response.json()
     assert result["ok"] is True
     assert result["status"] == "ok"
-    assert seen == {"provider": "openrouter-seedance-2-0-video", "api_key": "openrouter-secret-key"}
+    assert seen == {"provider": "hellobabygo-seedance-2-0-video", "api_key": "hellobabygo-test-key"}
     with client.app.state.session_factory() as session:
         persisted = session.get(Provider, provider["id"])
         assert persisted is not None

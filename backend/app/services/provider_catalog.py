@@ -606,37 +606,6 @@ def _image_preset(
     }
 
 
-def _video_preset(
-    code: str,
-    label: str,
-    group: str,
-    base_url: str,
-    model_name: str,
-    *,
-    cost_usd_per_second: float | None,
-    source_url: str,
-    route_roles: dict[str, str] | None = None,
-    extra: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    return {
-        "code": code,
-        "label": label,
-        "capability": "video",
-        "adapter": "media_video",
-        "base_url": base_url,
-        "model_name": model_name,
-        "is_default": route_roles is not None and any(role == "primary" for role in route_roles.values()),
-        "is_fallback": route_roles is not None and any(role != "primary" for role in route_roles.values()),
-        "config": _base_video_config(
-            group=group,
-            cost_usd_per_second=cost_usd_per_second,
-            source_url=source_url,
-            route_roles=route_roles,
-            extra=extra,
-        ),
-    }
-
-
 def media_provider_presets() -> list[dict[str, Any]]:
     video_presets = [
         {
@@ -667,6 +636,7 @@ def media_provider_presets() -> list[dict[str, Any]]:
             f"{base}/images/{endpoint}", f"gpt-image-2.6-{model}", operation, "gpt-image-2",
             size_param_mode="size_string", supports_edit=True, cost_usd=None,
             source_url=base, route_roles=default_route_roles_for_code(code),
+            max_reference_images=7 if operation == "edit" else 6,
             extra={"requires_public_urls": False, "edit_base_url": f"{base}/images/edits",
                    "output_format": "png", "timeout_seconds": 240, "max_retries": 0,
                    "health_check": {"mode": "models_or_metadata", "url": f"{base}/models"}},

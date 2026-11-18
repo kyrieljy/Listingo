@@ -4,7 +4,7 @@ import { CheckOutlined, EditOutlined, EyeOutlined, FileTextOutlined, LoadingOutl
 import type { JobItem } from '../../api/client'
 import { previewAspectStyle } from './workspace-model'
 
-const props = defineProps<{ items: JobItem[]; selected: string[]; showWatermark?: boolean; aspectRatio?: string }>()
+const props = defineProps<{ items: JobItem[]; selected: string[]; showScript?: boolean; showWatermark?: boolean; aspectRatio?: string }>()
 const emit = defineEmits<{ toggle: [id: string]; edit: [item: JobItem]; textEdit: [item: JobItem]; preview: [item: JobItem]; retry: [item: JobItem]; script: [item: JobItem] }>()
 const selectedSet = computed(() => new Set(props.selected))
 const naturalAspectRatios = ref<Record<string, string>>({})
@@ -59,7 +59,7 @@ function previewItem(item: JobItem) {
           <button title="预览" aria-label="预览" :disabled="!canUseResult(item)" @click="previewItem(item)"><EyeOutlined /></button>
           <button title="二次编辑" aria-label="二次编辑" :disabled="!canUseResult(item)" @click="emit('edit', item)"><EditOutlined /></button>
           <button title="编辑文字" aria-label="编辑文字" :disabled="!canUseResult(item)" @click="emit('textEdit', item)"><FileTextOutlined /></button>
-          <button title="脚本" aria-label="脚本" :disabled="!item.prompt_text && !item.error" @click="emit('script', item)"><PlayCircleOutlined /></button>
+          <button v-if="showScript" title="脚本" aria-label="脚本" :disabled="!item.prompt_text && !item.error" @click="emit('script', item)"><PlayCircleOutlined /></button>
           <button v-if="item.status === 'failed'" title="重试" aria-label="重试" @click="emit('retry', item)"><ReloadOutlined /></button>
         </div>
       </div>

@@ -332,6 +332,31 @@ def create_analytics_event(
     return {"ok": True, "event": analytics_event_dict(event)}
 
 
+def visible_job_payload(payload, current_user: User):
+    """Project fresh and cached task responses before they leave the API."""
+    if current_user.role == "admin":
+        return payload
+
+    def project(value):
+        if isinstance(value, list):
+            return [project(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {}
+        for key, item in value.items():
+            if key.startswith("_") or key == "global_plan":
+                continue
+            if key in {"prompt_text", "image_prompt", "copy_requirements", "script_markdown", "route_symbol"}:
+                result[key] = ""
+            elif key == "error" and item:
+                result[key] = "任务处理失败，请重试"
+            else:
+                result[key] = project(item)
+        return result
+
+    return project(payload)
+
+
 def serialize_version(version: GenerationVersion) -> dict:
     return {
         "id": version.id,
@@ -599,7 +624,7 @@ async def create_batch_job(
     except StorageUnavailableError:
         _fail_closed_cancel_batches(request.app.state.session_factory, [batch.id])
         raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
-    return serialize_batch_job(session, batch)
+    return visible_job_payload(serialize_batch_job(session, batch), current_user)
 
 
 @router.get("/batch-jobs", response_model=list[BatchJobOut])
@@ -613,7 +638,7 @@ def list_batch_jobs(current_user: User = Depends(get_current_user), session: Ses
     if current_user.role != "admin":
         query = query.where(BatchJob.user_id == current_user.id)
     jobs = session.scalars(query).all()
-    return [serialize_batch_job(session, job, include_children=False) for job in jobs]
+    return visible_job_payload([serialize_batch_job(session, job, include_children=False) for job in jobs], current_user)
 
 
 @router.post("/batch-jobs/validation-fixtures", response_model=list[BatchJobOut], status_code=201)
@@ -660,7 +685,7 @@ async def create_batch_validation_fixtures_endpoint(
             session.expire_all()
 
     jobs = [load_batch_job(session, batch_id) for batch_id in batch_ids]
-    return [serialize_batch_job(session, job) for job in jobs if job]
+    return visible_job_payload([serialize_batch_job(session, job) for job in jobs if job], current_user)
 
 
 @router.get("/batch-jobs/selection-download")
@@ -714,7 +739,7 @@ def get_batch_job(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch job does not exist")
     ensure_job_owner(current_user, batch)
-    return cached_batch_job_payload(session, batch, runtime=getattr(request.app.state, "runtime_state", None))
+    return visible_job_payload(cached_batch_job_payload(session, batch, runtime=getattr(request.app.state, "runtime_state", None)), current_user)
 
 
 @router.post("/batch-jobs/{batch_id}/cancel", response_model=BatchJobOut)
@@ -743,7 +768,7 @@ def cancel_batch_job_endpoint(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch job does not exist")
     if batch.status in FINAL_STATUSES:
-        return serialize_batch_job(session, batch)
+        return visible_job_payload(serialize_batch_job(session, batch), current_user)
     if batch.status != "queued" or any(item.status != "queued" for item in locked_items):
         raise HTTPException(status_code=409, detail="批量任务正在生成中，无法取消")
     try:
@@ -752,7 +777,7 @@ def cancel_batch_job_endpoint(
         )
     except StorageUnavailableError:
         raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
-    return serialize_batch_job(session, cancel_batch_job(session, batch))
+    return visible_job_payload(serialize_batch_job(session, cancel_batch_job(session, batch)), current_user)
 
 
 @router.post("/batch-jobs/{batch_id}/retry-failed", response_model=BatchJobOut)
@@ -786,7 +811,7 @@ async def retry_failed_batch_job_endpoint(
     except StorageUnavailableError:
         _fail_closed_cancel_batches(request.app.state.session_factory, [batch_id])
         raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
-    return serialize_batch_job(session, batch)
+    return visible_job_payload(serialize_batch_job(session, batch), current_user)
 
 
 @router.get("/batch-jobs/{batch_id}/download")
@@ -872,7 +897,7 @@ async def create_generation_job(
     except StorageUnavailableError:
         _fail_closed_compensate(request.app.state.session_factory, job.id, GenerationJob, "generation_job")
         raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
-    return serialize_job(job)
+    return visible_job_payload(serialize_job(job), current_user)
 
     assets = session.scalars(select(Asset).where(Asset.id.in_(payload.asset_ids))).all()
     if len(assets) != len(payload.asset_ids):
@@ -924,7 +949,7 @@ async def create_generation_job(
         request.app.state.settings,
         request.app.state.cipher,
     )
-    return serialize_job(job)
+    return visible_job_payload(serialize_job(job), current_user)
 
 
 @router.post("/copywriting-assist", response_model=CopywritingAssistOut)
@@ -1103,7 +1128,7 @@ async def create_aplus_plan_job(
     session.commit()
     session.refresh(job)
     background_tasks.add_task(run_aplus_plan_job, job.id, request.app.state.session_factory, request.app.state.cipher)
-    return serialize_aplus_job(load_aplus_job_or_404(session, job.id))
+    return visible_job_payload(serialize_aplus_job(load_aplus_job_or_404(session, job.id)), current_user)
 
     assets = session.scalars(select(Asset).where(Asset.id.in_(payload.asset_ids))).all()
     if len(assets) != len(payload.asset_ids):
@@ -1146,7 +1171,7 @@ async def create_aplus_plan_job(
     session.commit()
     session.refresh(job)
     background_tasks.add_task(run_aplus_plan_job, job.id, request.app.state.session_factory, request.app.state.cipher)
-    return serialize_aplus_job(load_aplus_job_or_404(session, job.id))
+    return visible_job_payload(serialize_aplus_job(load_aplus_job_or_404(session, job.id)), current_user)
 
 
 @router.get("/aplus-plan-jobs/{job_id}", response_model=AplusJobOut)
@@ -1159,7 +1184,7 @@ def get_aplus_plan_job(
     ensure_job_owner(current_user, job)
     if job.job_type != "plan":
         raise HTTPException(status_code=404, detail="A+ 方案任务不存在")
-    return serialize_aplus_job(job)
+    return visible_job_payload(serialize_aplus_job(job), current_user)
 
 
 @router.post("/aplus-plan-jobs/{job_id}/cancel", response_model=AplusJobOut)
@@ -1172,7 +1197,7 @@ def cancel_aplus_plan_job(
     ensure_job_owner(current_user, job)
     if job.job_type != "plan":
         raise HTTPException(status_code=404, detail="A+ 方案任务不存在")
-    return serialize_aplus_job(cancel_aplus_job(session, job))
+    return visible_job_payload(serialize_aplus_job(cancel_aplus_job(session, job)), current_user)
 
 
 @router.get("/aplus-plan-jobs", response_model=list[AplusJobOut])
@@ -1192,7 +1217,7 @@ def list_aplus_plan_jobs(current_user: User = Depends(get_current_user), session
     if current_user.role != "admin":
         query = query.where(AplusJob.user_id == current_user.id)
     jobs = session.scalars(query).all()
-    return [serialize_aplus_job(job) for job in jobs]
+    return visible_job_payload([serialize_aplus_job(job) for job in jobs], current_user)
 
 
 @router.post("/aplus-generation-jobs", response_model=AplusJobOut, status_code=201)
@@ -1231,7 +1256,7 @@ async def create_aplus_generation_job(
         request.app.state.settings,
         request.app.state.cipher,
     )
-    return serialize_aplus_job(load_aplus_job_or_404(session, job.id))
+    return visible_job_payload(serialize_aplus_job(load_aplus_job_or_404(session, job.id)), current_user)
 
     plan_job = load_aplus_job_or_404(session, payload.plan_job_id)
     if plan_job.job_type != "plan" or plan_job.status != "succeeded":
@@ -1262,7 +1287,7 @@ async def create_aplus_generation_job(
         request.app.state.settings,
         request.app.state.cipher,
     )
-    return serialize_aplus_job(load_aplus_job_or_404(session, job.id))
+    return visible_job_payload(serialize_aplus_job(load_aplus_job_or_404(session, job.id)), current_user)
 
 
 @router.get("/aplus-generation-jobs", response_model=list[AplusJobOut])
@@ -1282,7 +1307,7 @@ def list_aplus_generation_jobs(current_user: User = Depends(get_current_user), s
     if current_user.role != "admin":
         query = query.where(AplusJob.user_id == current_user.id)
     jobs = session.scalars(query).all()
-    return [serialize_aplus_job(job) for job in jobs]
+    return visible_job_payload([serialize_aplus_job(job) for job in jobs], current_user)
 
 
 @router.get("/aplus-generation-jobs/{job_id}", response_model=AplusJobOut)
@@ -1295,7 +1320,7 @@ def get_aplus_generation_job(
     ensure_job_owner(current_user, job)
     if job.job_type != "generation":
         raise HTTPException(status_code=404, detail="A+ 生成任务不存在")
-    return serialize_aplus_job(job)
+    return visible_job_payload(serialize_aplus_job(job), current_user)
 
 
 @router.post("/aplus-generation-jobs/{job_id}/cancel", response_model=AplusJobOut)
@@ -1308,7 +1333,7 @@ def cancel_aplus_generation_job(
     ensure_job_owner(current_user, job)
     if job.job_type != "generation":
         raise HTTPException(status_code=404, detail="A+ 生成任务不存在")
-    return serialize_aplus_job(cancel_aplus_job(session, job))
+    return visible_job_payload(serialize_aplus_job(cancel_aplus_job(session, job)), current_user)
 
 
 @router.post("/aplus-generation-jobs/{job_id}/retry-failed", response_model=AplusJobOut)
@@ -1323,7 +1348,7 @@ async def retry_failed_aplus_generation_job(
     if job.job_type != "generation":
         raise HTTPException(status_code=404, detail="A+ 生成任务不存在")
     if not any(item.status == "failed" for item in job.items):
-        return serialize_aplus_job(job)
+        return visible_job_payload(serialize_aplus_job(job), current_user)
     if current_user.role != "admin":
         failed_ids = [item.id for item in job.items if item.status == "failed"]
         reserve_beans(
@@ -1342,7 +1367,7 @@ async def retry_failed_aplus_generation_job(
         request.app.state.settings,
         request.app.state.cipher,
     )
-    return serialize_aplus_job(load_aplus_job_or_404(session, job.id))
+    return visible_job_payload(serialize_aplus_job(load_aplus_job_or_404(session, job.id)), current_user)
 
 
 @router.post("/aplus-items/{item_id}/retry", response_model=AplusJobOut)
@@ -1380,7 +1405,7 @@ async def retry_single_aplus_item(
         if retried_job_id:
             session.expire_all()
             job = load_aplus_job_or_404(session, retried_job_id)
-    return serialize_aplus_job(job)
+    return visible_job_payload(serialize_aplus_job(job), current_user)
 
 
 @router.get("/aplus-generation-jobs/{job_id}/download")
@@ -1767,7 +1792,7 @@ async def create_video_job(
     except StorageUnavailableError:
         _fail_closed_compensate(request.app.state.session_factory, job.id, VideoJob, "video_job")
         raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
-    return serialize_video_job(load_video_job(session, job.id))
+    return visible_job_payload(serialize_video_job(load_video_job(session, job.id)), current_user)
 
 
 @router.get("/video-jobs", response_model=list[VideoJobOut])
@@ -1782,7 +1807,7 @@ def list_video_jobs(current_user: User = Depends(get_current_user), session: Ses
     if current_user.role != "admin":
         query = query.where(VideoJob.user_id == current_user.id)
     jobs = session.scalars(query).all()
-    return [serialize_video_job(job) for job in jobs]
+    return visible_job_payload([serialize_video_job(job) for job in jobs], current_user)
 
 
 @router.get("/video-jobs/{job_id}", response_model=VideoJobOut)
@@ -1794,7 +1819,7 @@ def get_video_job(
     ensure_video_feature_available(session, current_user)
     job = load_video_job(session, job_id)
     ensure_job_owner(current_user, job)
-    return serialize_video_job(job)
+    return visible_job_payload(serialize_video_job(job), current_user)
 
 
 @router.post("/video-jobs/{job_id}/cancel", response_model=VideoJobOut)
@@ -1815,9 +1840,9 @@ def cancel_video_generation_job(
     if fresh.status == "running":
         raise HTTPException(status_code=409, detail="任务正在生成中，无法取消")
     if fresh.status in FINAL_STATUSES:
-        return serialize_video_job(fresh)
+        return visible_job_payload(serialize_video_job(fresh), current_user)
     scheduler.remove("video", job_id)
-    return serialize_video_job(cancel_video_job(session, fresh))
+    return visible_job_payload(serialize_video_job(cancel_video_job(session, fresh)), current_user)
 
 
 @router.post("/video-jobs/{job_id}/retry-failed", response_model=VideoJobOut)
@@ -1831,7 +1856,7 @@ async def retry_failed_video_job(
     job = load_video_job(session, job_id)
     ensure_job_owner(current_user, job)
     if not any(item.status == "failed" for item in job.items):
-        return serialize_video_job(job)
+        return visible_job_payload(serialize_video_job(job), current_user)
     for item in job.items:
         if item.status == "failed":
             item.status = "queued"
@@ -1845,7 +1870,7 @@ async def retry_failed_video_job(
     except StorageUnavailableError:
         _fail_closed_compensate(request.app.state.session_factory, job.id, VideoJob, "video_job")
         raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
-    return serialize_video_job(load_video_job(session, job.id))
+    return visible_job_payload(serialize_video_job(load_video_job(session, job.id)), current_user)
 
 
 @router.get("/video-jobs/{job_id}/download")
@@ -1949,7 +1974,7 @@ def list_generation_jobs(current_user: User = Depends(get_current_user), session
     if current_user.role != "admin":
         query = query.where(GenerationJob.user_id == current_user.id)
     jobs = session.scalars(query).all()
-    return [serialize_job(job) for job in jobs]
+    return visible_job_payload([serialize_job(job) for job in jobs], current_user)
 
 
 @router.get("/generation-jobs/{job_id}", response_model=GenerationJobOut)
@@ -1960,7 +1985,7 @@ def get_generation_job(
 ) -> dict[str, Any]:
     job = load_job(session, job_id)
     ensure_job_owner(current_user, job)
-    return serialize_job(job)
+    return visible_job_payload(serialize_job(job), current_user)
 
 
 @router.post("/generation-jobs/{job_id}/cancel", response_model=GenerationJobOut)
@@ -1980,9 +2005,9 @@ def cancel_generation_job_endpoint(
     if fresh.status == "running":
         raise HTTPException(status_code=409, detail="任务正在生成中，无法取消")
     if fresh.status in JOB_FINAL_STATUSES:
-        return serialize_job(fresh)
+        return visible_job_payload(serialize_job(fresh), current_user)
     scheduler.remove("generation", job_id)
-    return serialize_job(cancel_generation_job(session, fresh))
+    return visible_job_payload(serialize_job(cancel_generation_job(session, fresh)), current_user)
 
 
 @router.post("/generation-jobs/{job_id}/retry-failed", response_model=GenerationJobOut)
@@ -1996,7 +2021,7 @@ async def retry_failed(
     ensure_job_owner(current_user, job)
     failed = [item for item in job.items if item.status == "failed"]
     if not failed:
-        return serialize_job(job)
+        return visible_job_payload(serialize_job(job), current_user)
     if job.dry_run:
         raise HTTPException(status_code=409, detail="Dryrun 不会产生可重试的模型失败项")
     if current_user.role != "admin":
@@ -2024,7 +2049,7 @@ async def retry_failed(
     except StorageUnavailableError:
         _fail_closed_compensate(request.app.state.session_factory, job.id, GenerationJob, "generation_job")
         raise HTTPException(status_code=503, detail="后台队列暂不可用，请稍后重试")
-    return serialize_job(load_job(session, job.id))
+    return visible_job_payload(serialize_job(load_job(session, job.id)), current_user)
 
 
 @router.post("/generation-items/{item_id}/retry", response_model=GenerationJobOut)
@@ -2060,7 +2085,7 @@ async def retry_single_generation_item(
         if retried_job_id:
             session.expire_all()
             job = load_job(session, retried_job_id)
-    return serialize_job(job)
+    return visible_job_payload(serialize_job(job), current_user)
 
 
 @router.get("/generation-jobs/{job_id}/download")

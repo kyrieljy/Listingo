@@ -595,7 +595,7 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
               </div>
               <div class="video-card-actions">
                 <button type="button" title="二次编辑" aria-label="二次编辑" :disabled="item.status !== 'succeeded'" @click="openVideoEdit(item)"><EditOutlined /></button>
-                <button type="button" title="脚本" aria-label="脚本" :disabled="!item.script_markdown" @click="previewItem = item"><PlayCircleOutlined /></button>
+                <button v-if="authStore.isAdmin" type="button" title="脚本" aria-label="脚本" :disabled="!item.script_markdown" @click="previewItem = item"><PlayCircleOutlined /></button>
               </div>
             </footer>
           </article>
@@ -631,7 +631,7 @@ defineExpose({ openHistoryJob, startNewTask, dryRun })
       </template>
     </main>
 
-    <a-modal :open="!!previewItem" title="视频导演脚本" :footer="null" width="760" @update:open="(open) => { if (!open) previewItem = null }">
+    <a-modal v-if="authStore.isAdmin" :open="!!previewItem" title="视频导演脚本" :footer="null" width="760" @update:open="(open) => { if (!open) previewItem = null }">
       <div v-if="previewItem" class="video-script-preview" v-html="renderMarkdown(previewItem.script_markdown || previewItem.prompt_text)" />
     </a-modal>
     <a-modal :open="!!editItemState" title="视频二次编辑" ok-text="生成新版本" cancel-text="取消" :confirm-loading="editingVideo" @ok="submitVideoEdit" @update:open="(open) => { if (!open) editItemState = null }">

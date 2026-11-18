@@ -1460,7 +1460,7 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
                   <button type="button" title="预览" aria-label="预览" :disabled="!canPreviewAplusItem(item)" @click="openPreview(item)"><EyeOutlined /></button>
                   <button type="button" title="二次编辑" aria-label="二次编辑" :disabled="!canPreviewAplusItem(item)" @click="openEdit(item)"><EditOutlined /></button>
                   <button type="button" title="编辑文字" aria-label="编辑文字" :disabled="!canPreviewAplusItem(item)" @click="openTextEdit(item)"><FileTextOutlined /></button>
-                  <button type="button" title="脚本" aria-label="脚本" :disabled="!hasScript(item)" @click="scriptItem = item"><PlayCircleOutlined /></button>
+                  <button v-if="authStore.isAdmin" type="button" title="脚本" aria-label="脚本" :disabled="!hasScript(item)" @click="scriptItem = item"><PlayCircleOutlined /></button>
                   <button v-if="item.status === 'failed'" type="button" title="重新生成" aria-label="重新生成" :disabled="isAplusItemRetrying(item.id)" @click="retrySingleAplusItem(item)"><LoadingOutlined v-if="isAplusItemRetrying(item.id)" spin /><ReloadOutlined v-else /></button>
                 </div>
               </footer>
@@ -1514,7 +1514,7 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
                 <button type="button" title="预览" aria-label="预览" :disabled="!canPreviewAplusItem(item)" @click="openPreview(item)"><EyeOutlined /></button>
                 <button type="button" title="二次编辑" aria-label="二次编辑" :disabled="!canPreviewAplusItem(item)" @click="openEdit(item)"><EditOutlined /></button>
                 <button type="button" title="编辑文字" aria-label="编辑文字" :disabled="!canPreviewAplusItem(item)" @click="openTextEdit(item)"><FileTextOutlined /></button>
-                <button type="button" title="脚本" aria-label="脚本" :disabled="!hasScript(item)" @click="scriptItem = item"><PlayCircleOutlined /></button>
+                <button v-if="authStore.isAdmin" type="button" title="脚本" aria-label="脚本" :disabled="!hasScript(item)" @click="scriptItem = item"><PlayCircleOutlined /></button>
                 <button v-if="item.status === 'failed'" type="button" title="重新生成" aria-label="重新生成" :disabled="isAplusItemRetrying(item.id)" @click="retrySingleAplusItem(item)"><LoadingOutlined v-if="isAplusItemRetrying(item.id)" spin /><ReloadOutlined v-else /></button>
               </div>
             </footer>
@@ -1576,7 +1576,7 @@ defineExpose({ openHistoryJob, openBatchSelection, startNewTask, dryRun })
     @remove="removeTextEditLine"
   />
 
-  <a-modal :open="!!scriptItem" title="A+ 图片脚本" :footer="null" width="760" @update:open="(open) => { if (!open) scriptItem = null }">
+  <a-modal v-if="authStore.isAdmin" :open="!!scriptItem" title="A+ 图片脚本" :footer="null" width="760" @update:open="(open) => { if (!open) scriptItem = null }">
     <div v-if="scriptItem" class="aplus-script-preview" v-html="renderMarkdown(scriptMarkdown(scriptItem))" />
   </a-modal>
   <BatchHostingModal v-model:open="batchOpen" business-type="aplus" :aplus-form="form" @select-history="openBatchSelection" @require-auth="emit('require-auth')" />

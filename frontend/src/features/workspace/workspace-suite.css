@@ -3496,3 +3496,19 @@
     max-height: 58vh;
   }
 }
+
+@media (min-width: 761px) {
+  .preview-canvas:has(> .empty-preview) { container-type: inline-size; }
+  .preview-canvas > .empty-preview {
+    box-sizing: border-box;
+    padding: 42px clamp(18px, 4cqw, 72px) 62px;
+    grid-template-columns: minmax(0, 460px) minmax(0, 660px);
+    gap: clamp(16px, 4cqw, 64px);
+  }
+  .empty-preview .demo-mosaic { min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .empty-preview .preview-copy { display: block; }
+  .empty-preview .preview-copy h2 { font-size: clamp(22px, 3.5cqw, 40px); }
+  @container (max-width: 590px) {
+    .preview-canvas > .empty-preview { grid-template-columns: minmax(0, 1fr); }
+  }
+}

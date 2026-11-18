@@ -87,16 +87,24 @@ const canSubmit = computed(() => {
   return agreed.value && (method.value === 'sms' ? smsValid.value : passwordValid.value)
 })
 
+let dialogRevision = 0
 watch(() => props.open, (open) => {
+  dialogRevision++
   if (!open) {
+    smsPhone.value = ''
+    smsCode.value = ''
+    passwordIdentifier.value = ''
+    password.value = ''
+    adminCode.value = ''
+    firstPassword.value = ''
+    errorText.value = ''
+    agreed.value = false
+    clearTimer('sms')
+    clearTimer('admin')
+    smsCountdown.value = adminCountdown.value = 0
     countryDropdownOpen.value = ''
     if (wechatPending.value) {
       wechatPending.value = false
-      smsPhone.value = ''
-      smsCode.value = ''
-      agreed.value = false
-      clearTimer('sms')
-      smsCountdown.value = 0
       void cancelWechatPhoneApi().catch(() => {})
     }
     return
@@ -220,19 +228,20 @@ async function requestCode(kind: 'sms' | 'admin'): Promise<void> {
   const purpose = kind === 'admin' ? 'admin' : 'login'
   sendingCode.value = kind
   errorText.value = ''
+  const revision = dialogRevision
   const binding = wechatPending.value && kind === 'sms'
   try {
     const code = binding
       ? (await sendWechatPhoneCodeApi(phone)).debug_code
       : await authStore.sendSmsCode(phone, purpose)
-    if (binding && !wechatPending.value) return
+    if (revision !== dialogRevision || (binding && !wechatPending.value)) return
     if (code) {
       if (kind === 'sms') smsCode.value = code
       else adminCode.value = code
     }
     startCountdown(kind)
   } catch (error) {
-    if (binding && !wechatPending.value) return
+    if (revision !== dialogRevision || (binding && !wechatPending.value)) return
     if (apiErrorStatus(error) === 410) wechatPending.value = false
     const text = error instanceof Error ? error.message : '验证码发送失败，请稍后再试'
     errorText.value = text

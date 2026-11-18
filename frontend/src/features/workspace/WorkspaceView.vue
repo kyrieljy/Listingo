@@ -1176,7 +1176,7 @@ async function openHistoryJob(entry: HistoryEntry) {
           </div>
           <ResultGrid :show-script="authStore.isAdmin" :items="job.items" :selected="selected" :show-watermark="includeWatermark" :aspect-ratio="String(job.params.aspect_ratio || '')" @toggle="toggleSelected" @edit="openEdit" @text-edit="openTextEdit" @preview="preview" @retry="retrySingleItem" @script="openScript"/>
         </div>
-        <div v-else class="empty-preview"><div class="preview-copy"><span>LISTINGO PRODUCT SUITE</span><h2>一件商品，生成一整套<br/>可直接上架的视觉内容</h2><p>基于商品图与销售目标自动规划画面职责，从主图、场景图到卖点证明，保持产品一致。</p></div><div class="demo-mosaic"><figure v-for="(image,index) in demoImages" :key="image"><img :src="image" alt="Listingo 演示套图" decoding="async"/><figcaption>{{ ['首屏主视觉','真实使用场景','通勤生活方式','标准商品主图'][index] }}</figcaption></figure></div><div class="empty-hint"><CloudUploadOutlined/><span>从左侧上传商品图开始</span></div></div>
+        <div v-else class="empty-preview suite-empty-preview"><div class="preview-copy"><span>LISTINGO PRODUCT SUITE</span><h2>一件商品，生成一整套<br/>可直接上架的视觉内容</h2><p>基于商品图与销售目标自动规划画面职责，从主图、场景图到卖点证明，保持产品一致。</p></div><div class="demo-mosaic"><figure v-for="(image,index) in demoImages" :key="image"><img :src="image" alt="Listingo 演示套图" decoding="async"/><figcaption>{{ ['首屏主视觉','真实使用场景','通勤生活方式','标准商品主图'][index] }}</figcaption></figure></div><div class="empty-hint"><CloudUploadOutlined/><span>从左侧上传商品图开始</span></div></div>
       </template>
     </main>
     <main v-else-if="phase==='agent'" class="preview-canvas"><DemoPhasePanel :phase="phase"/></main>

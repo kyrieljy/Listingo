@@ -36,7 +36,8 @@ import {
   type AplusModuleSelection,
   type AplusOutputSpec,
 } from './workspace-model'
-import { extractBatchProductName, type BatchTaskDraft } from './batch-model'
+import { extractBatchProductName, effectiveSuiteParams, suiteStructureParams, SUITE_STRUCTURE_KEYS, type BatchTaskDraft } from './batch-model'
+import SuiteStructureConfig from './SuiteStructureConfig.vue'
 
 const props = defineProps<{
   task: BatchTaskDraft
@@ -71,6 +72,17 @@ const taskModuleSelections = computed(() => {
   return normalizeModuleSelections(source)
 })
 const taskModuleTotal = computed(() => aplusModuleTotal(taskModuleSelections.value))
+const taskFollowsGlobalStructure = computed(() => !SUITE_STRUCTURE_KEYS.some((key) => key in props.task.overrides))
+const taskSuiteParams = computed(() => effectiveSuiteParams(props.globalParams, props.task.overrides))
+function setTaskStructureFollow(follow: boolean) {
+  const next = { ...props.task.overrides }
+  for (const key of SUITE_STRUCTURE_KEYS) delete next[key]
+  if (!follow) Object.assign(next, suiteStructureParams(props.globalParams.mode, props.globalParams.custom_counts))
+  patch({ overrides: next, confirmed: false })
+}
+function setTaskStructure(structure: Record<string, unknown>) {
+  patch({ overrides: { ...props.task.overrides, ...structure }, confirmed: false })
+}
 const imageLimitReached = computed(() => props.task.assets.length >= props.config.max_batch_item_assets || props.task.uploading)
 const requirementLabel = computed(() => props.businessType === 'aplus' ? '商品信息与要求' : '商品卖点与要求')
 const aiLabel = computed(() => props.businessType === 'aplus' ? 'AI 转写' : 'AI 帮写')
@@ -390,6 +402,10 @@ function openCopyEditor() {
       <label>生成偏好<select :value="overrideValue('model_preference') ? normalizeModelPreference(overrideValue('model_preference')) : ''" @change="setOverride('model_preference', inputValue($event))"><option value="">跟随全局-生成偏好</option><option v-for="option in modelPreferenceOptions" :key="option.key" :value="option.key">{{ option.label }}</option></select></label>
       <label v-if="businessType === 'aplus'">输出规格<select :value="outputSpecOverrideValue" @change="setOverride('output_spec', inputValue($event))"><option value="">跟随全局-输出规格</option><option v-for="spec in itemOutputSpecChoices" :key="spec.value" :value="spec.value">{{ spec.label }}</option></select></label>
     </div>
+    <section v-if="businessType === 'suite' && task.overridesOpen">
+      <label><input type="checkbox" :checked="taskFollowsGlobalStructure" @change="setTaskStructureFollow(($event.target as HTMLInputElement).checked)" />跟随全局套图结构</label>
+      <SuiteStructureConfig :params="taskSuiteParams" :disabled="taskFollowsGlobalStructure" @change="setTaskStructure" />
+    </section>
     <section v-if="businessType === 'aplus' && task.overridesOpen" class="batch-override-module-panel" :class="{ disabled: taskFollowsGlobalModules }">
       <header>
         <div>

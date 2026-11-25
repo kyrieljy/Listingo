@@ -113,6 +113,9 @@ def _suite_params(global_params: dict[str, Any], item: Any) -> dict[str, Any]:
         "dry_run": True,
     }
     params.update(global_params or {})
+    # Structure overrides replace the allocation as a whole.
+    if any(key in overrides for key in ("mode", "count", "custom_counts")):
+        params.update(mode="smart", count=7, custom_counts=None)
     params.update(overrides)
     if params.get("ratio") and not params.get("aspect_ratio"):
         params["aspect_ratio"] = params["ratio"]

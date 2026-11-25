@@ -1,6 +1,8 @@
 import type { AplusJob, Asset, BatchBusinessType, BatchItem, Job, WorkspaceConfig } from '../../api/client'
 import {
   buildAplusOutputTargets,
+  customTotal,
+  customTypeDefinitions,
   createDefaultAplusForm,
   createDefaultWorkspaceForm,
   orderedAplusModuleSelections,
@@ -142,11 +144,37 @@ export function createBatchGlobalParams(
     language: suiteForm.language,
     category: suiteForm.category,
     aspect_ratio: ratioValues[suiteForm.ratio] ?? '1:1',
-    mode: 'smart',
-    count: BATCH_SUITE_OUTPUT_COUNT,
+    ...suiteStructureParams(suiteForm.mode, suiteForm.customCounts),
     model_preference: suiteForm.modelPreference,
     dry_run: suiteForm.dryRun,
   }
+}
+
+export const SUITE_STRUCTURE_KEYS = ['mode', 'count', 'custom_counts'] as const
+
+export function suiteStructureParams(mode: unknown, counts: unknown): Record<string, unknown> {
+  const allocation = { ...(counts && typeof counts === 'object' ? counts : createDefaultWorkspaceForm().customCounts) }
+  return mode === 'custom'
+    ? { mode: 'custom', count: customTotal(allocation as WorkspaceForm['customCounts']), custom_counts: allocation }
+    : { mode: 'smart', count: BATCH_SUITE_OUTPUT_COUNT, custom_counts: null }
+}
+
+export function effectiveSuiteParams(globalParams: Record<string, unknown>, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const base = SUITE_STRUCTURE_KEYS.some((key) => key in overrides)
+    ? { ...globalParams, mode: 'smart', count: BATCH_SUITE_OUTPUT_COUNT, custom_counts: null }
+    : globalParams
+  return { ...base, ...overrides }
+}
+
+export function suiteStructureValid(params: Record<string, unknown>): boolean {
+  const count = Number(params.count ?? BATCH_SUITE_OUTPUT_COUNT)
+  if (!Number.isInteger(count) || count > 12) return false
+  if ((params.mode ?? 'smart') === 'smart') return count >= 7
+  if (params.mode !== 'custom' || count < 1 || !params.custom_counts || typeof params.custom_counts !== 'object') return false
+  const counts = params.custom_counts as Record<string, unknown>
+  const values = customTypeDefinitions.map(({ key }) => counts[key])
+  return values.every((value) => typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 4)
+    && values.reduce<number>((sum, value) => sum + Number(value), 0) === count
 }
 
 export function estimateBatchOutputs(businessType: BatchBusinessType, globalParams: Record<string, unknown>): number {
@@ -159,7 +187,7 @@ export function estimateBatchOutputs(businessType: BatchBusinessType, globalPara
     const targetCount = Array.isArray(globalParams.output_targets) ? globalParams.output_targets.length : 1
     return moduleCount > 0 && targetCount > 0 ? moduleCount * targetCount : 0
   }
-  return BATCH_SUITE_OUTPUT_COUNT
+  return suiteStructureValid(globalParams) ? Number(globalParams.count ?? BATCH_SUITE_OUTPUT_COUNT) : 0
 }
 
 export function estimateTaskOutputs(
@@ -167,7 +195,7 @@ export function estimateTaskOutputs(
   globalParams: Record<string, unknown>,
   overrides: Record<string, unknown> = {},
 ): number {
-  if (businessType !== 'aplus') return BATCH_SUITE_OUTPUT_COUNT
+  if (businessType === 'suite') return estimateBatchOutputs(businessType, effectiveSuiteParams(globalParams, overrides))
   return estimateBatchOutputs(businessType, { ...globalParams, ...overrides })
 }
 
@@ -182,7 +210,7 @@ export function batchValidationSummary(
   const baseIncompleteCount = tasks.filter((task) => {
     if (task.assets.length < 1 || task.assets.length > config.max_batch_item_assets) return true
     if (businessType === 'suite' && !task.sellingPoints.trim() && !String(globalParams.selling_points || '').trim()) return true
-    if (businessType === 'aplus' && estimateTaskOutputs(businessType, globalParams, task.overrides) < 1) return true
+    if (estimateTaskOutputs(businessType, globalParams, task.overrides) < 1) return true
     return false
   }).length
   const aplusGlobalIncomplete = businessType === 'aplus'

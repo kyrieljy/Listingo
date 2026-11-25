@@ -74,7 +74,7 @@ class GenerationJobCreate(BaseModel):
     target_audience: str = Field(default="", max_length=1000)
     brand_style: str = Field(default="", max_length=2000)
     mode: Literal["smart", "custom"] = "smart"
-    count: int = Field(default=7, ge=7, le=12)
+    count: int = Field(default=7, ge=1, le=12)
     custom_counts: "CustomImageCounts | None" = None
     model_preference: Literal["speed", "quality", "fidelity", "layout"] = "speed"
     dry_run: bool = False
@@ -95,6 +95,8 @@ class GenerationJobCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_custom_allocation(self) -> "GenerationJobCreate":
+        if self.mode == "smart" and self.count < 7:
+            raise ValueError("智能匹配数量需为 7–12 张")
         if self.mode == "custom":
             if self.custom_counts is None:
                 raise ValueError("自定义配置必须提供各类型图片数量")

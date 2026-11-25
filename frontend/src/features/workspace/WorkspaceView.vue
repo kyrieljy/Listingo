@@ -86,7 +86,7 @@ function currentItemUrl(item: JobItem | null): string | undefined {
 const currentPreview = computed(() => currentItemUrl(activeItem.value))
 const count = computed(() => generationCount(form.value))
 const uploadLimitReached = computed(() => assets.value.length >= PRODUCT_IMAGE_UPLOAD_LIMIT)
-const customValid = computed(() => form.value.mode === 'smart' || (count.value >= 7 && count.value <= 12))
+const customValid = computed(() => form.value.mode === 'smart' || (count.value >= 1 && count.value <= 12))
 const inputValid = computed(() => form.value.sellingPoints.trim().length > 0)
 const selectedModelPreference = computed(() => modelPreferenceOptions.find((option) => option.key === normalizeModelPreference(form.value.modelPreference)) ?? modelPreferenceOptions[0])
 const suiteJobActive = computed(() => Boolean(job.value && !FINAL_JOB_STATUSES.has(job.value.status)))
@@ -678,7 +678,7 @@ function adjustCustomCount(key: CustomCountKey, delta: number) {
   const current = form.value.customCounts[key]
   const total = customTotal(form.value.customCounts)
   if (delta > 0 && (current >= 4 || total >= 12)) return
-  if (delta < 0 && (current <= 0 || total <= 7)) return
+  if (delta < 0 && (current <= 0 || total <= 1)) return
   form.value.customCounts[key] = current + delta
 }
 async function waitForJob(jobId: string): Promise<Job> {
@@ -695,7 +695,7 @@ function generate() {
   trackSuiteEvent('suite_generate_click', 'click', 'suite', { asset_count: assets.value.length, valid: inputValid.value && customValid.value })
   if (!assets.value.length) { message.warning('请先上传商品图或载入演示商品'); return }
   if (!inputValid.value) { message.warning('请填写商品卖点与要求'); return }
-  if (!customValid.value) { message.warning('套图总数需为 7–12 张'); return }
+  if (!customValid.value) { message.warning('套图总数需为 1–12 张'); return }
   confirmOpen.value = true
 }
 function notifySuiteJobResult(finished: Job) {
@@ -1070,13 +1070,13 @@ async function openHistoryJob(entry: HistoryEntry) {
               <i>{{ form.mode==='smart' ? '✓' : '' }}</i><span><b>智能匹配</b><small>分析商品与平台规则，匹配最佳套图结构</small></span>
             </button>
             <button :class="{active:form.mode==='custom'}" @click="form.mode='custom'">
-              <i>{{ form.mode==='custom' ? '✓' : '' }}</i><span><b>自定义配置</b><small>自由调整各类型图片数量，至少选择 7 张</small></span>
+              <i>{{ form.mode==='custom' ? '✓' : '' }}</i><span><b>自定义配置</b><small>自由调整各类型图片数量，至少选择 1 张</small></span>
             </button>
           </div>
           <div v-if="form.mode==='custom'" class="custom-type-list">
             <article v-for="item in customTypeDefinitions" :key="item.key">
               <span><b>{{ item.label }}<em v-if="item.key==='other'">AI 智能匹配</em></b><small>{{ item.description }}</small></span>
-              <div><button :disabled="form.customCounts[item.key]===0 || count<=7" @click="adjustCustomCount(item.key,-1)">−</button><b>{{ form.customCounts[item.key] }}</b><button :disabled="form.customCounts[item.key]===4 || count>=12" @click="adjustCustomCount(item.key,1)">＋</button></div>
+              <div><button :disabled="form.customCounts[item.key]===0 || count<=1" @click="adjustCustomCount(item.key,-1)">−</button><b>{{ form.customCounts[item.key] }}</b><button :disabled="form.customCounts[item.key]===4 || count>=12" @click="adjustCustomCount(item.key,1)">＋</button></div>
             </article>
           </div>
           <label v-if="authStore.isAdmin" class="switch-row"><span><b>安全演示模式</b><small>本地模拟资产，不调用语言或图片模型</small></span><input v-model="form.dryRun" type="checkbox"/></label>

@@ -45,9 +45,11 @@ import {
 } from './workspace-model'
 import BatchHistoryDrawer from './BatchHistoryDrawer.vue'
 import BatchTaskCard from './BatchTaskCard.vue'
+import SuiteStructureConfig from './SuiteStructureConfig.vue'
 import { useAuthStore } from '../auth/auth-store'
 import {
-  BATCH_SUITE_OUTPUT_COUNT,
+  suiteStructureValid,
+  effectiveSuiteParams,
   BATCH_UPLOAD_CONCURRENCY,
   type BatchSelectionPayload,
   batchValidationSummary,
@@ -239,10 +241,6 @@ function setGlobalParam(key: string, value: unknown) {
       next.advanced_targets = ['web']
     }
     normalizeAplusParams(next)
-  } else {
-    next.count = BATCH_SUITE_OUTPUT_COUNT
-    next.mode = 'smart'
-    delete next.custom_counts
   }
   globalParams.value = next as BatchGlobalParams
 }
@@ -322,6 +320,9 @@ function validateTask(task: BatchTaskDraft, index: number): string[] {
   if (props.businessType === 'suite' && !task.sellingPoints.trim() && !String(globalParams.value.selling_points || '').trim()) {
     messages.push(`${taskLabel}缺少商品卖点与要求`)
   }
+  if (props.businessType === 'suite' && !suiteStructureValid(effectiveSuiteParams(globalParams.value, task.overrides))) {
+    messages.push(`${taskLabel}套图结构无效：自定义需1–12张，每种类型最多4张`)
+  }
   if (props.businessType === 'aplus' && estimateTaskOutputs(props.businessType, globalParams.value, task.overrides) < 1) {
     messages.push(`${taskLabel}未选择详情页模块或输出规格`)
   }
@@ -391,10 +392,10 @@ function copyTask(index: number) {
   }
   const copy: BatchTaskDraft = {
     ...task,
-    id: `batch-task-${Date.now()}-copy`,
+    id: crypto.randomUUID(),
     name: `${taskSummaryName(task, index)}（复制）`,
     assets: [...task.assets],
-    overrides: { ...task.overrides },
+    overrides: JSON.parse(JSON.stringify(task.overrides)),
     confirmed: false,
     overridesOpen: false,
     uploadError: '',
@@ -584,6 +585,8 @@ async function submitBatch() {
         <label>生成偏好<select :value="normalizeModelPreference(globalParams.model_preference)" @change="setGlobalParam('model_preference', selectValue($event))"><option v-for="option in modelPreferenceOptions" :key="option.key" :value="option.key">{{ option.label }}</option></select></label>
       </div>
 
+      <SuiteStructureConfig v-if="businessType === 'suite'" :params="globalParams" @change="globalParams = { ...globalParams, ...$event }" />
+      <p>每批最多{{ config.max_batch_tasks }}个商品任务，提交后后台排队生成</p>
       <div v-if="businessType === 'aplus'" class="batch-aplus-config">
         <div class="batch-output-head">
           <b>输出规格</b>

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from io import BytesIO
 from zipfile import ZipFile
 
 from PIL import Image
+import pytest
 
 from backend.app.models import BatchItem, BatchJob, GenerationJob
 
@@ -43,6 +45,51 @@ def test_workspace_config_exposes_batch_limits_without_secrets(client) -> None:
     assert payload["max_batch_item_assets"] == 6
     assert "secret" not in payload
     assert "api_key" not in payload
+
+
+def test_batch_custom_structure_persists_and_generates_exact_counts(client) -> None:
+    asset_id = upload_asset(client)
+    one = dict(white_background=1, scene=0, selling_point=0, other=0)
+    response = client.post('/api/v1/batch-jobs', json={
+        'business_type': 'suite',
+        'global_params': dict(mode='custom', count=1, custom_counts=one, dry_run=True),
+        'items': [dict(asset_ids=[asset_id], selling_points='Durable', overrides=override) for override in [
+            {}, dict(mode='smart', count=7),
+            dict(mode='custom', count=12, custom_counts=dict.fromkeys(one, 3)),
+        ]],
+    })
+    assert response.status_code == 201, response.text
+    batch_id = response.json()['id']
+    drain_generation_queue(client)
+    detail = client.get(f'/api/v1/batch-jobs/{batch_id}').json()
+    assert detail['status'] == 'succeeded'
+    assert [item['total_image_count'] for item in detail['items']] == [1, 7, 12]
+    assert [item['completed_image_count'] for item in detail['items']] == [1, 7, 12]
+    with client.app.state.session_factory() as session:
+        batch = session.get(BatchJob, batch_id)
+        assert json.loads(batch.items[0].params_json)['custom_counts'] == one
+        assert json.loads(batch.items[1].params_json)['mode'] == 'smart'
+
+
+@pytest.mark.parametrize('business_type', ['suite', 'aplus'])
+def test_hundred_batch_products_persist_and_rebuild_queue(client, business_type) -> None:
+    asset_id = upload_asset(client)
+    response = client.post('/api/v1/batch-jobs', json={
+        'business_type': business_type,
+        'global_params': dict(dry_run=True),
+        'items': [dict(asset_ids=[asset_id], selling_points='Durable', name=f'Product {i}') for i in range(100)],
+    })
+    assert response.status_code == 201, response.text
+    batch_id = response.json()['id']
+    detail = client.get(f'/api/v1/batch-jobs/{batch_id}').json()
+    assert len(detail['items']) == 100
+    scheduler = client.app.state.generation_queue_scheduler
+    assert scheduler.queue_length('generation') == 100
+    scheduler.rebuild()
+    assert scheduler.queue_length('generation') == 100
+    cancelled = client.post(f'/api/v1/batch-jobs/{batch_id}/cancel')
+    assert cancelled.status_code == 200
+    assert scheduler.queue_length('generation') == 0
 
 
 def test_batch_suite_dryrun_runs_items_and_downloads_grouped_zip(client) -> None:

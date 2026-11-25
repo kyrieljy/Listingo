@@ -140,8 +140,8 @@ describe('workspace model', () => {
     const payload = buildBatchPayload('suite', globalParams, [task])
 
     expect(payload.business_type).toBe('suite')
-    expect(payload.global_params).toMatchObject({ platform: 'Amazon', count: 7, mode: 'smart' })
-    expect(payload.global_params).not.toHaveProperty('custom_counts')
+    expect(payload.global_params).toMatchObject({ platform: 'Amazon', count: 12, mode: 'custom' })
+    expect(payload.global_params.custom_counts).toEqual(suiteForm.customCounts)
     expect(payload.items[0]).toMatchObject({
       asset_ids: ['asset-1'],
       name: '防滑随行保温杯',
@@ -168,7 +168,7 @@ describe('workspace model', () => {
     const summary = batchValidationSummary('suite', [complete, incomplete], { count: 8 }, config)
 
     expect(summary.taskCount).toBe(2)
-    expect(summary.estimatedImages).toBe(14)
+    expect(summary.estimatedImages).toBe(16)
     expect(summary.uploadFailedCount).toBe(1)
     expect(summary.incompleteCount).toBe(1)
     expect(estimateBatchOutputs('aplus', { module_selections: [{ count: 2 }], output_targets: [{}, {}] })).toBe(4)

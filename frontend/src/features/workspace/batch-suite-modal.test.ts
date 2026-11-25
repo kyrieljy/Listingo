@@ -8,6 +8,7 @@ import SuiteStructureConfig from './SuiteStructureConfig.vue'
 import { createDefaultWorkspaceForm } from './workspace-model'
 import type { BatchTaskDraft } from './batch-model'
 import { createBatchJob } from '../../api/client'
+import { message } from 'ant-design-vue'
 
 vi.mock('../auth/auth-store', () => ({ useAuthStore: () => ({ isAuthenticated: true, isAdmin: true, showInsufficientBeans: () => false }) }))
 vi.mock('./analytics', () => ({ trackWorkspaceEvent: vi.fn() }))
@@ -40,7 +41,13 @@ describe('batch suite modal', () => {
       await flushPromises()
     }
     expect(wrapper.findAllComponents(BatchTaskCard)).toHaveLength(100)
+    expect(wrapper.text()).not.toContain('提交后后台排队生成')
+    const warning = vi.spyOn(message, 'warning')
     await wrapper.find('.batch-add-task').trigger('click')
+    expect(warning).toHaveBeenCalledWith('单批最多 100 个商品任务')
+    wrapper.findComponent(BatchTaskCard).vm.$emit('copy')
+    await flushPromises()
+    expect(warning).toHaveBeenCalledTimes(2)
     expect(wrapper.findAllComponents(BatchTaskCard)).toHaveLength(100)
     const globalStructure = wrapper.findComponent(SuiteStructureConfig)
     expect(globalStructure.props('params')).toMatchObject({ mode: 'custom', count: 1 })

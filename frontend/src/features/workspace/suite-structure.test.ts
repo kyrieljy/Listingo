@@ -41,23 +41,42 @@ describe('suite structure', () => {
 
   it('renders one image, enforces limits, and emits an updated allocation', async () => {
     const wrapper = mount(SuiteStructureConfig, { props: { params: suiteStructureParams('custom', one) } })
-    expect(wrapper.text()).toContain('共 1 张')
+    expect(wrapper.text()).toContain('已选 1/12 张')
     expect(wrapper.find('button[aria-label="减少白底图"]').attributes('disabled')).toBeDefined()
     await wrapper.find('button[aria-label="增加场景图"]').trigger('click')
     expect(wrapper.emitted('change')?.[0]?.[0]).toMatchObject({ count: 2, custom_counts: { ...one, scene: 1 } })
+  })
+
+  it('uses mode cards and selectable type cards with the same allocation rules', async () => {
+    const wrapper = mount(SuiteStructureConfig, { props: { params: { mode: 'smart', count: 7 } } })
+    expect(wrapper.find('select').exists()).toBe(false)
+    const modes = wrapper.findAll('.suite-mode-grid button')
+    expect(modes).toHaveLength(2)
+    await modes[1]!.trigger('click')
+    const custom = wrapper.emitted('change')!.at(-1)![0] as Record<string, unknown>
+    expect(custom).toMatchObject({ mode: 'custom', count: 7 })
+    await wrapper.setProps({ params: custom })
+    expect(wrapper.findAll('.batch-module-option')).toHaveLength(4)
+    await wrapper.findAll('.aplus-module-main')[1]!.trigger('click')
+    expect(wrapper.emitted('change')!.at(-1)![0]).toMatchObject({ count: 5, custom_counts: { scene: 0 } })
+    await wrapper.setProps({ params: suiteStructureParams('custom', one) })
+    expect(wrapper.findAll('.aplus-module-main')[0]!.attributes('disabled')).toBeDefined()
+    await wrapper.setProps({ disabled: true })
+    expect(wrapper.findAll('button').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    wrapper.unmount()
   })
 
   it('freezes a single task allocation and resumes following global changes', async () => {
     const task = createBatchTaskDraft()
     task.overridesOpen = true
     const wrapper = mount(BatchTaskCard, { props: { task, index: 1, businessType: 'suite', config, globalParams: suiteStructureParams('custom', one), canDelete: false, validationMessages: [], highlighted: false } })
-    const follow = () => wrapper.find('input[type="checkbox"]')
-    await follow().setValue(false)
+    const follow = () => wrapper.find('.batch-follow-toggle')
+    await follow().trigger('click')
     const updated = wrapper.emitted('update')!.at(-1)![0] as typeof task
     expect(updated.overrides).toMatchObject({ mode: 'custom', count: 1, custom_counts: one })
     await wrapper.setProps({ task: updated, globalParams: { mode: 'smart', count: 7 } })
-    expect(wrapper.text()).toContain('共 1 张')
-    await follow().setValue(true)
+    expect(wrapper.text()).toContain('已选 1/12 张')
+    await follow().trigger('click')
     const resumed = wrapper.emitted('update')!.at(-1)![0] as typeof task
     expect(resumed.overrides).toEqual({})
     await wrapper.setProps({ task: resumed })

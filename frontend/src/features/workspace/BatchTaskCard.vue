@@ -402,9 +402,17 @@ function openCopyEditor() {
       <label>生成偏好<select :value="overrideValue('model_preference') ? normalizeModelPreference(overrideValue('model_preference')) : ''" @change="setOverride('model_preference', inputValue($event))"><option value="">跟随全局-生成偏好</option><option v-for="option in modelPreferenceOptions" :key="option.key" :value="option.key">{{ option.label }}</option></select></label>
       <label v-if="businessType === 'aplus'">输出规格<select :value="outputSpecOverrideValue" @change="setOverride('output_spec', inputValue($event))"><option value="">跟随全局-输出规格</option><option v-for="spec in itemOutputSpecChoices" :key="spec.value" :value="spec.value">{{ spec.label }}</option></select></label>
     </div>
-    <section v-if="businessType === 'suite' && task.overridesOpen">
-      <label><input type="checkbox" :checked="taskFollowsGlobalStructure" @change="setTaskStructureFollow(($event.target as HTMLInputElement).checked)" />跟随全局套图结构</label>
-      <SuiteStructureConfig :params="taskSuiteParams" :disabled="taskFollowsGlobalStructure" @change="setTaskStructure" />
+    <section v-if="businessType === 'suite' && task.overridesOpen" class="batch-override-module-panel">
+      <header>
+        <div>
+          <b>套图结构{{ taskFollowsGlobalStructure ? '-跟随全局' : '' }}</b>
+          <span>{{ taskSuiteParams.mode === 'custom' ? '自定义' : '智能匹配' }} · 已选 {{ taskSuiteParams.count }}/12 张</span>
+        </div>
+        <button type="button" class="batch-follow-toggle" :class="{ active: taskFollowsGlobalStructure }" :aria-pressed="taskFollowsGlobalStructure" @click="setTaskStructureFollow(!taskFollowsGlobalStructure)">
+          <span>跟随全局</span><i />
+        </button>
+      </header>
+      <SuiteStructureConfig :params="taskSuiteParams" :disabled="taskFollowsGlobalStructure" hide-title @change="setTaskStructure" />
     </section>
     <section v-if="businessType === 'aplus' && task.overridesOpen" class="batch-override-module-panel" :class="{ disabled: taskFollowsGlobalModules }">
       <header>

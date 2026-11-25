@@ -586,7 +586,6 @@ async function submitBatch() {
       </div>
 
       <SuiteStructureConfig v-if="businessType === 'suite'" :params="globalParams" @change="globalParams = { ...globalParams, ...$event }" />
-      <p>每批最多{{ config.max_batch_tasks }}个商品任务，提交后后台排队生成</p>
       <div v-if="businessType === 'aplus'" class="batch-aplus-config">
         <div class="batch-output-head">
           <b>输出规格</b>

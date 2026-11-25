@@ -9,8 +9,8 @@ const emit = defineEmits<{ change: [Record<string, unknown>] }>()
 const counts = computed(() => (props.params.custom_counts ?? createDefaultWorkspaceForm().customCounts) as CustomCounts)
 const total = computed(() => customTotal(counts.value))
 const modes = [
-  { value: 'smart', label: '智能匹配', description: '根据商品与平台规则，智能规划7张套图' },
-  { value: 'custom', label: '自定义配置', description: '自由选择图片类型与数量，生成1–12张' },
+  { value: 'smart', label: '智能匹配', description: '分析商品与平台规则，匹配最佳套图结构' },
+  { value: 'custom', label: '自定义配置', description: '自由调整各类型图片数量，至少选择 1 张' },
 ] as const
 function setMode(mode: string) {
   if (props.disabled) return
@@ -57,7 +57,6 @@ function toggleType(key: CustomCountKey) {
           </div>
         </article>
       </div>
-      <small class="suite-structure-hint">至少1张，最多12张，每种类型最多4张</small>
     </template>
   </section>
 </template>

@@ -2573,12 +2573,6 @@
   opacity: .62;
 }
 
-.batch-hosting-modal-wrap .suite-structure-hint {
-  display: block;
-  margin-top: 8px;
-  color: #8b93a2;
-  font-size: 12px;
-}
 
 @media (max-width: 860px) {
   .batch-hosting-modal-wrap .batch-global-panel,
